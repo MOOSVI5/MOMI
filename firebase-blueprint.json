@@ -1,0 +1,168 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user's Momi profile metadata.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "username": { "type": "string" },
+        "displayName": { "type": "string" },
+        "category": { "type": "string" },
+        "bio": { "type": "string" },
+        "website": { "type": "string" },
+        "avatarKey": { "type": "string" },
+        "followersCount": { "type": "integer" },
+        "followingCount": { "type": "integer" },
+        "isVerified": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["userId", "username", "displayName", "avatarKey", "followersCount", "followingCount", "isVerified", "createdAt"]
+    },
+    "Post": {
+      "title": "Post",
+      "description": "Photo or Clip post in the user's cloud-synced Momi feed.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "authorUsername": { "type": "string" },
+        "authorDisplayName": { "type": "string" },
+        "authorAvatarKey": { "type": "string" },
+        "authorVerified": { "type": "boolean" },
+        "location": { "type": "string" },
+        "imageKey": { "type": "string" },
+        "localImagePath": { "type": "string" },
+        "filterTag": { "type": "string", "enum": ["NONE", "BLUE", "MAROON", "MONO"] },
+        "caption": { "type": "string" },
+        "likesCount": { "type": "integer" },
+        "isLiked": { "type": "boolean" },
+        "isBookmarked": { "type": "boolean" },
+        "isFollowingAuthor": { "type": "boolean" },
+        "commentsCount": { "type": "integer" },
+        "category": { "type": "string" },
+        "isReel": { "type": "boolean" },
+        "audioTitle": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["userId", "authorUsername", "authorDisplayName", "authorAvatarKey", "authorVerified", "imageKey", "filterTag", "caption", "likesCount", "isLiked", "isBookmarked", "isFollowingAuthor", "commentsCount", "category", "isReel", "createdAt"]
+    },
+    "Comment": {
+      "title": "Comment",
+      "description": "Comment on a Momi post.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "authorUsername": { "type": "string" },
+        "authorAvatarKey": { "type": "string" },
+        "text": { "type": "string" },
+        "likesCount": { "type": "integer" },
+        "isLiked": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["userId", "authorUsername", "authorAvatarKey", "text", "likesCount", "isLiked", "createdAt"]
+    },
+    "Story": {
+      "title": "Story",
+      "description": "Ephemeral story frame in the Momi stories tray.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "username": { "type": "string" },
+        "avatarKey": { "type": "string" },
+        "imageKey": { "type": "string" },
+        "localImagePath": { "type": "string" },
+        "caption": { "type": "string" },
+        "isSeen": { "type": "boolean" },
+        "isOwnStory": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["userId", "username", "avatarKey", "imageKey", "caption", "isSeen", "isOwnStory", "createdAt"]
+    },
+    "NotificationItem": {
+      "title": "NotificationItem",
+      "description": "Activity notification item for likes, comments, and follows.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "actorUsername": { "type": "string" },
+        "actorAvatarKey": { "type": "string" },
+        "message": { "type": "string" },
+        "timeLabel": { "type": "string" },
+        "section": { "type": "string" },
+        "previewImageKey": { "type": "string" },
+        "isFollowAction": { "type": "boolean" },
+        "isFollowingBack": { "type": "boolean" },
+        "isUnread": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["userId", "actorUsername", "actorAvatarKey", "message", "timeLabel", "section", "isFollowAction", "isFollowingBack", "isUnread", "createdAt"]
+    },
+    "MessageThread": {
+      "title": "MessageThread",
+      "description": "Direct message conversation thread.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "peerUsername": { "type": "string" },
+        "peerDisplayName": { "type": "string" },
+        "peerAvatarKey": { "type": "string" },
+        "lastMessage": { "type": "string" },
+        "timeLabel": { "type": "string" },
+        "unreadCount": { "type": "integer" },
+        "isOnline": { "type": "boolean" },
+        "noteText": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["userId", "peerUsername", "peerDisplayName", "peerAvatarKey", "lastMessage", "timeLabel", "unreadCount", "isOnline", "createdAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Individual message inside a direct message thread.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "senderUsername": { "type": "string" },
+        "text": { "type": "string" },
+        "isFromMe": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["userId", "senderUsername", "text", "isFromMe", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Authenticated user's Momi profile document."
+    },
+    "/users/{userId}/posts/{postId}": {
+      "schema": { "$ref": "#/entities/Post" },
+      "description": "Posts and Clips in the user's cloud-synced feed."
+    },
+    "/users/{userId}/posts/{postId}/comments/{commentId}": {
+      "schema": { "$ref": "#/entities/Comment" },
+      "description": "Comments on a specific post."
+    },
+    "/users/{userId}/stories/{storyId}": {
+      "schema": { "$ref": "#/entities/Story" },
+      "description": "Stories visible in the user's stories tray."
+    },
+    "/users/{userId}/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/NotificationItem" },
+      "description": "User's activity notifications."
+    },
+    "/users/{userId}/threads/{threadId}": {
+      "schema": { "$ref": "#/entities/MessageThread" },
+      "description": "Direct message conversation threads."
+    },
+    "/users/{userId}/threads/{threadId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Individual chat messages within a thread."
+    }
+  }
+}

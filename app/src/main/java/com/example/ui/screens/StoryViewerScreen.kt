@@ -1,0 +1,309 @@
+package com.example.ui.screens
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.data.model.Story
+import com.example.ui.components.LumaAvatar
+import com.example.ui.components.PostMediaImage
+import com.example.ui.theme.DarkBackground
+import com.example.ui.theme.MaroonBright
+import com.example.ui.theme.SilkBlueLight
+import com.example.util.MediaAssets
+import kotlinx.coroutines.delay
+
+@Composable
+fun StoryViewerScreen(
+    stories: List<Story>,
+    initialStoryId: String,
+    onMarkSeen: (String) -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    BackHandler(onBack = onClose)
+
+    if (stories.isEmpty()) {
+        LaunchedEffect(Unit) { onClose() }
+        return
+    }
+
+    val startIndex = remember(stories, initialStoryId) {
+        stories.indexOfFirst { it.id == initialStoryId }.coerceAtLeast(0)
+    }
+    var currentIndex by remember { mutableIntStateOf(startIndex) }
+    var progress by remember { mutableFloatStateOf(0f) }
+    var isPaused by remember { mutableStateOf(false) }
+    var liked by remember(currentIndex) { mutableStateOf(false) }
+
+    val currentStory = stories.getOrNull(currentIndex) ?: stories.first()
+
+    LaunchedEffect(currentStory.id) {
+        onMarkSeen(currentStory.id)
+        progress = 0f
+    }
+
+    LaunchedEffect(currentIndex, isPaused) {
+        while (progress < 1f) {
+            delay(50L)
+            if (!isPaused) {
+                progress += 0.01f
+            }
+        }
+        if (currentIndex < stories.lastIndex) {
+            currentIndex++
+            progress = 0f
+        } else {
+            onClose()
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(DarkBackground)
+    ) {
+        PostMediaImage(
+            imageKey = currentStory.imageKey,
+            localImagePath = currentStory.localImagePath,
+            filterTag = "NONE",
+            contentDescription = "Story by ${currentStory.username}",
+            modifier = Modifier.fillMaxSize()
+        )
+
+        // Tap Zones: Left = Previous, Right = Next, LongPress = Pause
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(currentIndex, stories.size) {
+                    detectTapGestures(
+                        onPress = {
+                            isPaused = true
+                            tryAwaitRelease()
+                            isPaused = false
+                        },
+                        onTap = { offset ->
+                            if (offset.x < size.width * 0.35f) {
+                                if (currentIndex > 0) {
+                                    currentIndex--
+                                    progress = 0f
+                                } else {
+                                    progress = 0f
+                                }
+                            } else {
+                                if (currentIndex < stories.lastIndex) {
+                                    currentIndex++
+                                    progress = 0f
+                                } else {
+                                    onClose()
+                                }
+                            }
+                        }
+                    )
+                }
+        )
+
+        // Top Scrim + Progress Segments + Header
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(Color.Black.copy(alpha = 0.65f), Color.Transparent)
+                    )
+                )
+                .statusBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                stories.forEachIndexed { idx, _ ->
+                    val fill = when {
+                        idx < currentIndex -> 1f
+                        idx == currentIndex -> progress.coerceIn(0f, 1f)
+                        else -> 0f
+                    }
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(2.5.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(Color.White.copy(alpha = 0.35f))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(fill)
+                                .fillMaxHeight()
+                                .background(SilkBlueLight)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LumaAvatar(
+                        username = currentStory.username,
+                        avatarKey = currentStory.avatarKey,
+                        size = 34.dp
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = currentStory.username,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = MediaAssets.formatRelativeTime(currentStory.createdAt),
+                        color = Color.White.copy(alpha = 0.75f),
+                        fontSize = 12.sp
+                    )
+                }
+
+                IconButton(
+                    onClick = onClose,
+                    modifier = Modifier.minimumInteractiveComponentSize()
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Close,
+                        contentDescription = "Close story",
+                        tint = Color.White
+                    )
+                }
+            }
+        }
+
+        // Bottom Caption & Reaction Bar
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.72f))
+                    )
+                )
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 16.dp)
+        ) {
+            if (currentStory.caption.isNotBlank()) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color.Black.copy(alpha = 0.45f))
+                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                ) {
+                    Text(
+                        text = currentStory.caption,
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(Color.White.copy(alpha = 0.16f))
+                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                ) {
+                    Text(
+                        text = "Send a reaction to ${currentStory.username}...",
+                        color = Color.White.copy(alpha = 0.8f),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                IconButton(
+                    onClick = { liked = !liked },
+                    modifier = Modifier.minimumInteractiveComponentSize()
+                ) {
+                    Icon(
+                        imageVector = if (liked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                        contentDescription = "Like story",
+                        tint = if (liked) MaroonBright else Color.White,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+            }
+        }
+
+        AnimatedVisibility(
+            visible = liked,
+            enter = fadeIn() + slideInVertically { it / 2 },
+            exit = fadeOut() + slideOutVertically { -it / 2 },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 26.dp, bottom = 84.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Favorite,
+                contentDescription = null,
+                tint = MaroonBright,
+                modifier = Modifier.size(36.dp)
+            )
+        }
+    }
+}

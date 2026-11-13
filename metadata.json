@@ -1,0 +1,6 @@
+{
+  "name": "Momi",
+  "description": "A social photo and story sharing Android app inspired by Instagram with a maroon and silk blue color scheme.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
