@@ -1,0 +1,94 @@
+name: Build Release APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build-release-apk:
+    name: Assemble Signed Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK Platform 36.1 and Accept Licenses
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-36.1" "build-tools;36.0.0" || true
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Prepare Release Keystore
+        id: keystore
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD_SECRET: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD_SECRET: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
+            echo "STORE_PASSWORD=$STORE_PASSWORD_SECRET" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$KEY_PASSWORD_SECRET" >> "$GITHUB_ENV"
+            echo "used_secret=true" >> "$GITHUB_OUTPUT"
+          else
+            TEMP_PASS="$(openssl rand -hex 16)"
+            echo "::add-mask::$TEMP_PASS"
+            keytool -genkeypair -noprompt \
+              -keystore my-upload-key.jks \
+              -alias upload \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass "$TEMP_PASS" \
+              -keypass "$TEMP_PASS" \
+              -dname "CN=Momi, OU=App, O=Momi, L=City, ST=State, C=US"
+            echo "STORE_PASSWORD=$TEMP_PASS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$TEMP_PASS" >> "$GITHUB_ENV"
+            echo "used_secret=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Print Release Signing Certificate Fingerprints
+        shell: bash
+        run: |
+          FINGERPRINTS="$(keytool -list -v -keystore my-upload-key.jks -alias upload -storepass "$STORE_PASSWORD" | grep -E 'SHA1:|SHA256:' || true)"
+          echo "$FINGERPRINTS"
+          {
+            echo "### Release APK Signing Fingerprints"
+            echo "Add these to Firebase Console -> Project \`gen-lang-client-0132255277\` -> Android app \`com.aistudio.luma.xkpqrm\` so Google Sign-In works in release builds:"
+            echo '```'
+            echo "$FINGERPRINTS"
+            echo '```'
+            if [ "${{ steps.keystore.outputs.used_secret }}" != "true" ]; then
+              echo ""
+              echo "> **Note:** Built with a one-time runner keystore because \`KEYSTORE_BASE64\`, \`STORE_PASSWORD\`, and \`KEY_PASSWORD\` secrets were not set. For permanent store updates with the same key, save your keystore in GitHub Settings -> Secrets and variables -> Actions."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build Release APK
+        run: gradle :app:assembleRelease --no-daemon
+
+      - name: Upload Release APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: momi-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
