@@ -28,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -48,6 +49,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -60,41 +62,60 @@ import kotlinx.coroutines.flow.Flow
 
 @Composable
 fun MessagesScreen(
+    currentUserId: String,
     profile: UserProfile?,
+    allCreators: List<UserProfile>,
     threads: List<MessageThread>,
+    initialThreadId: String? = null,
     observeChatMessages: (String) -> Flow<List<ChatMessage>>,
+    onStartChat: (UserProfile, (MessageThread) -> Unit) -> Unit,
     onClearUnread: (MessageThread) -> Unit,
     onSendMessage: (MessageThread, String) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var activeThread by remember { mutableStateOf<MessageThread?>(null) }
+    var activeThreadId by remember(initialThreadId) { mutableStateOf(initialThreadId) }
+    var fallbackThread by remember { mutableStateOf<MessageThread?>(null) }
 
     BackHandler {
-        if (activeThread != null) {
-            activeThread = null
+        if (activeThreadId != null) {
+            activeThreadId = null
+            fallbackThread = null
         } else {
             onBack()
         }
     }
 
-    val openThread = activeThread
+    val openThread = activeThreadId?.let { id ->
+        threads.firstOrNull { it.id == id } ?: fallbackThread?.takeIf { it.id == id }
+    }
+
     if (openThread != null) {
-        LaunchedEffect(openThread.id) {
-            onClearUnread(openThread)
+        LaunchedEffect(openThread.id, openThread.unreadUid, openThread.unreadCount) {
+            if (openThread.isUnreadFor(currentUserId)) {
+                onClearUnread(openThread)
+            }
         }
         val messages by remember(openThread.id) {
             observeChatMessages(openThread.id)
         }.collectAsStateWithLifecycle(initialValue = emptyList())
 
         ChatThreadView(
+            currentUserId = currentUserId,
             thread = openThread,
             messages = messages,
             onSend = { text -> onSendMessage(openThread, text) },
-            onBack = { activeThread = null },
+            onBack = {
+                activeThreadId = null
+                fallbackThread = null
+            },
             modifier = modifier
         )
     } else {
+        val otherCreators = remember(allCreators, currentUserId) {
+            allCreators.filter { it.userId != currentUserId }
+        }
+
         Column(
             modifier = modifier
                 .fillMaxSize()
@@ -119,7 +140,7 @@ fun MessagesScreen(
                 }
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = profile?.username ?: "aria.studio",
+                    text = profile?.username ?: "Messages",
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onBackground
@@ -132,76 +153,87 @@ fun MessagesScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
-                // Instagram Notes Row
-                item(key = "notes_row") {
-                    LazyRow(
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        item(key = "own_note") {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                modifier = Modifier.width(74.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                                        .padding(horizontal = 8.dp, vertical = 5.dp)
+                // Active Momi Creators Row — tap any creator to start or resume a 1:1 DM
+                item(key = "creators_row") {
+                    Column {
+                        Text(
+                            text = "People on Momi",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp)
+                        )
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            item(key = "own_note") {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier.width(74.dp)
                                 ) {
-                                    Text(
-                                        text = "Editing LUTs",
-                                        fontSize = 10.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(4.dp))
-                                LumaAvatar(
-                                    username = profile?.username ?: "aria.studio",
-                                    avatarKey = profile?.avatarKey ?: "avatar_aria",
-                                    size = 58.dp
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = "Your note",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1
-                                )
-                            }
-                        }
-
-                        items(threads.filter { !it.noteText.isNullOrBlank() }, key = { "note_${it.id}" }) { thread ->
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                modifier = Modifier
-                                    .width(74.dp)
-                                    .clickable { activeThread = thread }
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .background(MaterialTheme.colorScheme.primaryContainer)
-                                        .padding(horizontal = 8.dp, vertical = 5.dp)
-                                ) {
-                                    Text(
-                                        text = thread.noteText ?: "",
-                                        fontSize = 10.sp,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Box {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                                    ) {
+                                        Text(
+                                            text = "Active",
+                                            fontSize = 10.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(4.dp))
                                     LumaAvatar(
-                                        username = thread.peerUsername,
-                                        avatarKey = thread.peerAvatarKey,
+                                        username = profile?.username ?: "you",
+                                        avatarKey = profile?.avatarKey ?: "avatar_aria",
                                         size = 58.dp
                                     )
-                                    if (thread.isOnline) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "You",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+
+                            items(otherCreators, key = { "creator_${it.userId}" }) { creator ->
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier
+                                        .width(74.dp)
+                                        .clickable {
+                                            onStartChat(creator) { opened ->
+                                                fallbackThread = opened
+                                                activeThreadId = opened.id
+                                            }
+                                        }
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .background(MaterialTheme.colorScheme.primaryContainer)
+                                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                                    ) {
+                                        Text(
+                                            text = "Message",
+                                            fontSize = 10.sp,
+                                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                            maxLines = 1
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Box {
+                                        LumaAvatar(
+                                            username = creator.username,
+                                            avatarKey = creator.avatarKey,
+                                            size = 58.dp
+                                        )
                                         Box(
                                             modifier = Modifier
                                                 .align(Alignment.BottomEnd)
@@ -211,15 +243,16 @@ fun MessagesScreen(
                                                 .border(2.dp, MaterialTheme.colorScheme.background, CircleShape)
                                         )
                                     }
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = creator.displayName.split(" ").firstOrNull().orEmpty()
+                                            .ifBlank { creator.username },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onBackground,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = thread.peerDisplayName.split(" ").first(),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onBackground,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
                             }
                         }
                     }
@@ -234,59 +267,102 @@ fun MessagesScreen(
                     )
                 }
 
-                items(threads, key = { it.id }) { thread ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { activeThread = thread }
-                            .padding(horizontal = 16.dp, vertical = 10.dp)
-                            .testTag("message_thread_${thread.id}"),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box {
-                            LumaAvatar(
-                                username = thread.peerUsername,
-                                avatarKey = thread.peerAvatarKey,
-                                size = 54.dp,
-                                hasActiveStory = true
+                if (threads.isEmpty()) {
+                    item(key = "empty_threads") {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 32.dp, vertical = 48.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Forum,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(44.dp)
                             )
-                            if (thread.isOnline) {
-                                Box(
-                                    modifier = Modifier
-                                        .align(Alignment.BottomEnd)
-                                        .size(14.dp)
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.primary)
-                                        .border(2.dp, MaterialTheme.colorScheme.background, CircleShape)
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text(
+                                text = "No conversations yet",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = if (otherCreators.isEmpty()) {
+                                    "Sign in on another phone to start messaging creators in real time."
+                                } else {
+                                    "Tap any creator above to start a real-time chat."
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                } else {
+                    items(threads, key = { it.id }) { thread ->
+                        val peerUsername = thread.peerUsernameFor(currentUserId)
+                        val peerDisplayName = thread.peerDisplayNameFor(currentUserId)
+                        val peerAvatarKey = thread.peerAvatarKeyFor(currentUserId)
+                        val isUnread = thread.isUnreadFor(currentUserId)
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    fallbackThread = thread
+                                    activeThreadId = thread.id
+                                }
+                                .padding(horizontal = 16.dp, vertical = 10.dp)
+                                .testTag("message_thread_${thread.id}"),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box {
+                                LumaAvatar(
+                                    username = peerUsername,
+                                    avatarKey = peerAvatarKey,
+                                    size = 54.dp,
+                                    hasActiveStory = true
+                                )
+                                if (thread.isOnline) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.BottomEnd)
+                                            .size(14.dp)
+                                            .clip(CircleShape)
+                                            .background(MaterialTheme.colorScheme.primary)
+                                            .border(2.dp, MaterialTheme.colorScheme.background, CircleShape)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = peerDisplayName,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = if (isUnread) FontWeight.Bold else FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onBackground
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "${thread.lastMessage} · ${thread.timeLabel}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = if (isUnread) FontWeight.SemiBold else FontWeight.Normal,
+                                    color = if (isUnread) MaterialTheme.colorScheme.onBackground else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = thread.peerDisplayName,
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = if (thread.unreadCount > 0) FontWeight.Bold else FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onBackground
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "${thread.lastMessage} · ${thread.timeLabel}",
-                                style = MaterialTheme.typography.bodySmall,
-                                fontWeight = if (thread.unreadCount > 0) FontWeight.SemiBold else FontWeight.Normal,
-                                color = if (thread.unreadCount > 0) MaterialTheme.colorScheme.onBackground else MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        if (thread.unreadCount > 0) {
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Box(
-                                modifier = Modifier
-                                    .size(9.dp)
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.tertiary)
-                            )
+                            if (isUnread) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .size(9.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.tertiary)
+                                )
+                            }
                         }
                     }
                 }
@@ -297,6 +373,7 @@ fun MessagesScreen(
 
 @Composable
 private fun ChatThreadView(
+    currentUserId: String,
     thread: MessageThread,
     messages: List<ChatMessage>,
     onSend: (String) -> Unit,
@@ -304,6 +381,9 @@ private fun ChatThreadView(
     modifier: Modifier = Modifier
 ) {
     var draft by remember { mutableStateOf("") }
+    val peerUsername = thread.peerUsernameFor(currentUserId)
+    val peerDisplayName = thread.peerDisplayNameFor(currentUserId)
+    val peerAvatarKey = thread.peerAvatarKeyFor(currentUserId)
 
     Column(
         modifier = modifier
@@ -330,19 +410,19 @@ private fun ChatThreadView(
                 )
             }
             LumaAvatar(
-                username = thread.peerUsername,
-                avatarKey = thread.peerAvatarKey,
+                username = peerUsername,
+                avatarKey = peerAvatarKey,
                 size = 36.dp
             )
             Spacer(modifier = Modifier.width(10.dp))
             Column {
                 Text(
-                    text = thread.peerDisplayName,
+                    text = peerDisplayName,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = if (thread.isOnline) "Active now" else "@${thread.peerUsername}",
+                    text = if (thread.isOnline) "Active now · @$peerUsername" else "@$peerUsername",
                     style = MaterialTheme.typography.labelSmall,
                     color = if (thread.isOnline) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -360,9 +440,10 @@ private fun ChatThreadView(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             items(messages, key = { it.id }) { msg ->
+                val isFromMe = msg.senderUid == currentUserId
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = if (msg.isFromMe) Arrangement.End else Arrangement.Start
+                    horizontalArrangement = if (isFromMe) Arrangement.End else Arrangement.Start
                 ) {
                     Box(
                         modifier = Modifier
@@ -371,12 +452,12 @@ private fun ChatThreadView(
                                 RoundedCornerShape(
                                     topStart = 18.dp,
                                     topEnd = 18.dp,
-                                    bottomStart = if (msg.isFromMe) 18.dp else 4.dp,
-                                    bottomEnd = if (msg.isFromMe) 4.dp else 18.dp
+                                    bottomStart = if (isFromMe) 18.dp else 4.dp,
+                                    bottomEnd = if (isFromMe) 4.dp else 18.dp
                                 )
                             )
                             .background(
-                                if (msg.isFromMe) MaterialTheme.colorScheme.primary
+                                if (isFromMe) MaterialTheme.colorScheme.primary
                                 else MaterialTheme.colorScheme.surfaceVariant
                             )
                             .padding(horizontal = 14.dp, vertical = 10.dp)
@@ -384,7 +465,7 @@ private fun ChatThreadView(
                         Text(
                             text = msg.text,
                             style = MaterialTheme.typography.bodyMedium,
-                            color = if (msg.isFromMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+                            color = if (isFromMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
                         )
                     }
                 }
@@ -400,7 +481,7 @@ private fun ChatThreadView(
             OutlinedTextField(
                 value = draft,
                 onValueChange = { draft = it },
-                placeholder = { Text("Message...") },
+                placeholder = { Text("Message @$peerUsername...") },
                 singleLine = true,
                 shape = RoundedCornerShape(24.dp),
                 colors = OutlinedTextFieldDefaults.colors(

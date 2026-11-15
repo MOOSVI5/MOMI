@@ -76,7 +76,7 @@ import kotlinx.coroutines.delay
 @Composable
 fun ReelsScreen(
     reels: List<Post>,
-    currentUsername: String,
+    currentUserId: String,
     onLikeToggle: (Post) -> Unit,
     onDoubleTapLike: (Post) -> Unit,
     onCommentClick: (Post) -> Unit,
@@ -115,7 +115,7 @@ fun ReelsScreen(
             val reel = reels[page]
             ReelPageItem(
                 reel = reel,
-                isOwnReel = reel.authorUsername == currentUsername,
+                isOwnReel = reel.userId == currentUserId && !reel.id.startsWith("showcase_"),
                 onLikeToggle = { onLikeToggle(reel) },
                 onDoubleTapLike = { onDoubleTapLike(reel) },
                 onCommentClick = { onCommentClick(reel) },
@@ -204,6 +204,7 @@ private fun ReelPageItem(
         PostMediaImage(
             imageKey = reel.imageKey,
             localImagePath = reel.localImagePath,
+            imageData = reel.imageData,
             filterTag = reel.filterTag,
             contentDescription = "Clip by ${reel.authorUsername}",
             modifier = Modifier

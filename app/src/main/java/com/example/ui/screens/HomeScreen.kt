@@ -315,7 +315,7 @@ fun HomeScreen(
                 items(displayedPosts, key = { it.id }) { post ->
                     PostCard(
                         post = post,
-                        isOwnPost = post.authorUsername == profile?.username,
+                        isOwnPost = post.userId == profile?.userId && !post.id.startsWith("showcase_"),
                         onLikeToggle = { onLikeToggle(post) },
                         onDoubleTapLike = { onDoubleTapLike(post) },
                         onCommentClick = { onCommentClick(post) },

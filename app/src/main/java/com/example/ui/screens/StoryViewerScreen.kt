@@ -111,6 +111,7 @@ fun StoryViewerScreen(
         PostMediaImage(
             imageKey = currentStory.imageKey,
             localImagePath = currentStory.localImagePath,
+            imageData = currentStory.imageData,
             filterTag = "NONE",
             contentDescription = "Story by ${currentStory.username}",
             modifier = Modifier.fillMaxSize()

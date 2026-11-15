@@ -1,13 +1,19 @@
 package com.example.util
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
+import android.util.Base64
 import androidx.annotation.DrawableRes
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import com.example.R
 import com.google.firebase.Timestamp
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
 
@@ -27,6 +33,20 @@ object MediaAssets {
         "img_post_architecture" to "Gallery Atrium",
         "img_post_neon_street" to "Tokyo Rain"
     )
+
+    private val avatarKeys = listOf(
+        "avatar_aria",
+        "avatar_elena",
+        "avatar_kenji",
+        "avatar_nord",
+        "avatar_matcha",
+        "avatar_sora"
+    )
+
+    fun avatarKeyForUid(uid: String): String {
+        val index = (uid.hashCode() and 0x7FFFFFFF) % avatarKeys.size
+        return avatarKeys[index]
+    }
 
     fun avatarPalette(avatarKey: String): Pair<Color, Color> = when (avatarKey) {
         "avatar_aria" -> Color(0xFF4A89B8) to Color(0xFF6B0F2B)
@@ -90,6 +110,85 @@ object MediaAssets {
                 }
             }
             outFile.absolutePath
+        }.getOrNull()
+    }
+
+    /**
+     * Scales and JPEG-compresses a local image file to a Base64 string safe for Firestore (< 450 KB)
+     * so picked gallery photos sync across devices without needing external object storage.
+     */
+    fun encodeImageFileToBase64(filePath: String?): String? {
+        if (filePath.isNullOrBlank()) return null
+        return runCatching {
+            val file = File(filePath)
+            if (!file.exists()) return null
+
+            val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(filePath, boundsOptions)
+            val srcWidth = boundsOptions.outWidth
+            val srcHeight = boundsOptions.outHeight
+            if (srcWidth <= 0 || srcHeight <= 0) return null
+
+            var sampleSize = 1
+            val maxRawDim = 1080
+            while ((srcWidth / sampleSize) > maxRawDim * 2 || (srcHeight / sampleSize) > maxRawDim * 2) {
+                sampleSize *= 2
+            }
+
+            val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            var bitmap = BitmapFactory.decodeFile(filePath, decodeOptions) ?: return null
+
+            val orientation = runCatching {
+                ExifInterface(filePath).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL
+                )
+            }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+
+            val rotationDegrees = when (orientation) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                else -> 0f
+            }
+            if (rotationDegrees != 0f) {
+                val matrix = Matrix().apply { postRotate(rotationDegrees) }
+                val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                if (rotated !== bitmap) bitmap.recycle()
+                bitmap = rotated
+            }
+
+            val maxEdge = 900
+            if (bitmap.width > maxEdge || bitmap.height > maxEdge) {
+                val scale = maxEdge.toFloat() / maxOf(bitmap.width, bitmap.height).toFloat()
+                val targetW = (bitmap.width * scale).toInt().coerceAtLeast(1)
+                val targetH = (bitmap.height * scale).toInt().coerceAtLeast(1)
+                val scaled = Bitmap.createScaledBitmap(bitmap, targetW, targetH, true)
+                if (scaled !== bitmap) bitmap.recycle()
+                bitmap = scaled
+            }
+
+            val out = ByteArrayOutputStream()
+            var quality = 78
+            while (quality >= 42) {
+                out.reset()
+                bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+                if (out.size() <= 320_000) break
+                quality -= 12
+            }
+            bitmap.recycle()
+
+            val bytes = out.toByteArray()
+            if (bytes.isEmpty()) return null
+            val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+            if (b64.length <= 680_000) b64 else null
+        }.getOrNull()
+    }
+
+    fun decodeBase64ToBytes(imageData: String?): ByteArray? {
+        if (imageData.isNullOrBlank()) return null
+        return runCatching {
+            Base64.decode(imageData, Base64.DEFAULT)
         }.getOrNull()
     }
 

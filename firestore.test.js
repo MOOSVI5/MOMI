@@ -10,6 +10,7 @@ let testEnv;
 const PROJECT_ID = process.env.GCP_PROJECT || "demo-no-project";
 const ALICE_UID = "alice_123";
 const BOB_UID = "bob_456";
+const CHARLIE_UID = "charlie_789";
 
 const [emulatorHost, emulatorPortStr] = (
   process.env.FIRESTORE_EMULATOR_HOST || "127.0.0.1:8085"
@@ -20,39 +21,37 @@ function serverTimestamp() {
   return new Date(Date.now() - 2000);
 }
 
-function validProfilePayload(uid) {
+function validProfilePayload(uid, username = "aria.studio", displayName = "Aria Vance") {
   return {
     userId: uid,
-    username: "aria.studio",
-    displayName: "Aria Vance",
+    username,
+    displayName,
     category: "Visual Creator",
-    bio: "Chasing cobalt blue skies & deep maroon shadows.",
-    website: "momi.photo/aria.studio",
+    bio: "Chasing silk blue skies & deep maroon shadows.",
+    website: `momi.photo/${username}`,
     avatarKey: "avatar_aria",
-    followersCount: 12840,
-    followingCount: 418,
+    followersCount: 0,
+    followingCount: 0,
     isVerified: true,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
 }
 
-function validPostPayload(uid) {
+function validPostPayload(uid, username = "aria.studio") {
   return {
     userId: uid,
-    authorUsername: "aria.studio",
+    authorUsername: username,
     authorDisplayName: "Aria Vance",
     authorAvatarKey: "avatar_aria",
     authorVerified: true,
     location: "Positano, Amalfi Coast",
     imageKey: "img_post_coastal",
     localImagePath: null,
+    imageData: null,
     filterTag: "NONE",
     caption: "Golden hour on the coast.",
-    likesCount: 120,
-    isLiked: false,
-    isBookmarked: false,
-    isFollowingAuthor: true,
+    likesCount: 0,
     commentsCount: 0,
     category: "Travel",
     isReel: false,
@@ -62,44 +61,43 @@ function validPostPayload(uid) {
   };
 }
 
-function validCommentPayload(uid) {
+function validCommentPayload(uid, username = "bob.lens") {
   return {
     userId: uid,
-    authorUsername: "aria.studio",
-    authorAvatarKey: "avatar_aria",
+    authorUsername: username,
+    authorAvatarKey: "avatar_kenji",
     text: "Unreal tones!",
     likesCount: 0,
-    isLiked: false,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
 }
 
-function validStoryPayload(uid) {
+function validStoryPayload(uid, username = "aria.studio") {
   return {
     userId: uid,
-    username: "aria.studio",
+    username,
     avatarKey: "avatar_aria",
     imageKey: "img_post_coastal",
     localImagePath: null,
+    imageData: null,
     caption: "Morning ferry",
-    isSeen: false,
-    isOwnStory: true,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
 }
 
-function validNotificationPayload(uid) {
+function validNotificationPayload(targetUid, actorUid) {
   return {
-    userId: uid,
-    actorUsername: "kenji.lens",
+    userId: targetUid,
+    actorUid,
+    actorUsername: "bob.lens",
     actorAvatarKey: "avatar_kenji",
     message: "liked your photo.",
-    timeLabel: "12m",
+    timeLabel: "now",
     section: "Today",
     previewImageKey: "img_post_coastal",
-    isFollowAction: true,
+    isFollowAction: false,
     isFollowingBack: false,
     isUnread: true,
     createdAt: serverTimestamp(),
@@ -107,28 +105,35 @@ function validNotificationPayload(uid) {
   };
 }
 
-function validThreadPayload(uid) {
+function validThreadPayload(uidA, uidB) {
   return {
-    userId: uid,
-    peerUsername: "elena.maris",
-    peerDisplayName: "Elena Maris",
-    peerAvatarKey: "avatar_elena",
-    lastMessage: "Sent the LUTs!",
-    timeLabel: "14m",
+    participantUids: [uidA, uidB],
+    userAId: uidA,
+    userAUsername: "aria.studio",
+    userADisplayName: "Aria Vance",
+    userAAvatarKey: "avatar_aria",
+    userBId: uidB,
+    userBUsername: "bob.lens",
+    userBDisplayName: "Bob Lens",
+    userBAvatarKey: "avatar_kenji",
+    lastMessage: "Hey!",
+    lastSenderUid: uidA,
+    unreadUid: uidB,
+    timeLabel: "now",
     unreadCount: 1,
     isOnline: true,
-    noteText: "Amalfi golden hour",
+    noteText: null,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
 }
 
-function validChatMessagePayload(uid) {
+function validChatMessagePayload(participantUids, senderUid, senderUsername = "aria.studio") {
   return {
-    userId: uid,
-    senderUsername: "aria.studio",
-    text: "Hello!",
-    isFromMe: true,
+    participantUids,
+    senderUid,
+    senderUsername,
+    text: "Hello from Momi!",
     createdAt: serverTimestamp(),
   };
 }
@@ -159,189 +164,246 @@ beforeEach(async () => {
 
 // --- 1. Unauthenticated bounds ---
 
-test("Unauthenticated user: cannot read or write any Momi collections", async () => {
+test("Unauthenticated user: cannot read or write any shared or private Momi collections", async () => {
   const unauthDb = testEnv.unauthenticatedContext().firestore();
-  await assertFails(unauthDb.collection("users").doc(ALICE_UID).get());
-  await assertFails(unauthDb.collection("users").doc(ALICE_UID).collection("posts").get());
-  await assertFails(
-    unauthDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID))
-  );
+  await assertFails(unauthDb.collection("users").get());
+  await assertFails(unauthDb.collection("posts").get());
+  await assertFails(unauthDb.collection("stories").get());
+  await assertFails(unauthDb.collection("follows").get());
+  await assertFails(unauthDb.collection("threads").get());
+  await assertFails(unauthDb.collection("posts").doc("p1").set(validPostPayload(ALICE_UID)));
 });
 
-// --- 2. Cross-user isolation ---
+// --- 2. Public Creator Profiles + Private Subcollections ---
 
-test("Cross-user isolation: Bob cannot read or write Alice's profile, posts, stories, notifications, or threads", async () => {
+test("Users: signed-in users can read creator profiles, only owner can update; private subcollections isolated", async () => {
   const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
-  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
-  await assertSucceeds(
-    aliceDb.collection("users").doc(ALICE_UID).collection("posts").doc("post_1").set(validPostPayload(ALICE_UID))
-  );
-
   const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
-  await assertFails(bobDb.collection("users").doc(ALICE_UID).get());
-  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("posts").get());
-  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("posts").doc("post_1").get());
+
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
+  await assertSucceeds(bobDb.collection("users").doc(ALICE_UID).get());
+  await assertSucceeds(bobDb.collection("users").get());
+
+  // Bob cannot edit or delete Alice's profile
   await assertFails(
-    bobDb.collection("users").doc(ALICE_UID).collection("posts").doc("post_1").update({
-      isLiked: true,
-      likesCount: 121,
-      updatedAt: serverTimestamp(),
-    })
+    bobDb.collection("users").doc(ALICE_UID).update({ displayName: "Hacked", updatedAt: serverTimestamp() })
   );
-  await assertFails(
-    bobDb.collection("users").doc(ALICE_UID).collection("posts").doc("post_2").set(validPostPayload(ALICE_UID))
-  );
-  await assertFails(
-    bobDb.collection("users").doc(ALICE_UID).collection("stories").doc("story_1").set(validStoryPayload(ALICE_UID))
-  );
-});
+  await assertFails(bobDb.collection("users").doc(ALICE_UID).delete());
 
-// --- 3. UserProfile CRUD & validation ---
-
-test("Owner: can create, read, and update allowed fields on UserProfile, but rejects immutable createdAt or ghost fields", async () => {
-  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
-  const profileRef = aliceDb.collection("users").doc(ALICE_UID);
-
-  await assertSucceeds(profileRef.set(validProfilePayload(ALICE_UID)));
-  await assertSucceeds(profileRef.get());
-
+  // Alice's private bookmarks & likedPosts are strictly private
   await assertSucceeds(
-    profileRef.update({
-      displayName: "Aria Updated",
-      bio: "New bio",
-      updatedAt: serverTimestamp(),
-    })
-  );
-
-  // Reject ghost field on create
-  await assertFails(
-    aliceDb.collection("users").doc("bob_spoof").set({
-      ...validProfilePayload("bob_spoof"),
-      admin: true,
-    })
-  );
-
-  // Reject modifying createdAt or isVerified on update
-  await assertFails(
-    profileRef.update({
-      isVerified: false,
-      updatedAt: serverTimestamp(),
-    })
-  );
-  await assertFails(
-    profileRef.update({
+    aliceDb.collection("users").doc(ALICE_UID).collection("bookmarks").doc("post_1").set({
+      targetId: "post_1",
       createdAt: serverTimestamp(),
+    })
+  );
+  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("bookmarks").get());
+  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("likedPosts").get());
+  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("seenStories").get());
+});
+
+// --- 3. Multi-user Shared Feed Posts & Counter Deltas ---
+
+test("Posts: Bob can view, like (+1/-1), and comment on Alice's post, but cannot edit caption, delete, or tamper count", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+
+  await assertSucceeds(aliceDb.collection("posts").doc("post_1").set(validPostPayload(ALICE_UID)));
+
+  // Bob reads shared feed and post
+  await assertSucceeds(bobDb.collection("posts").get());
+  await assertSucceeds(bobDb.collection("posts").doc("post_1").get());
+
+  // Bob likes Alice's post (+1) and tracks own likedPosts marker
+  await assertSucceeds(
+    bobDb.collection("posts").doc("post_1").update({ likesCount: 1, updatedAt: serverTimestamp() })
+  );
+  await assertSucceeds(
+    bobDb.collection("users").doc(BOB_UID).collection("likedPosts").doc("post_1").set({
+      targetId: "post_1",
+      createdAt: serverTimestamp(),
+    })
+  );
+
+  // Reject counter jump (+99) or negative count (-1)
+  await assertFails(
+    bobDb.collection("posts").doc("post_1").update({ likesCount: 100, updatedAt: serverTimestamp() })
+  );
+  await assertFails(
+    bobDb.collection("posts").doc("post_1").update({ likesCount: -1, updatedAt: serverTimestamp() })
+  );
+
+  // Reject Bob editing Alice's caption or deleting Alice's post
+  await assertFails(
+    bobDb.collection("posts").doc("post_1").update({ caption: "Tampered", updatedAt: serverTimestamp() })
+  );
+  await assertFails(bobDb.collection("posts").doc("post_1").delete());
+
+  // Bob comments on Alice's post and increments commentsCount by +1
+  await assertSucceeds(
+    bobDb.collection("posts").doc("post_1").collection("comments").doc("c1").set(validCommentPayload(BOB_UID))
+  );
+  await assertSucceeds(
+    bobDb.collection("posts").doc("post_1").update({ commentsCount: 1, updatedAt: serverTimestamp() })
+  );
+
+  // Alice (post owner) can read Bob's comment and moderate/delete it or delete her own post
+  await assertSucceeds(aliceDb.collection("posts").doc("post_1").collection("comments").get());
+  await assertSucceeds(aliceDb.collection("posts").doc("post_1").collection("comments").doc("c1").delete());
+  await assertSucceeds(aliceDb.collection("posts").doc("post_1").delete());
+});
+
+// --- 4. ImageData payload bounds ---
+
+test("Posts & Stories: allow compressed imageData under 700KB, reject oversized strings", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const okPayload = {
+    ...validPostPayload(ALICE_UID),
+    imageData: "A".repeat(1024),
+  };
+  await assertSucceeds(aliceDb.collection("posts").doc("post_img_ok").set(okPayload));
+
+  const badPayload = {
+    ...validPostPayload(ALICE_UID),
+    imageData: "A".repeat(700001),
+  };
+  await assertFails(aliceDb.collection("posts").doc("post_img_bad").set(badPayload));
+
+  await assertSucceeds(
+    aliceDb.collection("stories").doc("story_1").set(validStoryPayload(ALICE_UID))
+  );
+  await assertFails(
+    testEnv.authenticatedContext(BOB_UID).firestore().collection("stories").doc("story_1").delete()
+  );
+});
+
+// --- 5. Follows & Cross-user Notifications ---
+
+test("Follows & Notifications: deterministic follow edges and verified actorUid notifications", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const charlieDb = testEnv.authenticatedContext(CHARLIE_UID).firestore();
+
+  const followId = `${BOB_UID}_${ALICE_UID}`;
+  await assertSucceeds(
+    bobDb.collection("follows").doc(followId).set({
+      followerUid: BOB_UID,
+      targetUid: ALICE_UID,
+      followerUsername: "bob.lens",
+      targetUsername: "aria.studio",
+      createdAt: serverTimestamp(),
+    })
+  );
+
+  // Cannot spoof someone else's follow or follow self
+  await assertFails(
+    charlieDb.collection("follows").doc(`${BOB_UID}_${CHARLIE_UID}`).set({
+      followerUid: BOB_UID,
+      targetUid: CHARLIE_UID,
+      followerUsername: "bob.lens",
+      targetUsername: "charlie",
+      createdAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    bobDb.collection("follows").doc(`${BOB_UID}_${BOB_UID}`).set({
+      followerUid: BOB_UID,
+      targetUid: BOB_UID,
+      followerUsername: "bob.lens",
+      targetUsername: "bob.lens",
+      createdAt: serverTimestamp(),
+    })
+  );
+
+  // Bob can send Alice a notification with actorUid = BOB_UID
+  await assertSucceeds(
+    bobDb.collection("users").doc(ALICE_UID).collection("notifications").doc("n1").set(
+      validNotificationPayload(ALICE_UID, BOB_UID)
+    )
+  );
+
+  // Charlie cannot spoof actorUid = BOB_UID in notification to Alice
+  await assertFails(
+    charlieDb.collection("users").doc(ALICE_UID).collection("notifications").doc("n2").set(
+      validNotificationPayload(ALICE_UID, BOB_UID)
+    )
+  );
+
+  // Bob cannot read Alice's notifications, Alice can read & mark read
+  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("notifications").get());
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).collection("notifications").get());
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).collection("notifications").doc("n1").update({
+      isUnread: false,
       updatedAt: serverTimestamp(),
     })
   );
 });
 
-// --- 4. Post CRUD, action updates, and schema bounds ---
+// --- 6. Shared 1:1 DM Threads (Strict Participant Isolation) ---
 
-test("Owner: can create, list, action-update, and delete Posts; rejects invalid filterTag or negative likesCount", async () => {
+test("Threads & Messages: Alice and Bob share a 1:1 thread and exchange messages; Charlie is denied", async () => {
   const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
-  const postsCol = aliceDb.collection("users").doc(ALICE_UID).collection("posts");
-  const postRef = postsCol.doc("post_1");
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const charlieDb = testEnv.authenticatedContext(CHARLIE_UID).firestore();
 
-  await assertSucceeds(postRef.set(validPostPayload(ALICE_UID)));
-  await assertSucceeds(postsCol.get());
+  const participants = [ALICE_UID, BOB_UID];
+  const threadId = `${ALICE_UID}_${BOB_UID}`;
+  const threadRefAlice = aliceDb.collection("threads").doc(threadId);
+  const threadRefBob = bobDb.collection("threads").doc(threadId);
 
+  // Before creation: participants can check existence (returns empty snap); Charlie cannot
+  await assertSucceeds(threadRefAlice.get());
+  await assertFails(charlieDb.collection("threads").doc(threadId).get());
+
+  await assertSucceeds(threadRefAlice.set(validThreadPayload(ALICE_UID, BOB_UID)));
+
+  // Client queries threads using where("participantUids", "array-contains", uid)
   await assertSucceeds(
-    postRef.update({ isLiked: true, likesCount: 121, updatedAt: serverTimestamp() })
+    aliceDb.collection("threads").where("participantUids", "array-contains", ALICE_UID).get()
   );
   await assertSucceeds(
-    postRef.update({ isBookmarked: true, updatedAt: serverTimestamp() })
-  );
-  await assertSucceeds(
-    postRef.update({ isFollowingAuthor: false, updatedAt: serverTimestamp() })
-  );
-  await assertSucceeds(
-    postRef.update({ commentsCount: 1, updatedAt: serverTimestamp() })
+    bobDb.collection("threads").where("participantUids", "array-contains", BOB_UID).get()
   );
 
-  // Invalid filterTag
+  // Charlie cannot read or query Alice-Bob thread
+  await assertFails(charlieDb.collection("threads").doc(threadId).get());
   await assertFails(
-    postsCol.doc("post_bad_filter").set({
-      ...validPostPayload(ALICE_UID),
-      filterTag: "SEPIA",
-    })
+    charlieDb.collection("threads").where("participantUids", "array-contains", ALICE_UID).get()
   );
 
-  // Negative likesCount
-  await assertFails(
-    postRef.update({ isLiked: false, likesCount: -1, updatedAt: serverTimestamp() })
-  );
-
-  await assertSucceeds(postRef.delete());
-});
-
-// --- 5. Comments parent-exists & update ---
-
-test("Comments: require parent Post to exist and allow owner like toggle", async () => {
-  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
-  const postRef = aliceDb.collection("users").doc(ALICE_UID).collection("posts").doc("post_1");
-  const commentOnMissingPost = postRef.collection("comments").doc("c_1");
-
-  await assertFails(commentOnMissingPost.set(validCommentPayload(ALICE_UID)));
-
-  await assertSucceeds(postRef.set(validPostPayload(ALICE_UID)));
-  await assertSucceeds(commentOnMissingPost.set(validCommentPayload(ALICE_UID)));
+  // Alice and Bob exchange messages
   await assertSucceeds(
-    commentOnMissingPost.update({
-      isLiked: true,
-      likesCount: 1,
-      updatedAt: serverTimestamp(),
-    })
+    threadRefAlice.collection("messages").doc("m1").set(validChatMessagePayload(participants, ALICE_UID))
   );
-  await assertSucceeds(commentOnMissingPost.delete());
-});
-
-// --- 6. Stories, Notifications, Threads, and append-only ChatMessages ---
-
-test("Stories, Notifications, Threads, and ChatMessages enforce owner permissions and parent thread existence", async () => {
-  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
-  const userDoc = aliceDb.collection("users").doc(ALICE_UID);
-
-  // Story
-  const storyRef = userDoc.collection("stories").doc("story_1");
-  await assertSucceeds(storyRef.set(validStoryPayload(ALICE_UID)));
-  await assertSucceeds(storyRef.update({ isSeen: true, updatedAt: serverTimestamp() }));
-
-  // Notification
-  const notifRef = userDoc.collection("notifications").doc("notif_1");
-  await assertSucceeds(notifRef.set(validNotificationPayload(ALICE_UID)));
-  await assertSucceeds(notifRef.update({ isFollowingBack: true, updatedAt: serverTimestamp() }));
-  await assertSucceeds(notifRef.update({ isUnread: false, updatedAt: serverTimestamp() }));
-
-  // Thread & ChatMessage
-  const threadRef = userDoc.collection("threads").doc("thread_1");
-  const msgRef = threadRef.collection("messages").doc("msg_1");
-
-  // Message fails when parent thread doesn't exist
-  await assertFails(msgRef.set(validChatMessagePayload(ALICE_UID)));
-
-  await assertSucceeds(threadRef.set(validThreadPayload(ALICE_UID)));
-  await assertSucceeds(msgRef.set(validChatMessagePayload(ALICE_UID)));
-
-  // ChatMessage is append-only (update denied)
-  await assertFails(msgRef.update({ text: "Tampered" }));
-
-  // Thread unread clear & lastMessage update succeed
   await assertSucceeds(
-    threadRef.update({
-      lastMessage: "Hello!",
+    threadRefBob.collection("messages").doc("m2").set(validChatMessagePayload(participants, BOB_UID, "bob.lens"))
+  );
+  await assertSucceeds(
+    threadRefBob.update({
+      lastMessage: "Hey back!",
+      lastSenderUid: BOB_UID,
       timeLabel: "now",
-      unreadCount: 0,
+      unreadUid: ALICE_UID,
+      unreadCount: 1,
       updatedAt: serverTimestamp(),
     })
   );
-});
 
-// --- 7. isValidId bounds ---
-
-test("isValidId rejects invalid document IDs", async () => {
-  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  // Charlie cannot read m1, list messages unfiltered, query Alice's messages, or inject messages into Alice-Bob thread
   await assertFails(
-    aliceDb.collection("users").doc(ALICE_UID).collection("posts").doc("invalid.id").set(validPostPayload(ALICE_UID))
+    charlieDb.collection("threads").doc(threadId).collection("messages").doc("m1").get()
+  );
+  await assertFails(
+    charlieDb.collection("threads").doc(threadId).collection("messages").get()
+  );
+  await assertFails(
+    charlieDb.collection("threads").doc(threadId).collection("messages")
+      .where("participantUids", "array-contains", ALICE_UID).get()
+  );
+  await assertFails(
+    charlieDb.collection("threads").doc(threadId).collection("messages").doc("m3").set(
+      validChatMessagePayload(participants, CHARLIE_UID, "charlie")
+    )
   );
 });

@@ -263,6 +263,7 @@ private fun ExploreGridTile(
         PostMediaImage(
             imageKey = post.imageKey,
             localImagePath = post.localImagePath,
+            imageData = post.imageData,
             filterTag = post.filterTag,
             contentDescription = "Explore post by ${post.authorUsername}",
             modifier = Modifier.fillMaxSize()

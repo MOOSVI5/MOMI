@@ -2,7 +2,7 @@
   "entities": {
     "UserProfile": {
       "title": "UserProfile",
-      "description": "Authenticated user's Momi profile metadata.",
+      "description": "Public Momi creator profile (strictly no PII such as email or phone).",
       "type": "object",
       "properties": {
         "userId": { "type": "string" },
@@ -22,7 +22,7 @@
     },
     "Post": {
       "title": "Post",
-      "description": "Photo or Clip post in the user's cloud-synced Momi feed.",
+      "description": "Shared Photo or Clip post in the global Momi feed.",
       "type": "object",
       "properties": {
         "userId": { "type": "string" },
@@ -33,12 +33,10 @@
         "location": { "type": "string" },
         "imageKey": { "type": "string" },
         "localImagePath": { "type": "string" },
+        "imageData": { "type": "string", "description": "Compressed Base64 JPEG payload for cross-device photo sync." },
         "filterTag": { "type": "string", "enum": ["NONE", "BLUE", "MAROON", "MONO"] },
         "caption": { "type": "string" },
         "likesCount": { "type": "integer" },
-        "isLiked": { "type": "boolean" },
-        "isBookmarked": { "type": "boolean" },
-        "isFollowingAuthor": { "type": "boolean" },
         "commentsCount": { "type": "integer" },
         "category": { "type": "string" },
         "isReel": { "type": "boolean" },
@@ -46,11 +44,11 @@
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
-      "required": ["userId", "authorUsername", "authorDisplayName", "authorAvatarKey", "authorVerified", "imageKey", "filterTag", "caption", "likesCount", "isLiked", "isBookmarked", "isFollowingAuthor", "commentsCount", "category", "isReel", "createdAt"]
+      "required": ["userId", "authorUsername", "authorDisplayName", "authorAvatarKey", "authorVerified", "imageKey", "filterTag", "caption", "likesCount", "commentsCount", "category", "isReel", "createdAt"]
     },
     "Comment": {
       "title": "Comment",
-      "description": "Comment on a Momi post.",
+      "description": "Shared comment on a Momi post.",
       "type": "object",
       "properties": {
         "userId": { "type": "string" },
@@ -58,15 +56,14 @@
         "authorAvatarKey": { "type": "string" },
         "text": { "type": "string" },
         "likesCount": { "type": "integer" },
-        "isLiked": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
-      "required": ["userId", "authorUsername", "authorAvatarKey", "text", "likesCount", "isLiked", "createdAt"]
+      "required": ["userId", "authorUsername", "authorAvatarKey", "text", "likesCount", "createdAt"]
     },
     "Story": {
       "title": "Story",
-      "description": "Ephemeral story frame in the Momi stories tray.",
+      "description": "Shared story frame in the Momi stories tray.",
       "type": "object",
       "properties": {
         "userId": { "type": "string" },
@@ -74,20 +71,43 @@
         "avatarKey": { "type": "string" },
         "imageKey": { "type": "string" },
         "localImagePath": { "type": "string" },
+        "imageData": { "type": "string" },
         "caption": { "type": "string" },
-        "isSeen": { "type": "boolean" },
-        "isOwnStory": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
-      "required": ["userId", "username", "avatarKey", "imageKey", "caption", "isSeen", "isOwnStory", "createdAt"]
+      "required": ["userId", "username", "avatarKey", "imageKey", "caption", "createdAt"]
+    },
+    "FollowEdge": {
+      "title": "FollowEdge",
+      "description": "Directed follow relationship between followerUid and targetUid.",
+      "type": "object",
+      "properties": {
+        "followerUid": { "type": "string" },
+        "targetUid": { "type": "string" },
+        "followerUsername": { "type": "string" },
+        "targetUsername": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["followerUid", "targetUid", "followerUsername", "targetUsername", "createdAt"]
+    },
+    "UserInteractionMarker": {
+      "title": "UserInteractionMarker",
+      "description": "Per-user marker for liked posts, bookmarks, seen stories, or liked comments.",
+      "type": "object",
+      "properties": {
+        "targetId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["targetId", "createdAt"]
     },
     "NotificationItem": {
       "title": "NotificationItem",
-      "description": "Activity notification item for likes, comments, and follows.",
+      "description": "Cross-user activity notification delivered to recipient userId.",
       "type": "object",
       "properties": {
         "userId": { "type": "string" },
+        "actorUid": { "type": "string" },
         "actorUsername": { "type": "string" },
         "actorAvatarKey": { "type": "string" },
         "message": { "type": "string" },
@@ -100,18 +120,25 @@
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
-      "required": ["userId", "actorUsername", "actorAvatarKey", "message", "timeLabel", "section", "isFollowAction", "isFollowingBack", "isUnread", "createdAt"]
+      "required": ["userId", "actorUid", "actorUsername", "actorAvatarKey", "message", "timeLabel", "section", "isFollowAction", "isFollowingBack", "isUnread", "createdAt"]
     },
     "MessageThread": {
       "title": "MessageThread",
-      "description": "Direct message conversation thread.",
+      "description": "Shared 1:1 direct message conversation thread between two participantUids.",
       "type": "object",
       "properties": {
-        "userId": { "type": "string" },
-        "peerUsername": { "type": "string" },
-        "peerDisplayName": { "type": "string" },
-        "peerAvatarKey": { "type": "string" },
+        "participantUids": { "type": "array", "items": { "type": "string" } },
+        "userAId": { "type": "string" },
+        "userAUsername": { "type": "string" },
+        "userADisplayName": { "type": "string" },
+        "userAAvatarKey": { "type": "string" },
+        "userBId": { "type": "string" },
+        "userBUsername": { "type": "string" },
+        "userBDisplayName": { "type": "string" },
+        "userBAvatarKey": { "type": "string" },
         "lastMessage": { "type": "string" },
+        "lastSenderUid": { "type": "string" },
+        "unreadUid": { "type": "string" },
         "timeLabel": { "type": "string" },
         "unreadCount": { "type": "integer" },
         "isOnline": { "type": "boolean" },
@@ -119,50 +146,70 @@
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
-      "required": ["userId", "peerUsername", "peerDisplayName", "peerAvatarKey", "lastMessage", "timeLabel", "unreadCount", "isOnline", "createdAt"]
+      "required": ["participantUids", "userAId", "userAUsername", "userADisplayName", "userAAvatarKey", "userBId", "userBUsername", "userBDisplayName", "userBAvatarKey", "lastMessage", "lastSenderUid", "unreadUid", "timeLabel", "unreadCount", "isOnline", "createdAt"]
     },
     "ChatMessage": {
       "title": "ChatMessage",
-      "description": "Individual message inside a direct message thread.",
+      "description": "Individual message inside a shared 1:1 direct message thread.",
       "type": "object",
       "properties": {
-        "userId": { "type": "string" },
+        "participantUids": { "type": "array", "items": { "type": "string" } },
+        "senderUid": { "type": "string" },
         "senderUsername": { "type": "string" },
         "text": { "type": "string" },
-        "isFromMe": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
-      "required": ["userId", "senderUsername", "text", "isFromMe", "createdAt"]
+      "required": ["participantUids", "senderUid", "senderUsername", "text", "createdAt"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
-      "description": "Authenticated user's Momi profile document."
+      "description": "Public creator profiles readable by signed-in Momi users, writable by owner."
     },
-    "/users/{userId}/posts/{postId}": {
-      "schema": { "$ref": "#/entities/Post" },
-      "description": "Posts and Clips in the user's cloud-synced feed."
+    "/users/{userId}/likedPosts/{postId}": {
+      "schema": { "$ref": "#/entities/UserInteractionMarker" },
+      "description": "Per-user liked post state."
     },
-    "/users/{userId}/posts/{postId}/comments/{commentId}": {
-      "schema": { "$ref": "#/entities/Comment" },
-      "description": "Comments on a specific post."
+    "/users/{userId}/bookmarks/{postId}": {
+      "schema": { "$ref": "#/entities/UserInteractionMarker" },
+      "description": "Per-user saved/bookmarked post state."
     },
-    "/users/{userId}/stories/{storyId}": {
-      "schema": { "$ref": "#/entities/Story" },
-      "description": "Stories visible in the user's stories tray."
+    "/users/{userId}/seenStories/{storyId}": {
+      "schema": { "$ref": "#/entities/UserInteractionMarker" },
+      "description": "Per-user seen story markers."
+    },
+    "/users/{userId}/likedComments/{commentId}": {
+      "schema": { "$ref": "#/entities/UserInteractionMarker" },
+      "description": "Per-user liked comment markers."
     },
     "/users/{userId}/notifications/{notificationId}": {
       "schema": { "$ref": "#/entities/NotificationItem" },
-      "description": "User's activity notifications."
+      "description": "User's private inbox of notifications from cross-user activity."
     },
-    "/users/{userId}/threads/{threadId}": {
+    "/posts/{postId}": {
+      "schema": { "$ref": "#/entities/Post" },
+      "description": "Shared global Momi posts and Clips feed."
+    },
+    "/posts/{postId}/comments/{commentId}": {
+      "schema": { "$ref": "#/entities/Comment" },
+      "description": "Shared comments on a Momi post."
+    },
+    "/stories/{storyId}": {
+      "schema": { "$ref": "#/entities/Story" },
+      "description": "Shared Momi stories across creators."
+    },
+    "/follows/{followId}": {
+      "schema": { "$ref": "#/entities/FollowEdge" },
+      "description": "Directed follow relationships between Momi users."
+    },
+    "/threads/{threadId}": {
       "schema": { "$ref": "#/entities/MessageThread" },
-      "description": "Direct message conversation threads."
+      "description": "Shared 1:1 DM conversation threads."
     },
-    "/users/{userId}/threads/{threadId}/messages/{messageId}": {
+    "/threads/{threadId}/messages/{messageId}": {
       "schema": { "$ref": "#/entities/ChatMessage" },
-      "description": "Individual chat messages within a thread."
+      "description": "Messages inside a shared 1:1 DM thread."
     }
   }
 }

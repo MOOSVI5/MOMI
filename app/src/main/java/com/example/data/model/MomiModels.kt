@@ -34,12 +34,13 @@ data class Post(
     val location: String = "",
     val imageKey: String = "img_post_coastal",
     val localImagePath: String? = null,
+    val imageData: String? = null,
     val filterTag: String = "NONE",
     val caption: String = "",
     val likesCount: Long = 0L,
     @get:PropertyName("isLiked") val isLiked: Boolean = false,
     @get:PropertyName("isBookmarked") val isBookmarked: Boolean = false,
-    @get:PropertyName("isFollowingAuthor") val isFollowingAuthor: Boolean = true,
+    @get:PropertyName("isFollowingAuthor") val isFollowingAuthor: Boolean = false,
     val commentsCount: Long = 0L,
     val category: String = "For You",
     @get:PropertyName("isReel") val isReel: Boolean = false,
@@ -69,6 +70,7 @@ data class Story(
     val avatarKey: String = "avatar_aria",
     val imageKey: String = "img_post_coastal",
     val localImagePath: String? = null,
+    val imageData: String? = null,
     val caption: String = "",
     @get:PropertyName("isSeen") val isSeen: Boolean = false,
     @get:PropertyName("isOwnStory") val isOwnStory: Boolean = false,
@@ -77,9 +79,27 @@ data class Story(
 )
 
 @IgnoreExtraProperties
+data class FollowEdge(
+    @DocumentId val id: String = "",
+    val followerUid: String = "",
+    val targetUid: String = "",
+    val followerUsername: String = "",
+    val targetUsername: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
+data class InteractionMarker(
+    @DocumentId val id: String = "",
+    val targetId: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
 data class NotificationItem(
     @DocumentId val id: String = "",
     val userId: String = "",
+    val actorUid: String = "",
     val actorUsername: String = "",
     val actorAvatarKey: String = "avatar_aria",
     val message: String = "",
@@ -96,25 +116,47 @@ data class NotificationItem(
 @IgnoreExtraProperties
 data class MessageThread(
     @DocumentId val id: String = "",
-    val userId: String = "",
-    val peerUsername: String = "",
-    val peerDisplayName: String = "",
-    val peerAvatarKey: String = "avatar_aria",
+    val participantUids: List<String> = emptyList(),
+    val userAId: String = "",
+    val userAUsername: String = "",
+    val userADisplayName: String = "",
+    val userAAvatarKey: String = "avatar_aria",
+    val userBId: String = "",
+    val userBUsername: String = "",
+    val userBDisplayName: String = "",
+    val userBAvatarKey: String = "avatar_aria",
     val lastMessage: String = "",
+    val lastSenderUid: String = "",
+    val unreadUid: String = "",
     val timeLabel: String = "",
     val unreadCount: Long = 0L,
     @get:PropertyName("isOnline") val isOnline: Boolean = false,
     val noteText: String? = null,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
-)
+) {
+    fun peerUidFor(currentUid: String): String =
+        if (userAId == currentUid) userBId else userAId
+
+    fun peerUsernameFor(currentUid: String): String =
+        if (userAId == currentUid) userBUsername else userAUsername
+
+    fun peerDisplayNameFor(currentUid: String): String =
+        if (userAId == currentUid) userBDisplayName else userADisplayName
+
+    fun peerAvatarKeyFor(currentUid: String): String =
+        if (userAId == currentUid) userBAvatarKey else userAAvatarKey
+
+    fun isUnreadFor(currentUid: String): Boolean =
+        unreadUid == currentUid && unreadCount > 0L
+}
 
 @IgnoreExtraProperties
 data class ChatMessage(
     @DocumentId val id: String = "",
-    val userId: String = "",
+    val participantUids: List<String> = emptyList(),
+    val senderUid: String = "",
     val senderUsername: String = "",
     val text: String = "",
-    @get:PropertyName("isFromMe") val isFromMe: Boolean = true,
     @ServerTimestamp val createdAt: Timestamp? = null
 )

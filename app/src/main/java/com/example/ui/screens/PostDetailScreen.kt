@@ -31,7 +31,7 @@ import com.example.ui.components.PostCard
 @Composable
 fun PostDetailScreen(
     post: Post?,
-    currentUsername: String,
+    currentUserId: String,
     onBack: () -> Unit,
     onLikeToggle: (Post) -> Unit,
     onDoubleTapLike: (Post) -> Unit,
@@ -83,7 +83,7 @@ fun PostDetailScreen(
             ) {
                 PostCard(
                     post = post,
-                    isOwnPost = post.authorUsername == currentUsername,
+                    isOwnPost = post.userId == currentUserId && !post.id.startsWith("showcase_"),
                     onLikeToggle = { onLikeToggle(post) },
                     onDoubleTapLike = { onDoubleTapLike(post) },
                     onCommentClick = { onCommentClick(post) },

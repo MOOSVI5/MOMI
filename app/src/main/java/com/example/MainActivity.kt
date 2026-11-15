@@ -95,11 +95,13 @@ private object LumaRoutes {
     const val CLIPS = "clips"
     const val PROFILE = "profile"
     const val NOTIFICATIONS = "notifications"
-    const val MESSAGES = "messages"
+    const val MESSAGES = "messages?threadId={threadId}"
     const val STORY_VIEWER = "story/{storyId}"
     const val POST_DETAIL = "post/{postId}"
 
     fun createRoute(isStory: Boolean = false) = "create?story=$isStory"
+    fun messagesRoute(threadId: String? = null) =
+        if (threadId.isNullOrBlank()) "messages" else "messages?threadId=$threadId"
     fun storyRoute(storyId: String) = "story/$storyId"
     fun postDetailRoute(postId: String) = "post/$postId"
 }
@@ -206,6 +208,8 @@ private fun LumaApp(
     val currentRoute = navBackStackEntry?.destination?.route
 
     val profile by viewModel.profile.collectAsStateWithLifecycle()
+    val allCreators by viewModel.allProfiles.collectAsStateWithLifecycle()
+    val followingUids by viewModel.followingUids.collectAsStateWithLifecycle()
     val allPosts by viewModel.allPosts.collectAsStateWithLifecycle()
     val explorePosts by viewModel.explorePosts.collectAsStateWithLifecycle()
     val reels by viewModel.reels.collectAsStateWithLifecycle()
@@ -278,7 +282,7 @@ private fun LumaApp(
                                 icon = {
                                     if (tab.route == LumaRoutes.PROFILE) {
                                         LumaAvatar(
-                                            username = profile?.username ?: "aria.studio",
+                                            username = profile?.username ?: "momi",
                                             avatarKey = profile?.avatarKey ?: "avatar_aria",
                                             size = 26.dp,
                                             hasActiveStory = selected
@@ -345,7 +349,7 @@ private fun LumaApp(
                                 unreadNotificationCount = unreadNotifications,
                                 unreadMessageCount = unreadMessages,
                                 onOpenNotifications = { navController.navigate(LumaRoutes.NOTIFICATIONS) },
-                                onOpenMessages = { navController.navigate(LumaRoutes.MESSAGES) },
+                                onOpenMessages = { navController.navigate(LumaRoutes.messagesRoute()) },
                                 onOpenStory = { story -> navController.navigate(LumaRoutes.storyRoute(story.id)) },
                                 onAddStoryClick = { navController.navigate(LumaRoutes.createRoute(true)) },
                                 onLikeToggle = { viewModel.toggleLike(it) },
@@ -361,7 +365,13 @@ private fun LumaApp(
                                         )
                                     }
                                 },
-                                onFollowToggle = { viewModel.toggleFollow(it.authorUsername, it.isFollowingAuthor) },
+                                onFollowToggle = {
+                                    viewModel.toggleFollow(
+                                        targetUid = it.userId,
+                                        targetUsername = it.authorUsername,
+                                        currentlyFollowing = it.isFollowingAuthor
+                                    )
+                                },
                                 onDeletePost = { viewModel.deletePost(it.id) },
                                 onAuthorClick = { username ->
                                     if (username == profile?.username) {
@@ -426,19 +436,27 @@ private fun LumaApp(
                         composable(LumaRoutes.CLIPS) {
                             ReelsScreen(
                                 reels = reels,
-                                currentUsername = profile?.username ?: "aria.studio",
+                                currentUserId = viewModel.currentUserId,
                                 onLikeToggle = { viewModel.toggleLike(it) },
                                 onDoubleTapLike = { viewModel.doubleTapLike(it) },
                                 onCommentClick = { viewModel.openComments(it.id) },
                                 onShareClick = { sharePostExternally(it) },
                                 onBookmarkToggle = { viewModel.toggleBookmark(it) },
-                                onFollowToggle = { viewModel.toggleFollow(it.authorUsername, it.isFollowingAuthor) }
+                                onFollowToggle = {
+                                    viewModel.toggleFollow(
+                                        targetUid = it.userId,
+                                        targetUsername = it.authorUsername,
+                                        currentlyFollowing = it.isFollowingAuthor
+                                    )
+                                }
                             )
                         }
 
                         composable(LumaRoutes.PROFILE) {
                             ProfileScreen(
                                 profile = profile,
+                                allCreators = allCreators,
+                                followingUids = followingUids,
                                 allPosts = allPosts,
                                 themePreference = themePreference,
                                 onThemeChange = viewModel::setThemePreference,
@@ -447,7 +465,7 @@ private fun LumaApp(
                                     navController.navigate(LumaRoutes.postDetailRoute(post.id))
                                 },
                                 onShareProfile = {
-                                    val handle = profile?.username ?: "aria.studio"
+                                    val handle = profile?.username ?: "momi.creator"
                                     shareText(
                                         context = context,
                                         subject = "Follow @$handle on Momi",
@@ -455,6 +473,18 @@ private fun LumaApp(
                                     )
                                 },
                                 onUpdateProfile = viewModel::updateProfile,
+                                onToggleFollowCreator = { creator, isFollowing ->
+                                    viewModel.toggleFollow(
+                                        targetUid = creator.userId,
+                                        targetUsername = creator.username,
+                                        currentlyFollowing = isFollowing
+                                    )
+                                },
+                                onMessageCreator = { creator ->
+                                    viewModel.startDirectChat(creator) { thread ->
+                                        navController.navigate(LumaRoutes.messagesRoute(thread.id))
+                                    }
+                                },
                                 onSignOut = onSignOut
                             )
                         }
@@ -468,11 +498,25 @@ private fun LumaApp(
                             )
                         }
 
-                        composable(LumaRoutes.MESSAGES) {
+                        composable(
+                            route = LumaRoutes.MESSAGES,
+                            arguments = listOf(
+                                navArgument("threadId") {
+                                    type = NavType.StringType
+                                    nullable = true
+                                    defaultValue = null
+                                }
+                            )
+                        ) { backStackEntry ->
+                            val initialThreadId = backStackEntry.arguments?.getString("threadId")
                             MessagesScreen(
+                                currentUserId = viewModel.currentUserId,
                                 profile = profile,
+                                allCreators = allCreators,
                                 threads = messageThreads,
+                                initialThreadId = initialThreadId,
                                 observeChatMessages = viewModel::observeChatMessages,
+                                onStartChat = viewModel::startDirectChat,
                                 onClearUnread = viewModel::clearThreadUnread,
                                 onSendMessage = viewModel::sendMessage,
                                 onBack = { navController.popBackStack() }
@@ -503,14 +547,20 @@ private fun LumaApp(
 
                             PostDetailScreen(
                                 post = post,
-                                currentUsername = profile?.username ?: "aria.studio",
+                                currentUserId = viewModel.currentUserId,
                                 onBack = { navController.popBackStack() },
                                 onLikeToggle = { viewModel.toggleLike(it) },
                                 onDoubleTapLike = { viewModel.doubleTapLike(it) },
                                 onCommentClick = { viewModel.openComments(it.id) },
                                 onShareClick = { sharePostExternally(it) },
                                 onBookmarkToggle = { viewModel.toggleBookmark(it) },
-                                onFollowToggle = { viewModel.toggleFollow(it.authorUsername, it.isFollowingAuthor) },
+                                onFollowToggle = {
+                                    viewModel.toggleFollow(
+                                        targetUid = it.userId,
+                                        targetUsername = it.authorUsername,
+                                        currentlyFollowing = it.isFollowingAuthor
+                                    )
+                                },
                                 onDeletePost = { viewModel.deletePost(it.id) }
                             )
                         }

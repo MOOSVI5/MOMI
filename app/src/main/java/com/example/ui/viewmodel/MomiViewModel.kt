@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.model.ChatMessage
 import com.example.data.model.Comment
+import com.example.data.model.FollowEdge
 import com.example.data.model.MessageThread
 import com.example.data.model.NotificationItem
 import com.example.data.model.Post
@@ -12,8 +13,11 @@ import com.example.data.model.Story
 import com.example.data.model.UserProfile
 import com.example.data.repository.MomiFirestoreRepository
 import com.example.ui.theme.ThemePreference
+import com.example.util.MediaAssets
+import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,6 +31,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 sealed interface StreamUiState<out T> {
     data object Loading : StreamUiState<Nothing>
@@ -37,7 +42,7 @@ sealed interface StreamUiState<out T> {
 @OptIn(ExperimentalCoroutinesApi::class)
 class MomiViewModel(
     private val repository: MomiFirestoreRepository,
-    private val currentUserId: String,
+    val currentUserId: String,
     initialDisplayName: String?,
     initialEmail: String?
 ) : ViewModel() {
@@ -56,8 +61,40 @@ class MomiViewModel(
         }
     }
 
-    val profileState: StateFlow<StreamUiState<UserProfile?>> = repository.observeProfile(currentUserId)
-        .map<UserProfile?, StreamUiState<UserProfile?>> { StreamUiState.Success(it) }
+    val allProfiles: StateFlow<List<UserProfile>> = repository.observeAllProfiles(currentUserId)
+        .catch { error ->
+            val root = unwrapOrRethrowCancellation(error)
+            Log.w(TAG, "Error observing creators", root)
+            emit(emptyList())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
+
+    val follows: StateFlow<List<FollowEdge>> = repository.observeFollows(currentUserId)
+        .catch { error ->
+            val root = unwrapOrRethrowCancellation(error)
+            Log.w(TAG, "Error observing follows", root)
+            emit(emptyList())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
+
+    val followingUids: StateFlow<Set<String>> = follows
+        .map { edges ->
+            edges.filter { it.followerUid == currentUserId }.map { it.targetUid }.toSet()
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
+
+    val profileState: StateFlow<StreamUiState<UserProfile?>> = combine(
+        repository.observeProfile(currentUserId),
+        follows
+    ) { rawProfile, allFollows ->
+        val hydrated = rawProfile?.let { p ->
+            p.copy(
+                followersCount = allFollows.count { it.targetUid == currentUserId }.toLong(),
+                followingCount = allFollows.count { it.followerUid == currentUserId }.toLong()
+            )
+        }
+        StreamUiState.Success(hydrated) as StreamUiState<UserProfile?>
+    }
         .catch { error ->
             val root = unwrapOrRethrowCancellation(error)
             Log.w(TAG, "Error observing profile", root)
@@ -69,8 +106,49 @@ class MomiViewModel(
         .map { (it as? StreamUiState.Success)?.data }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), null)
 
-    val allPostsState: StateFlow<StreamUiState<List<Post>>> = repository.observeAllPosts(currentUserId)
-        .map<List<Post>, StreamUiState<List<Post>>> { StreamUiState.Success(it) }
+    private val likedPostIds: StateFlow<Set<String>> = repository.observeLikedPostIds(currentUserId)
+        .catch { error ->
+            unwrapOrRethrowCancellation(error)
+            emit(emptySet())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
+
+    private val bookmarkedPostIds: StateFlow<Set<String>> = repository.observeBookmarkedPostIds(currentUserId)
+        .catch { error ->
+            unwrapOrRethrowCancellation(error)
+            emit(emptySet())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
+
+    private val seenStoryIds: StateFlow<Set<String>> = repository.observeSeenStoryIds(currentUserId)
+        .catch { error ->
+            unwrapOrRethrowCancellation(error)
+            emit(emptySet())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
+
+    private val likedCommentIds: StateFlow<Set<String>> = repository.observeLikedCommentIds(currentUserId)
+        .catch { error ->
+            unwrapOrRethrowCancellation(error)
+            emit(emptySet())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
+
+    val allPostsState: StateFlow<StreamUiState<List<Post>>> = combine(
+        repository.observeAllPosts(currentUserId),
+        likedPostIds,
+        bookmarkedPostIds,
+        followingUids
+    ) { posts, liked, bookmarked, following ->
+        val enriched = posts.map { post ->
+            post.copy(
+                isLiked = liked.contains(post.id),
+                isBookmarked = bookmarked.contains(post.id),
+                isFollowingAuthor = post.userId == currentUserId || following.contains(post.userId)
+            )
+        }
+        StreamUiState.Success(enriched) as StreamUiState<List<Post>>
+    }
         .catch { error ->
             val root = unwrapOrRethrowCancellation(error)
             Log.w(TAG, "Error observing posts", root)
@@ -87,7 +165,24 @@ class MomiViewModel(
         .map { list -> list.filter { it.isReel } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
-    val stories: StateFlow<List<Story>> = repository.observeStories(currentUserId)
+    val stories: StateFlow<List<Story>> = combine(
+        repository.observeStories(currentUserId),
+        seenStoryIds
+    ) { rawStories, seen ->
+        rawStories
+            .map { story ->
+                story.copy(
+                    isOwnStory = story.userId == currentUserId,
+                    isSeen = seen.contains(story.id)
+                )
+            }
+            .sortedWith(
+                compareByDescending<Story> { it.isOwnStory }
+                    .thenBy { it.isSeen }
+                    .thenByDescending { it.createdAt ?: Timestamp(0, 0) }
+                    .thenBy { it.id }
+            )
+    }
         .catch { error ->
             val root = unwrapOrRethrowCancellation(error)
             Log.w(TAG, "Error observing stories", root)
@@ -95,7 +190,18 @@ class MomiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
-    val notifications: StateFlow<List<NotificationItem>> = repository.observeNotifications(currentUserId)
+    val notifications: StateFlow<List<NotificationItem>> = combine(
+        repository.observeNotifications(currentUserId),
+        followingUids
+    ) { items, following ->
+        items.map { item ->
+            if (item.isFollowAction && item.actorUid.isNotBlank()) {
+                item.copy(isFollowingBack = following.contains(item.actorUid))
+            } else {
+                item
+            }
+        }
+    }
         .catch { error ->
             val root = unwrapOrRethrowCancellation(error)
             Log.w(TAG, "Error observing notifications", root)
@@ -116,7 +222,9 @@ class MomiViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val unreadMessageCount: StateFlow<Int> = messageThreads
-        .map { list -> list.sumOf { it.unreadCount.toInt() } }
+        .map { list ->
+            list.filter { it.isUnreadFor(currentUserId) }.sumOf { it.unreadCount.toInt() }
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), 0)
 
     private val _themePreference = MutableStateFlow(ThemePreference.SYSTEM)
@@ -160,7 +268,12 @@ class MomiViewModel(
             if (postId == null) {
                 flowOf(emptyList())
             } else {
-                repository.observeComments(currentUserId, postId).catch { error ->
+                combine(
+                    repository.observeComments(currentUserId, postId),
+                    likedCommentIds
+                ) { comments, liked ->
+                    comments.map { it.copy(isLiked = liked.contains(it.id)) }
+                }.catch { error ->
                     val root = unwrapOrRethrowCancellation(error)
                     Log.w(TAG, "Error observing comments", root)
                     emit(emptyList())
@@ -169,12 +282,22 @@ class MomiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
-    fun observePost(postId: String): Flow<Post?> =
-        repository.observePost(currentUserId, postId).catch { error ->
-            val root = unwrapOrRethrowCancellation(error)
-            Log.w(TAG, "Error observing post $postId", root)
-            emit(null)
-        }
+    fun observePost(postId: String): Flow<Post?> = combine(
+        repository.observePost(currentUserId, postId),
+        likedPostIds,
+        bookmarkedPostIds,
+        followingUids
+    ) { rawPost, liked, bookmarked, following ->
+        rawPost?.copy(
+            isLiked = liked.contains(rawPost.id),
+            isBookmarked = bookmarked.contains(rawPost.id),
+            isFollowingAuthor = rawPost.userId == currentUserId || following.contains(rawPost.userId)
+        )
+    }.catch { error ->
+        val root = unwrapOrRethrowCancellation(error)
+        Log.w(TAG, "Error observing post $postId", root)
+        emit(null)
+    }
 
     fun observeChatMessages(threadId: String): Flow<List<ChatMessage>> =
         repository.observeChatMessages(currentUserId, threadId).catch { error ->
@@ -200,16 +323,18 @@ class MomiViewModel(
     }
 
     fun toggleLike(post: Post) {
+        val currentProfile = profile.value
         viewModelScope.launch {
-            repository.toggleLike(post).onFailure {
+            repository.toggleLike(post, currentProfile).onFailure {
                 _errorMessage.value = unwrapErrorMessage(it, "Could not update like")
             }
         }
     }
 
     fun doubleTapLike(post: Post) {
+        val currentProfile = profile.value
         viewModelScope.launch {
-            repository.setLiked(post).onFailure {
+            repository.setLiked(post, currentProfile).onFailure {
                 _errorMessage.value = unwrapErrorMessage(it, "Could not like post")
             }
         }
@@ -223,11 +348,14 @@ class MomiViewModel(
         }
     }
 
-    fun toggleFollow(username: String, currentlyFollowing: Boolean) {
+    fun toggleFollow(targetUid: String, targetUsername: String, currentlyFollowing: Boolean) {
+        val currentProfile = profile.value ?: return
+        if (targetUid.isBlank() || targetUid == currentUserId) return
         viewModelScope.launch {
-            repository.toggleFollow(username, currentlyFollowing).onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not update follow state")
-            }
+            repository.toggleFollow(currentProfile, targetUid, targetUsername, currentlyFollowing)
+                .onFailure {
+                    _errorMessage.value = unwrapErrorMessage(it, "Could not update follow state")
+                }
         }
     }
 
@@ -243,7 +371,7 @@ class MomiViewModel(
         val post = activePostForComments.value ?: return
         val currentProfile = profile.value ?: return
         viewModelScope.launch {
-            repository.addComment(post, currentProfile.username, currentProfile.avatarKey, text)
+            repository.addComment(post, currentProfile, text)
                 .onFailure {
                     _errorMessage.value = unwrapErrorMessage(it, "Could not post comment")
                 }
@@ -271,10 +399,14 @@ class MomiViewModel(
     ) {
         val currentProfile = profile.value ?: return
         viewModelScope.launch {
+            val encodedImage = withContext(Dispatchers.IO) {
+                MediaAssets.encodeImageFileToBase64(localImagePath)
+            }
             repository.createPost(
                 profile = currentProfile,
                 imageKey = imageKey,
                 localImagePath = localImagePath,
+                imageData = encodedImage,
                 filterTag = filterTag,
                 caption = caption,
                 location = location,
@@ -296,12 +428,20 @@ class MomiViewModel(
     ) {
         val currentProfile = profile.value ?: return
         viewModelScope.launch {
-            repository.createStory(currentProfile, imageKey, localImagePath, caption)
-                .onSuccess {
-                    onComplete()
-                }.onFailure {
-                    _errorMessage.value = unwrapErrorMessage(it, "Could not share story")
-                }
+            val encodedImage = withContext(Dispatchers.IO) {
+                MediaAssets.encodeImageFileToBase64(localImagePath)
+            }
+            repository.createStory(
+                profile = currentProfile,
+                imageKey = imageKey,
+                localImagePath = localImagePath,
+                imageData = encodedImage,
+                caption = caption
+            ).onSuccess {
+                onComplete()
+            }.onFailure {
+                _errorMessage.value = unwrapErrorMessage(it, "Could not share story")
+            }
         }
     }
 
@@ -336,8 +476,9 @@ class MomiViewModel(
     }
 
     fun toggleNotificationFollow(notification: NotificationItem) {
+        val currentProfile = profile.value ?: return
         viewModelScope.launch {
-            repository.toggleNotificationFollow(notification).onFailure {
+            repository.toggleNotificationFollow(currentProfile, notification).onFailure {
                 _errorMessage.value = unwrapErrorMessage(it, "Could not update follow state")
             }
         }
@@ -349,10 +490,21 @@ class MomiViewModel(
         }
     }
 
-    fun sendMessage(thread: MessageThread, text: String) {
-        val username = profile.value?.username ?: "aria.studio"
+    fun startDirectChat(peerProfile: UserProfile, onOpened: (MessageThread) -> Unit) {
+        val currentProfile = profile.value ?: return
         viewModelScope.launch {
-            repository.sendMessage(thread, username, text).onFailure {
+            repository.openOrCreateThread(currentProfile, peerProfile)
+                .onSuccess(onOpened)
+                .onFailure {
+                    _errorMessage.value = unwrapErrorMessage(it, "Could not open chat")
+                }
+        }
+    }
+
+    fun sendMessage(thread: MessageThread, text: String) {
+        val currentProfile = profile.value ?: return
+        viewModelScope.launch {
+            repository.sendMessage(thread, currentProfile, text).onFailure {
                 _errorMessage.value = unwrapErrorMessage(it, "Could not send message")
             }
         }

@@ -4,6 +4,8 @@ import android.content.Context
 import com.example.R
 import com.example.data.model.ChatMessage
 import com.example.data.model.Comment
+import com.example.data.model.FollowEdge
+import com.example.data.model.InteractionMarker
 import com.example.data.model.MessageThread
 import com.example.data.model.NotificationItem
 import com.example.data.model.Post
@@ -11,6 +13,7 @@ import com.example.data.model.Story
 import com.example.data.model.UserProfile
 import com.example.data.remote.OperationType
 import com.example.data.remote.handleFirestoreError
+import com.example.util.MediaAssets
 import com.google.firebase.Firebase
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.auth
@@ -43,6 +46,10 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     }
 
     private fun userDoc(uid: String) = db.collection("users").document(uid)
+    private fun postsCol() = db.collection("posts")
+    private fun storiesCol() = db.collection("stories")
+    private fun followsCol() = db.collection("follows")
+    private fun threadsCol() = db.collection("threads")
 
     fun observeProfile(userId: String): Flow<UserProfile?> {
         val docRef = userDoc(userId)
@@ -61,8 +68,25 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             }
     }
 
-    fun observeAllPosts(userId: String): Flow<List<Post>> {
-        val colRef = userDoc(userId).collection("posts")
+    fun observeAllProfiles(currentUid: String): Flow<List<UserProfile>> {
+        val colRef = db.collection("users")
+        val path = colRef.path
+        return colRef.snapshots(MetadataChanges.EXCLUDE)
+            .map { snapshot ->
+                snapshot.toObjects(UserProfile::class.java, ServerTimestampBehavior.ESTIMATE)
+                    .sortedWith(
+                        compareByDescending<UserProfile> { it.userId == currentUid }
+                            .thenBy { it.username }
+                    )
+            }
+            .catch { error ->
+                logFlowErrorIfSignedIn(currentUid, error, OperationType.LIST, path)
+                throw error
+            }
+    }
+
+    fun observeAllPosts(currentUid: String): Flow<List<Post>> {
+        val colRef = postsCol()
         val path = colRef.path
         return colRef
             .orderBy("createdAt", Query.Direction.DESCENDING)
@@ -75,13 +99,13 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                     )
             }
             .catch { error ->
-                logFlowErrorIfSignedIn(userId, error, OperationType.LIST, path)
+                logFlowErrorIfSignedIn(currentUid, error, OperationType.LIST, path)
                 throw error
             }
     }
 
-    fun observePost(userId: String, postId: String): Flow<Post?> {
-        val docRef = userDoc(userId).collection("posts").document(postId)
+    fun observePost(currentUid: String, postId: String): Flow<Post?> {
+        val docRef = postsCol().document(postId)
         val path = docRef.path
         return docRef.snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
@@ -92,13 +116,13 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                 }
             }
             .catch { error ->
-                logFlowErrorIfSignedIn(userId, error, OperationType.GET, path)
+                logFlowErrorIfSignedIn(currentUid, error, OperationType.GET, path)
                 throw error
             }
     }
 
-    fun observeComments(userId: String, postId: String): Flow<List<Comment>> {
-        val colRef = userDoc(userId).collection("posts").document(postId).collection("comments")
+    fun observeComments(currentUid: String, postId: String): Flow<List<Comment>> {
+        val colRef = postsCol().document(postId).collection("comments")
         val path = colRef.path
         return colRef
             .orderBy("createdAt", Query.Direction.ASCENDING)
@@ -111,13 +135,13 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                     )
             }
             .catch { error ->
-                logFlowErrorIfSignedIn(userId, error, OperationType.LIST, path)
+                logFlowErrorIfSignedIn(currentUid, error, OperationType.LIST, path)
                 throw error
             }
     }
 
-    fun observeStories(userId: String): Flow<List<Story>> {
-        val colRef = userDoc(userId).collection("stories")
+    fun observeStories(currentUid: String): Flow<List<Story>> {
+        val colRef = storiesCol()
         val path = colRef.path
         return colRef
             .orderBy("createdAt", Query.Direction.DESCENDING)
@@ -125,11 +149,49 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             .map { snapshot ->
                 snapshot.toObjects(Story::class.java, ServerTimestampBehavior.ESTIMATE)
                     .sortedWith(
-                        compareByDescending<Story> { it.isOwnStory }
-                            .thenBy { it.isSeen }
-                            .thenByDescending { it.createdAt ?: Timestamp(0, 0) }
+                        compareByDescending<Story> { it.createdAt ?: Timestamp(0, 0) }
                             .thenBy { it.id }
                     )
+            }
+            .catch { error ->
+                logFlowErrorIfSignedIn(currentUid, error, OperationType.LIST, path)
+                throw error
+            }
+    }
+
+    fun observeFollows(currentUid: String): Flow<List<FollowEdge>> {
+        val colRef = followsCol()
+        val path = colRef.path
+        return colRef.snapshots(MetadataChanges.EXCLUDE)
+            .map { snapshot ->
+                snapshot.toObjects(FollowEdge::class.java, ServerTimestampBehavior.ESTIMATE)
+            }
+            .catch { error ->
+                logFlowErrorIfSignedIn(currentUid, error, OperationType.LIST, path)
+                throw error
+            }
+    }
+
+    fun observeLikedPostIds(userId: String): Flow<Set<String>> =
+        observeMarkerIds(userId, "likedPosts")
+
+    fun observeBookmarkedPostIds(userId: String): Flow<Set<String>> =
+        observeMarkerIds(userId, "bookmarks")
+
+    fun observeSeenStoryIds(userId: String): Flow<Set<String>> =
+        observeMarkerIds(userId, "seenStories")
+
+    fun observeLikedCommentIds(userId: String): Flow<Set<String>> =
+        observeMarkerIds(userId, "likedComments")
+
+    private fun observeMarkerIds(userId: String, subcollection: String): Flow<Set<String>> {
+        val colRef = userDoc(userId).collection(subcollection)
+        val path = colRef.path
+        return colRef.snapshots(MetadataChanges.EXCLUDE)
+            .map { snapshot ->
+                snapshot.toObjects(InteractionMarker::class.java, ServerTimestampBehavior.ESTIMATE)
+                    .map { it.targetId.ifBlank { it.id } }
+                    .toSet()
             }
             .catch { error ->
                 logFlowErrorIfSignedIn(userId, error, OperationType.LIST, path)
@@ -147,6 +209,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                 snapshot.toObjects(NotificationItem::class.java, ServerTimestampBehavior.ESTIMATE)
                     .sortedWith(
                         compareByDescending<NotificationItem> { it.isUnread }
+                            .thenByDescending { it.createdAt ?: Timestamp(0, 0) }
                             .thenBy { it.id }
                     )
             }
@@ -157,15 +220,15 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     }
 
     fun observeMessageThreads(userId: String): Flow<List<MessageThread>> {
-        val colRef = userDoc(userId).collection("threads")
+        val colRef = threadsCol()
         val path = colRef.path
         return colRef
-            .orderBy("updatedAt", Query.Direction.DESCENDING)
+            .whereArrayContains("participantUids", userId)
             .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(MessageThread::class.java, ServerTimestampBehavior.ESTIMATE)
                     .sortedWith(
-                        compareByDescending<MessageThread> { it.unreadCount > 0L }
+                        compareByDescending<MessageThread> { it.isUnreadFor(userId) }
                             .thenByDescending { it.updatedAt ?: it.createdAt ?: Timestamp(0, 0) }
                             .thenBy { it.id }
                     )
@@ -177,10 +240,10 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     }
 
     fun observeChatMessages(userId: String, threadId: String): Flow<List<ChatMessage>> {
-        val colRef = userDoc(userId).collection("threads").document(threadId).collection("messages")
+        val colRef = threadsCol().document(threadId).collection("messages")
         val path = colRef.path
         return colRef
-            .orderBy("createdAt", Query.Direction.ASCENDING)
+            .whereArrayContains("participantUids", userId)
             .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(ChatMessage::class.java, ServerTimestampBehavior.ESTIMATE)
@@ -196,8 +259,8 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     }
 
     suspend fun getPostById(postId: String): Result<Post?> = runCatching {
-        val uid = requireUserId()
-        val docRef = userDoc(uid).collection("posts").document(postId)
+        requireUserId()
+        val docRef = postsCol().document(postId)
         try {
             val snap = docRef.get().await()
             if (snap.exists()) {
@@ -227,35 +290,58 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             handleFirestoreError(e, OperationType.GET, profileRef.path)
             throw e
         }
-        if (existingProfile.exists()) return@runCatching
 
-        val rawDisplay = displayNameHint?.trim()?.takeIf { it.isNotBlank() } ?: "Aria Vance"
-        val displayName = rawDisplay.take(80)
-        val username = deriveUsername(emailHint, rawDisplay)
+        if (!existingProfile.exists()) {
+            val rawDisplay = displayNameHint?.trim()?.takeIf { it.isNotBlank() } ?: "Momi Creator"
+            val displayName = rawDisplay.take(80)
+            val username = deriveUsername(emailHint, rawDisplay)
+            val avatarKey = MediaAssets.avatarKeyForUid(uid)
 
-        val batch1 = db.batch()
-        batch1.set(
-            profileRef,
-            mapOf(
-                "userId" to uid,
-                "username" to username,
-                "displayName" to displayName,
-                "category" to "Visual Creator · Studio",
-                "bio" to "Chasing silk blue skies & deep maroon shadows.\n35mm · Architecture · Espresso",
-                "website" to "momi.photo/$username",
-                "avatarKey" to "avatar_aria",
-                "followersCount" to 12840L,
-                "followingCount" to 418L,
-                "isVerified" to true,
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            )
-        )
+            try {
+                profileRef.set(
+                    mapOf(
+                        "userId" to uid,
+                        "username" to username,
+                        "displayName" to displayName,
+                        "category" to "Creator · Momi",
+                        "bio" to "Sharing moments in silk blue & maroon.",
+                        "website" to "momi.photo/$username",
+                        "avatarKey" to avatarKey,
+                        "followersCount" to 0L,
+                        "followingCount" to 0L,
+                        "isVerified" to false,
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.CREATE, profileRef.path)
+                throw e
+            }
+        }
 
-        val postsCol = profileRef.collection("posts")
-        val seedPosts = listOf(
-            "post_1" to mapOf(
-                "userId" to uid,
+        // Seed starter showcase posts only once if the global feed has zero posts yet
+        val existingAnyPost = try {
+            postsCol().limit(1).get().await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, postsCol().path)
+            throw e
+        }
+
+        if (existingAnyPost.isEmpty) {
+            seedGlobalShowcasePosts(uid)
+        }
+    }
+
+    private suspend fun seedGlobalShowcasePosts(seedCreatorUid: String) {
+        val batch = db.batch()
+        val showcasePosts = listOf(
+            "showcase_post_1" to mapOf(
+                "userId" to seedCreatorUid,
                 "authorUsername" to "elena.maris",
                 "authorDisplayName" to "Elena Maris",
                 "authorAvatarKey" to "avatar_elena",
@@ -263,21 +349,19 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                 "location" to "Positano, Amalfi Coast",
                 "imageKey" to "img_post_coastal",
                 "localImagePath" to null,
+                "imageData" to null,
                 "filterTag" to "NONE",
-                "caption" to "Golden hour spilling over the cliffs before the ferries drift back in. Still dreaming about this turquoise water. #amalfi #coastal #goldenhour #momi",
-                "likesCount" to 2481L,
-                "isLiked" to false,
-                "isBookmarked" to true,
-                "isFollowingAuthor" to true,
-                "commentsCount" to 3L,
+                "caption" to "Golden hour spilling over the cliffs before the ferries drift back in. #amalfi #coastal #momi",
+                "likesCount" to 24L,
+                "commentsCount" to 0L,
                 "category" to "Travel",
                 "isReel" to true,
                 "audioTitle" to "Elena Maris · Mediterranean Breeze",
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             ),
-            "post_2" to mapOf(
-                "userId" to uid,
+            "showcase_post_2" to mapOf(
+                "userId" to seedCreatorUid,
                 "authorUsername" to "matcha.ritual",
                 "authorDisplayName" to "Matcha Ritual",
                 "authorAvatarKey" to "avatar_matcha",
@@ -285,21 +369,19 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                 "location" to "Lisbon, Chiado",
                 "imageKey" to "img_post_coffee",
                 "localImagePath" to null,
+                "imageData" to null,
                 "filterTag" to "NONE",
-                "caption" to "Morning ritual: stone-ground Uji matcha over crystal ice and a still-warm laminated croissant. #matcha #morninglight #cafeculture",
-                "likesCount" to 1394L,
-                "isLiked" to true,
-                "isBookmarked" to false,
-                "isFollowingAuthor" to true,
-                "commentsCount" to 2L,
+                "caption" to "Morning ritual: stone-ground Uji matcha over crystal ice and warm pastry. #matcha #cafeculture",
+                "likesCount" to 18L,
+                "commentsCount" to 0L,
                 "category" to "Coffee",
                 "isReel" to true,
                 "audioTitle" to "Nori Beats · Sunday Travertine",
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             ),
-            "post_3" to mapOf(
-                "userId" to uid,
+            "showcase_post_3" to mapOf(
+                "userId" to seedCreatorUid,
                 "authorUsername" to "atelier.nord",
                 "authorDisplayName" to "Atelier Nord",
                 "authorAvatarKey" to "avatar_nord",
@@ -307,21 +389,19 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                 "location" to "Copenhagen, Denmark",
                 "imageKey" to "img_post_architecture",
                 "localImagePath" to null,
+                "imageData" to null,
                 "filterTag" to "NONE",
-                "caption" to "When raw concrete meets warm white oak and four o'clock sunbeams. New gallery wing opens this Friday. #architecture #minimal #lightandshadow",
-                "likesCount" to 3910L,
-                "isLiked" to false,
-                "isBookmarked" to true,
-                "isFollowingAuthor" to true,
-                "commentsCount" to 2L,
+                "caption" to "When raw concrete meets warm white oak and four o'clock sunbeams. #architecture #minimal",
+                "likesCount" to 31L,
+                "commentsCount" to 0L,
                 "category" to "Architecture",
                 "isReel" to true,
                 "audioTitle" to "Atelier Nord · Quiet Atrium",
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             ),
-            "post_4" to mapOf(
-                "userId" to uid,
+            "showcase_post_4" to mapOf(
+                "userId" to seedCreatorUid,
                 "authorUsername" to "kenji.lens",
                 "authorDisplayName" to "Kenji Takahashi",
                 "authorAvatarKey" to "avatar_kenji",
@@ -329,440 +409,211 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                 "location" to "Shinjuku, Tokyo",
                 "imageKey" to "img_post_neon_street",
                 "localImagePath" to null,
+                "imageData" to null,
                 "filterTag" to "NONE",
-                "caption" to "Silk blue & maroon neon reflections after a sudden midnight downpour. Shot on 35mm f/1.4. #tokyo #nightphotography #streetframe",
-                "likesCount" to 5620L,
-                "isLiked" to false,
-                "isBookmarked" to false,
-                "isFollowingAuthor" to true,
-                "commentsCount" to 2L,
+                "caption" to "Silk blue & maroon neon reflections after a sudden midnight downpour. #tokyo #nightphotography",
+                "likesCount" to 42L,
+                "commentsCount" to 0L,
                 "category" to "Night",
                 "isReel" to true,
                 "audioTitle" to "Kenji · Rain on Cobblestone",
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            "post_5" to mapOf(
-                "userId" to uid,
-                "authorUsername" to username,
-                "authorDisplayName" to displayName,
-                "authorAvatarKey" to "avatar_aria",
-                "authorVerified" to true,
-                "location" to "Ravello Terrace",
-                "imageKey" to "img_post_coastal",
-                "localImagePath" to null,
-                "filterTag" to "BLUE",
-                "caption" to "Color-graded frame from last week's coastal study — leaning into silk blues and warm stone. #momicolor #filmstudy",
-                "likesCount" to 892L,
-                "isLiked" to true,
-                "isBookmarked" to false,
-                "isFollowingAuthor" to true,
-                "commentsCount" to 1L,
-                "category" to "Travel",
-                "isReel" to false,
-                "audioTitle" to "",
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            "post_6" to mapOf(
-                "userId" to uid,
-                "authorUsername" to username,
-                "authorDisplayName" to displayName,
-                "authorAvatarKey" to "avatar_aria",
-                "authorVerified" to true,
-                "location" to "Studio North",
-                "imageKey" to "img_post_architecture",
-                "localImagePath" to null,
-                "filterTag" to "MONO",
-                "caption" to "Monochrome geometry test in the atrium. High contrast reveals every beam of light. #monochrome #minimalism",
-                "likesCount" to 741L,
-                "isLiked" to false,
-                "isBookmarked" to false,
-                "isFollowingAuthor" to true,
-                "commentsCount" to 1L,
-                "category" to "Minimal",
-                "isReel" to false,
-                "audioTitle" to "",
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            "post_7" to mapOf(
-                "userId" to uid,
-                "authorUsername" to username,
-                "authorDisplayName" to displayName,
-                "authorAvatarKey" to "avatar_aria",
-                "authorVerified" to true,
-                "location" to "Chiado Roastery",
-                "imageKey" to "img_post_coffee",
-                "localImagePath" to null,
-                "filterTag" to "MAROON",
-                "caption" to "Warm maroon highlights on the morning table before editing client selects. #workfromcafe #editorial",
-                "likesCount" to 635L,
-                "isLiked" to false,
-                "isBookmarked" to false,
-                "isFollowingAuthor" to true,
-                "commentsCount" to 0L,
-                "category" to "Coffee",
-                "isReel" to false,
-                "audioTitle" to "",
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
             )
         )
-        seedPosts.forEach { (id, payload) ->
-            batch1.set(postsCol.document(id), payload)
-        }
-
-        val storiesCol = profileRef.collection("stories")
-        val seedStories = listOf(
-            "story_1" to mapOf(
-                "userId" to uid,
-                "username" to "elena.maris",
-                "avatarKey" to "avatar_elena",
-                "imageKey" to "img_post_coastal",
-                "localImagePath" to null,
-                "caption" to "Morning ferry to Amalfi",
-                "isSeen" to false,
-                "isOwnStory" to false,
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            "story_2" to mapOf(
-                "userId" to uid,
-                "username" to "matcha.ritual",
-                "avatarKey" to "avatar_matcha",
-                "imageKey" to "img_post_coffee",
-                "localImagePath" to null,
-                "caption" to "First pour of the day",
-                "isSeen" to false,
-                "isOwnStory" to false,
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            "story_3" to mapOf(
-                "userId" to uid,
-                "username" to "atelier.nord",
-                "avatarKey" to "avatar_nord",
-                "imageKey" to "img_post_architecture",
-                "localImagePath" to null,
-                "caption" to "Atrium light check at 16:00",
-                "isSeen" to false,
-                "isOwnStory" to false,
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            "story_4" to mapOf(
-                "userId" to uid,
-                "username" to "kenji.lens",
-                "avatarKey" to "avatar_kenji",
-                "imageKey" to "img_post_neon_street",
-                "localImagePath" to null,
-                "caption" to "Midnight rain walk",
-                "isSeen" to true,
-                "isOwnStory" to false,
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            )
-        )
-        seedStories.forEach { (id, payload) ->
-            batch1.set(storiesCol.document(id), payload)
-        }
-
-        val notificationsCol = profileRef.collection("notifications")
-        val seedNotifications = listOf(
-            "notif_1" to mapOf(
-                "userId" to uid,
-                "actorUsername" to "kenji.lens",
-                "actorAvatarKey" to "avatar_kenji",
-                "message" to "liked your photo.",
-                "timeLabel" to "12m",
-                "section" to "Today",
-                "previewImageKey" to "img_post_coastal",
-                "isFollowAction" to false,
-                "isFollowingBack" to false,
-                "isUnread" to true,
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            "notif_2" to mapOf(
-                "userId" to uid,
-                "actorUsername" to "elena.maris",
-                "actorAvatarKey" to "avatar_elena",
-                "message" to "commented: \"Love the silk blue grade on this!\"",
-                "timeLabel" to "48m",
-                "section" to "Today",
-                "previewImageKey" to "img_post_coastal",
-                "isFollowAction" to false,
-                "isFollowingBack" to false,
-                "isUnread" to true,
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            "notif_3" to mapOf(
-                "userId" to uid,
-                "actorUsername" to "sora.frames",
-                "actorAvatarKey" to "avatar_sora",
-                "message" to "started following you.",
-                "timeLabel" to "3h",
-                "section" to "Today",
-                "previewImageKey" to null,
-                "isFollowAction" to true,
-                "isFollowingBack" to false,
-                "isUnread" to true,
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            "notif_4" to mapOf(
-                "userId" to uid,
-                "actorUsername" to "atelier.nord",
-                "actorAvatarKey" to "avatar_nord",
-                "message" to "mentioned you in a story.",
-                "timeLabel" to "2d",
-                "section" to "This Week",
-                "previewImageKey" to "img_post_architecture",
-                "isFollowAction" to false,
-                "isFollowingBack" to false,
-                "isUnread" to false,
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            "notif_5" to mapOf(
-                "userId" to uid,
-                "actorUsername" to "matcha.ritual",
-                "actorAvatarKey" to "avatar_matcha",
-                "message" to "liked your comment: \"Need the name of this spot!\"",
-                "timeLabel" to "4d",
-                "section" to "This Week",
-                "previewImageKey" to "img_post_coffee",
-                "isFollowAction" to false,
-                "isFollowingBack" to false,
-                "isUnread" to false,
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            )
-        )
-        seedNotifications.forEach { (id, payload) ->
-            batch1.set(notificationsCol.document(id), payload)
-        }
-
-        val threadsCol = profileRef.collection("threads")
-        val seedThreads = listOf(
-            "thread_1" to mapOf(
-                "userId" to uid,
-                "peerUsername" to "elena.maris",
-                "peerDisplayName" to "Elena Maris",
-                "peerAvatarKey" to "avatar_elena",
-                "lastMessage" to "Sent the high-res Amalfi LUTs over!",
-                "timeLabel" to "14m",
-                "unreadCount" to 1L,
-                "isOnline" to true,
-                "noteText" to "Amalfi golden hour",
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            "thread_2" to mapOf(
-                "userId" to uid,
-                "peerUsername" to "kenji.lens",
-                "peerDisplayName" to "Kenji Takahashi",
-                "peerAvatarKey" to "avatar_kenji",
-                "lastMessage" to "Let's shoot Shinjuku in the rain next week",
-                "timeLabel" to "2h",
-                "unreadCount" to 2L,
-                "isOnline" to true,
-                "noteText" to "35mm night walk",
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            "thread_3" to mapOf(
-                "userId" to uid,
-                "peerUsername" to "atelier.nord",
-                "peerDisplayName" to "Atelier Nord",
-                "peerAvatarKey" to "avatar_nord",
-                "lastMessage" to "VIP pass is reserved for Friday 6 PM",
-                "timeLabel" to "1d",
-                "unreadCount" to 0L,
-                "isOnline" to false,
-                "noteText" to "Gallery opening",
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            "thread_4" to mapOf(
-                "userId" to uid,
-                "peerUsername" to "matcha.ritual",
-                "peerDisplayName" to "Matcha Ritual",
-                "peerAvatarKey" to "avatar_matcha",
-                "lastMessage" to "Thanks for tagging the Chiado spot!",
-                "timeLabel" to "3d",
-                "unreadCount" to 0L,
-                "isOnline" to false,
-                "noteText" to "Iced matcha",
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            )
-        )
-        seedThreads.forEach { (id, payload) ->
-            batch1.set(threadsCol.document(id), payload)
-        }
-
-        try {
-            batch1.commit().await()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.WRITE, profileRef.path)
-            throw e
-        }
-
-        // Batch 2 commits subcollection records after parent posts & threads exist (rules verify parent exists()).
-        val batch2 = db.batch()
-        val seedComments = listOf(
-            Triple("post_1", "comment_1", mapOf("userId" to uid, "authorUsername" to username, "authorAvatarKey" to "avatar_aria", "text" to "The light on those pastel walls is unreal.", "likesCount" to 18L, "isLiked" to false, "createdAt" to FieldValue.serverTimestamp(), "updatedAt" to FieldValue.serverTimestamp())),
-            Triple("post_1", "comment_2", mapOf("userId" to uid, "authorUsername" to "kenji.lens", "authorAvatarKey" to "avatar_kenji", "text" to "Those turquoise tones look straight off medium format.", "likesCount" to 9L, "isLiked" to false, "createdAt" to FieldValue.serverTimestamp(), "updatedAt" to FieldValue.serverTimestamp())),
-            Triple("post_1", "comment_3", mapOf("userId" to uid, "authorUsername" to "atelier.nord", "authorAvatarKey" to "avatar_nord", "text" to "Adding Positano to our autumn shoot itinerary.", "likesCount" to 5L, "isLiked" to false, "createdAt" to FieldValue.serverTimestamp(), "updatedAt" to FieldValue.serverTimestamp())),
-            Triple("post_2", "comment_4", mapOf("userId" to uid, "authorUsername" to "elena.maris", "authorAvatarKey" to "avatar_elena", "text" to "That ribbed glass + travertine combo is perfection.", "likesCount" to 14L, "isLiked" to false, "createdAt" to FieldValue.serverTimestamp(), "updatedAt" to FieldValue.serverTimestamp())),
-            Triple("post_2", "comment_5", mapOf("userId" to uid, "authorUsername" to username, "authorAvatarKey" to "avatar_aria", "text" to "Need the name of this spot in Chiado!", "likesCount" to 6L, "isLiked" to false, "createdAt" to FieldValue.serverTimestamp(), "updatedAt" to FieldValue.serverTimestamp())),
-            Triple("post_3", "comment_6", mapOf("userId" to uid, "authorUsername" to "matcha.ritual", "authorAvatarKey" to "avatar_matcha", "text" to "Those diagonal sunbeams are dramatic in the best way.", "likesCount" to 22L, "isLiked" to false, "createdAt" to FieldValue.serverTimestamp(), "updatedAt" to FieldValue.serverTimestamp())),
-            Triple("post_3", "comment_7", mapOf("userId" to uid, "authorUsername" to username, "authorAvatarKey" to "avatar_aria", "text" to "See you at the Friday preview.", "likesCount" to 7L, "isLiked" to false, "createdAt" to FieldValue.serverTimestamp(), "updatedAt" to FieldValue.serverTimestamp())),
-            Triple("post_4", "comment_8", mapOf("userId" to uid, "authorUsername" to "atelier.nord", "authorAvatarKey" to "avatar_nord", "text" to "Blue & maroon palette in real life — love this frame.", "likesCount" to 31L, "isLiked" to false, "createdAt" to FieldValue.serverTimestamp(), "updatedAt" to FieldValue.serverTimestamp())),
-            Triple("post_4", "comment_9", mapOf("userId" to uid, "authorUsername" to "elena.maris", "authorAvatarKey" to "avatar_elena", "text" to "The wet cobblestone reflections are crisp!", "likesCount" to 12L, "isLiked" to false, "createdAt" to FieldValue.serverTimestamp(), "updatedAt" to FieldValue.serverTimestamp())),
-            Triple("post_5", "comment_10", mapOf("userId" to uid, "authorUsername" to "elena.maris", "authorAvatarKey" to "avatar_elena", "text" to "Love the silk blue grade on this!", "likesCount" to 11L, "isLiked" to false, "createdAt" to FieldValue.serverTimestamp(), "updatedAt" to FieldValue.serverTimestamp())),
-            Triple("post_6", "comment_11", mapOf("userId" to uid, "authorUsername" to "kenji.lens", "authorAvatarKey" to "avatar_kenji", "text" to "Sharp geometry.", "likesCount" to 8L, "isLiked" to false, "createdAt" to FieldValue.serverTimestamp(), "updatedAt" to FieldValue.serverTimestamp()))
-        )
-        seedComments.forEach { (postId, commentId, payload) ->
-            batch2.set(postsCol.document(postId).collection("comments").document(commentId), payload)
-        }
-
-        val seedMessages = listOf(
-            Triple("thread_1", "msg_1", mapOf("userId" to uid, "senderUsername" to "elena.maris", "text" to "Hey! Just saw your Ravello color study.", "isFromMe" to false, "createdAt" to FieldValue.serverTimestamp())),
-            Triple("thread_1", "msg_2", mapOf("userId" to uid, "senderUsername" to username, "text" to "Thank you! Your Positano frame inspired the palette.", "isFromMe" to true, "createdAt" to FieldValue.serverTimestamp())),
-            Triple("thread_1", "msg_3", mapOf("userId" to uid, "senderUsername" to "elena.maris", "text" to "Sent the high-res Amalfi LUTs over!", "isFromMe" to false, "createdAt" to FieldValue.serverTimestamp())),
-            Triple("thread_2", "msg_4", mapOf("userId" to uid, "senderUsername" to "kenji.lens", "text" to "The reflections tonight were wild.", "isFromMe" to false, "createdAt" to FieldValue.serverTimestamp())),
-            Triple("thread_2", "msg_5", mapOf("userId" to uid, "senderUsername" to "kenji.lens", "text" to "Let's shoot Shinjuku in the rain next week", "isFromMe" to false, "createdAt" to FieldValue.serverTimestamp())),
-            Triple("thread_3", "msg_6", mapOf("userId" to uid, "senderUsername" to "atelier.nord", "text" to "VIP pass is reserved for Friday 6 PM", "isFromMe" to false, "createdAt" to FieldValue.serverTimestamp())),
-            Triple("thread_4", "msg_7", mapOf("userId" to uid, "senderUsername" to "matcha.ritual", "text" to "Thanks for tagging the Chiado spot!", "isFromMe" to false, "createdAt" to FieldValue.serverTimestamp()))
-        )
-        seedMessages.forEach { (threadId, msgId, payload) ->
-            batch2.set(threadsCol.document(threadId).collection("messages").document(msgId), payload)
-        }
-
-        try {
-            batch2.commit().await()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.WRITE, "${profileRef.path}/seed_subcollections")
-            throw e
-        }
-    }
-
-    suspend fun toggleLike(post: Post): Result<Unit> = runCatching {
-        val uid = requireUserId()
-        require(post.id.isNotBlank()) { "Post ID must not be blank" }
-        val docRef = userDoc(uid).collection("posts").document(post.id)
-        val nextLiked = !post.isLiked
-        val nextLikes = if (nextLiked) post.likesCount + 1L else (post.likesCount - 1L).coerceAtLeast(0L)
-        try {
-            docRef.update(
-                mapOf(
-                    "isLiked" to nextLiked,
-                    "likesCount" to nextLikes,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
-            throw e
-        }
-    }
-
-    suspend fun setLiked(post: Post): Result<Unit> = runCatching {
-        if (post.isLiked) return@runCatching
-        val uid = requireUserId()
-        require(post.id.isNotBlank()) { "Post ID must not be blank" }
-        val docRef = userDoc(uid).collection("posts").document(post.id)
-        try {
-            docRef.update(
-                mapOf(
-                    "isLiked" to true,
-                    "likesCount" to post.likesCount + 1L,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
-            throw e
-        }
-    }
-
-    suspend fun toggleBookmark(post: Post): Result<Unit> = runCatching {
-        val uid = requireUserId()
-        require(post.id.isNotBlank()) { "Post ID must not be blank" }
-        val docRef = userDoc(uid).collection("posts").document(post.id)
-        try {
-            docRef.update(
-                mapOf(
-                    "isBookmarked" to !post.isBookmarked,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
-            throw e
-        }
-    }
-
-    suspend fun toggleFollow(username: String, currentlyFollowing: Boolean): Result<Unit> = runCatching {
-        val uid = requireUserId()
-        val postsCol = userDoc(uid).collection("posts")
-        val matchingDocs = try {
-            postsCol.whereEqualTo("authorUsername", username).get().await()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.LIST, postsCol.path)
-            throw e
-        }
-        if (matchingDocs.isEmpty) return@runCatching
-        val batch = db.batch()
-        matchingDocs.documents.forEach { doc ->
-            batch.update(
-                doc.reference,
-                mapOf(
-                    "isFollowingAuthor" to !currentlyFollowing,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            )
+        showcasePosts.forEach { (id, payload) ->
+            batch.set(postsCol().document(id), payload)
         }
         try {
             batch.commit().await()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.UPDATE, postsCol.path)
+            handleFirestoreError(e, OperationType.WRITE, postsCol().path)
             throw e
         }
     }
 
-    suspend fun addComment(post: Post, username: String, avatarKey: String, text: String): Result<String> = runCatching {
+    suspend fun toggleLike(post: Post, actorProfile: UserProfile?): Result<Unit> = runCatching {
+        val uid = requireUserId()
+        require(post.id.isNotBlank()) { "Post ID must not be blank" }
+        val postRef = postsCol().document(post.id)
+        val markerRef = userDoc(uid).collection("likedPosts").document(post.id)
+
+        val becameLiked = try {
+            db.runTransaction { transaction ->
+                val postSnap = transaction.get(postRef)
+                val markerSnap = transaction.get(markerRef)
+                val currentLikes = postSnap.getLong("likesCount") ?: 0L
+                if (!markerSnap.exists()) {
+                    transaction.set(
+                        markerRef,
+                        mapOf(
+                            "targetId" to post.id,
+                            "createdAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                    transaction.update(
+                        postRef,
+                        mapOf(
+                            "likesCount" to currentLikes + 1L,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                    true
+                } else {
+                    transaction.delete(markerRef)
+                    transaction.update(
+                        postRef,
+                        mapOf(
+                            "likesCount" to (currentLikes - 1L).coerceAtLeast(0L),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                    false
+                }
+            }.await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, postRef.path)
+            throw e
+        }
+
+        if (becameLiked && !post.id.startsWith("showcase_") && post.userId.isNotBlank() && post.userId != uid && actorProfile != null) {
+            sendNotificationSafe(
+                targetUid = post.userId,
+                actorProfile = actorProfile,
+                message = "liked your photo.",
+                previewImageKey = post.imageKey,
+                isFollowAction = false
+            )
+        }
+    }
+
+    suspend fun setLiked(post: Post, actorProfile: UserProfile?): Result<Unit> = runCatching {
+        if (post.isLiked) return@runCatching
+        val uid = requireUserId()
+        require(post.id.isNotBlank()) { "Post ID must not be blank" }
+        val postRef = postsCol().document(post.id)
+        val markerRef = userDoc(uid).collection("likedPosts").document(post.id)
+
+        val becameLiked = try {
+            db.runTransaction { transaction ->
+                val postSnap = transaction.get(postRef)
+                val markerSnap = transaction.get(markerRef)
+                if (markerSnap.exists()) return@runTransaction false
+                val currentLikes = postSnap.getLong("likesCount") ?: 0L
+                transaction.set(
+                    markerRef,
+                    mapOf(
+                        "targetId" to post.id,
+                        "createdAt" to FieldValue.serverTimestamp()
+                    )
+                )
+                transaction.update(
+                    postRef,
+                    mapOf(
+                        "likesCount" to currentLikes + 1L,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+                true
+            }.await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, postRef.path)
+            throw e
+        }
+
+        if (becameLiked && !post.id.startsWith("showcase_") && post.userId.isNotBlank() && post.userId != uid && actorProfile != null) {
+            sendNotificationSafe(
+                targetUid = post.userId,
+                actorProfile = actorProfile,
+                message = "liked your photo.",
+                previewImageKey = post.imageKey,
+                isFollowAction = false
+            )
+        }
+    }
+
+    suspend fun toggleBookmark(post: Post): Result<Unit> = runCatching {
+        val uid = requireUserId()
+        require(post.id.isNotBlank()) { "Post ID must not be blank" }
+        val markerRef = userDoc(uid).collection("bookmarks").document(post.id)
+        try {
+            if (post.isBookmarked) {
+                markerRef.delete().await()
+            } else {
+                markerRef.set(
+                    mapOf(
+                        "targetId" to post.id,
+                        "createdAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, markerRef.path)
+            throw e
+        }
+    }
+
+    suspend fun toggleFollow(
+        actorProfile: UserProfile,
+        targetUid: String,
+        targetUsername: String,
+        currentlyFollowing: Boolean
+    ): Result<Unit> = runCatching {
+        val uid = requireUserId()
+        if (targetUid.isBlank() || targetUid == uid) return@runCatching
+        val followId = "${uid}_${targetUid}"
+        val followRef = followsCol().document(followId)
+        try {
+            if (currentlyFollowing) {
+                followRef.delete().await()
+            } else {
+                followRef.set(
+                    mapOf(
+                        "followerUid" to uid,
+                        "targetUid" to targetUid,
+                        "followerUsername" to actorProfile.username.take(50),
+                        "targetUsername" to targetUsername.ifBlank { "creator" }.take(50),
+                        "createdAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+                sendNotificationSafe(
+                    targetUid = targetUid,
+                    actorProfile = actorProfile,
+                    message = "started following you.",
+                    previewImageKey = null,
+                    isFollowAction = true
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, followRef.path)
+            throw e
+        }
+    }
+
+    suspend fun addComment(post: Post, actorProfile: UserProfile, text: String): Result<String> = runCatching {
         val uid = requireUserId()
         require(post.id.isNotBlank()) { "Post ID must not be blank" }
         val trimmed = text.trim()
         require(trimmed.isNotEmpty()) { "Comment text must not be empty" }
-        val postRef = userDoc(uid).collection("posts").document(post.id)
+
+        val postRef = postsCol().document(post.id)
         val commentRef = postRef.collection("comments").document()
         val payload = mapOf(
             "userId" to uid,
-            "authorUsername" to username,
-            "authorAvatarKey" to avatarKey,
+            "authorUsername" to actorProfile.username,
+            "authorAvatarKey" to actorProfile.avatarKey,
             "text" to trimmed.take(500),
             "likesCount" to 0L,
-            "isLiked" to false,
             "createdAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp()
         )
@@ -771,12 +622,21 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         batch.update(
             postRef,
             mapOf(
-                "commentsCount" to post.commentsCount + 1L,
+                "commentsCount" to FieldValue.increment(1L),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
         )
         try {
             batch.commit().await()
+            if (!post.id.startsWith("showcase_") && post.userId.isNotBlank() && post.userId != uid) {
+                sendNotificationSafe(
+                    targetUid = post.userId,
+                    actorProfile = actorProfile,
+                    message = "commented: \"${trimmed.take(80)}\"",
+                    previewImageKey = post.imageKey,
+                    isFollowAction = false
+                )
+            }
             commentRef.id
         } catch (e: CancellationException) {
             throw e
@@ -789,22 +649,44 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     suspend fun toggleCommentLike(postId: String, comment: Comment): Result<Unit> = runCatching {
         val uid = requireUserId()
         require(postId.isNotBlank() && comment.id.isNotBlank()) { "Post ID and Comment ID must not be blank" }
-        val docRef = userDoc(uid).collection("posts").document(postId)
-            .collection("comments").document(comment.id)
-        val nextLiked = !comment.isLiked
-        val nextLikes = if (nextLiked) comment.likesCount + 1L else (comment.likesCount - 1L).coerceAtLeast(0L)
+        val commentRef = postsCol().document(postId).collection("comments").document(comment.id)
+        val markerRef = userDoc(uid).collection("likedComments").document(comment.id)
+
         try {
-            docRef.update(
-                mapOf(
-                    "isLiked" to nextLiked,
-                    "likesCount" to nextLikes,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
+            db.runTransaction { transaction ->
+                val commentSnap = transaction.get(commentRef)
+                val markerSnap = transaction.get(markerRef)
+                val currentLikes = commentSnap.getLong("likesCount") ?: 0L
+                if (!markerSnap.exists()) {
+                    transaction.set(
+                        markerRef,
+                        mapOf(
+                            "targetId" to comment.id,
+                            "createdAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                    transaction.update(
+                        commentRef,
+                        mapOf(
+                            "likesCount" to currentLikes + 1L,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                } else {
+                    transaction.delete(markerRef)
+                    transaction.update(
+                        commentRef,
+                        mapOf(
+                            "likesCount" to (currentLikes - 1L).coerceAtLeast(0L),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                }
+            }.await()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            handleFirestoreError(e, OperationType.UPDATE, commentRef.path)
             throw e
         }
     }
@@ -813,6 +695,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         profile: UserProfile,
         imageKey: String,
         localImagePath: String?,
+        imageData: String?,
         filterTag: String,
         caption: String,
         location: String,
@@ -820,29 +703,27 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         isReel: Boolean
     ): Result<String> = runCatching {
         val uid = requireUserId()
-        val docRef = userDoc(uid).collection("posts").document()
-        val payload = mapOf(
-            "userId" to uid,
-            "authorUsername" to profile.username,
-            "authorDisplayName" to profile.displayName,
-            "authorAvatarKey" to profile.avatarKey,
-            "authorVerified" to profile.isVerified,
-            "location" to location.trim().take(120),
-            "imageKey" to imageKey,
-            "localImagePath" to localImagePath,
-            "filterTag" to filterTag,
-            "caption" to caption.trim().take(1000),
-            "likesCount" to 1L,
-            "isLiked" to true,
-            "isBookmarked" to false,
-            "isFollowingAuthor" to true,
-            "commentsCount" to 0L,
-            "category" to category,
-            "isReel" to isReel,
-            "audioTitle" to if (isReel) "${profile.displayName} · Original Audio" else "",
-            "createdAt" to FieldValue.serverTimestamp(),
-            "updatedAt" to FieldValue.serverTimestamp()
-        )
+        val docRef = postsCol().document()
+        val payload = buildMap<String, Any> {
+            put("userId", uid)
+            put("authorUsername", profile.username)
+            put("authorDisplayName", profile.displayName)
+            put("authorAvatarKey", profile.avatarKey)
+            put("authorVerified", profile.isVerified)
+            put("location", location.trim().take(120))
+            put("imageKey", imageKey)
+            if (!localImagePath.isNullOrBlank()) put("localImagePath", localImagePath.take(500))
+            if (!imageData.isNullOrBlank()) put("imageData", imageData)
+            put("filterTag", filterTag)
+            put("caption", caption.trim().take(1000))
+            put("likesCount", 0L)
+            put("commentsCount", 0L)
+            put("category", category)
+            put("isReel", isReel)
+            put("audioTitle", if (isReel) "${profile.displayName} · Original Audio" else "")
+            put("createdAt", FieldValue.serverTimestamp())
+            put("updatedAt", FieldValue.serverTimestamp())
+        }
         try {
             docRef.set(payload).await()
             docRef.id
@@ -858,22 +739,22 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         profile: UserProfile,
         imageKey: String,
         localImagePath: String?,
+        imageData: String?,
         caption: String
     ): Result<String> = runCatching {
         val uid = requireUserId()
-        val docRef = userDoc(uid).collection("stories").document()
-        val payload = mapOf(
-            "userId" to uid,
-            "username" to profile.username,
-            "avatarKey" to profile.avatarKey,
-            "imageKey" to imageKey,
-            "localImagePath" to localImagePath,
-            "caption" to caption.ifBlank { "Shared a moment" }.take(300),
-            "isSeen" to false,
-            "isOwnStory" to true,
-            "createdAt" to FieldValue.serverTimestamp(),
-            "updatedAt" to FieldValue.serverTimestamp()
-        )
+        val docRef = storiesCol().document()
+        val payload = buildMap<String, Any> {
+            put("userId", uid)
+            put("username", profile.username)
+            put("avatarKey", profile.avatarKey)
+            put("imageKey", imageKey)
+            if (!localImagePath.isNullOrBlank()) put("localImagePath", localImagePath.take(500))
+            if (!imageData.isNullOrBlank()) put("imageData", imageData)
+            put("caption", caption.ifBlank { "Shared a moment" }.take(300))
+            put("createdAt", FieldValue.serverTimestamp())
+            put("updatedAt", FieldValue.serverTimestamp())
+        }
         try {
             docRef.set(payload).await()
             docRef.id
@@ -886,9 +767,9 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     }
 
     suspend fun deletePost(postId: String): Result<Unit> = runCatching {
-        val uid = requireUserId()
+        requireUserId()
         require(postId.isNotBlank()) { "Post ID must not be blank" }
-        val docRef = userDoc(uid).collection("posts").document(postId)
+        val docRef = postsCol().document(postId)
         try {
             docRef.delete().await()
         } catch (e: CancellationException) {
@@ -902,18 +783,21 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     suspend fun markStorySeen(storyId: String): Result<Unit> = runCatching {
         val uid = requireUserId()
         require(storyId.isNotBlank()) { "Story ID must not be blank" }
-        val docRef = userDoc(uid).collection("stories").document(storyId)
+        val markerRef = userDoc(uid).collection("seenStories").document(storyId)
         try {
-            docRef.update(
-                mapOf(
-                    "isSeen" to true,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
+            val snap = markerRef.get().await()
+            if (!snap.exists()) {
+                markerRef.set(
+                    mapOf(
+                        "targetId" to storyId,
+                        "createdAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            handleFirestoreError(e, OperationType.CREATE, markerRef.path)
             throw e
         }
     }
@@ -950,17 +834,29 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         }
     }
 
-    suspend fun toggleNotificationFollow(notification: NotificationItem): Result<Unit> = runCatching {
+    suspend fun toggleNotificationFollow(
+        actorProfile: UserProfile,
+        notification: NotificationItem
+    ): Result<Unit> = runCatching {
         val uid = requireUserId()
         require(notification.id.isNotBlank()) { "Notification ID must not be blank" }
         val docRef = userDoc(uid).collection("notifications").document(notification.id)
+        val nextFollowingBack = !notification.isFollowingBack
         try {
             docRef.update(
                 mapOf(
-                    "isFollowingBack" to !notification.isFollowingBack,
+                    "isFollowingBack" to nextFollowingBack,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+            if (notification.actorUid.isNotBlank() && notification.actorUid != uid) {
+                toggleFollow(
+                    actorProfile = actorProfile,
+                    targetUid = notification.actorUid,
+                    targetUsername = notification.actorUsername,
+                    currentlyFollowing = !nextFollowingBack
+                )
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -1001,33 +897,128 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         }
     }
 
-    suspend fun sendMessage(thread: MessageThread, senderUsername: String, text: String): Result<String> = runCatching {
+    suspend fun openOrCreateThread(
+        currentProfile: UserProfile,
+        peerProfile: UserProfile
+    ): Result<MessageThread> = runCatching {
+        val uid = requireUserId()
+        require(peerProfile.userId.isNotBlank() && peerProfile.userId != uid) {
+            "Cannot open chat with invalid or self user"
+        }
+        val (userA, userB) = if (uid < peerProfile.userId) {
+            currentProfile to peerProfile
+        } else {
+            peerProfile to currentProfile
+        }
+        val threadId = "${userA.userId}_${userB.userId}"
+        val threadRef = threadsCol().document(threadId)
+
+        val existing = try {
+            threadRef.get().await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.GET, threadRef.path)
+            throw e
+        }
+
+        if (existing.exists()) {
+            return@runCatching existing.toObject(MessageThread::class.java, ServerTimestampBehavior.ESTIMATE)
+                ?: error("Failed to parse thread $threadId")
+        }
+
+        val payload = mapOf(
+            "participantUids" to listOf(userA.userId, userB.userId),
+            "userAId" to userA.userId,
+            "userAUsername" to userA.username.ifBlank { "creator" }.take(50),
+            "userADisplayName" to userA.displayName.ifBlank { "Creator" }.take(80),
+            "userAAvatarKey" to userA.avatarKey.ifBlank { "avatar_aria" }.take(64),
+            "userBId" to userB.userId,
+            "userBUsername" to userB.username.ifBlank { "creator" }.take(50),
+            "userBDisplayName" to userB.displayName.ifBlank { "Creator" }.take(80),
+            "userBAvatarKey" to userB.avatarKey.ifBlank { "avatar_elena" }.take(64),
+            "lastMessage" to "Start a conversation",
+            "lastSenderUid" to uid,
+            "unreadUid" to "",
+            "timeLabel" to "now",
+            "unreadCount" to 0L,
+            "isOnline" to true,
+            "noteText" to null,
+            "createdAt" to FieldValue.serverTimestamp(),
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
+        try {
+            threadRef.set(payload).await()
+            val createdSnap = threadRef.get().await()
+            createdSnap.toObject(MessageThread::class.java, ServerTimestampBehavior.ESTIMATE)
+                ?: MessageThread(
+                    id = threadId,
+                    participantUids = listOf(userA.userId, userB.userId),
+                    userAId = userA.userId,
+                    userAUsername = userA.username,
+                    userADisplayName = userA.displayName,
+                    userAAvatarKey = userA.avatarKey,
+                    userBId = userB.userId,
+                    userBUsername = userB.username,
+                    userBDisplayName = userB.displayName,
+                    userBAvatarKey = userB.avatarKey,
+                    lastMessage = "Start a conversation",
+                    lastSenderUid = uid,
+                    unreadUid = "",
+                    timeLabel = "now",
+                    unreadCount = 0L,
+                    isOnline = true
+                )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, threadRef.path)
+            throw e
+        }
+    }
+
+    suspend fun sendMessage(
+        thread: MessageThread,
+        senderProfile: UserProfile,
+        text: String
+    ): Result<String> = runCatching {
         val uid = requireUserId()
         require(thread.id.isNotBlank()) { "Thread ID must not be blank" }
         val trimmed = text.trim()
         require(trimmed.isNotEmpty()) { "Message text must not be empty" }
-        val threadRef = userDoc(uid).collection("threads").document(thread.id)
+
+        val threadRef = threadsCol().document(thread.id)
         val msgRef = threadRef.collection("messages").document()
+        val peerUid = thread.peerUidFor(uid)
+
         val msgPayload = mapOf(
-            "userId" to uid,
-            "senderUsername" to senderUsername,
+            "participantUids" to thread.participantUids,
+            "senderUid" to uid,
+            "senderUsername" to senderProfile.username.ifBlank { "creator" }.take(50),
             "text" to trimmed.take(1000),
-            "isFromMe" to true,
             "createdAt" to FieldValue.serverTimestamp()
         )
-        val batch = db.batch()
-        batch.set(msgRef, msgPayload)
-        batch.update(
-            threadRef,
-            mapOf(
-                "lastMessage" to trimmed.take(500),
-                "timeLabel" to "now",
-                "unreadCount" to 0L,
-                "updatedAt" to FieldValue.serverTimestamp()
-            )
-        )
+
         try {
-            batch.commit().await()
+            db.runTransaction { transaction ->
+                val threadSnap = transaction.get(threadRef)
+                val existingUnreadUid = threadSnap.getString("unreadUid") ?: ""
+                val existingUnreadCount = threadSnap.getLong("unreadCount") ?: 0L
+                val nextUnreadCount = if (existingUnreadUid == peerUid) existingUnreadCount + 1L else 1L
+
+                transaction.set(msgRef, msgPayload)
+                transaction.update(
+                    threadRef,
+                    mapOf(
+                        "lastMessage" to trimmed.take(500),
+                        "lastSenderUid" to uid,
+                        "timeLabel" to "now",
+                        "unreadUid" to peerUid,
+                        "unreadCount" to nextUnreadCount,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }.await()
             msgRef.id
         } catch (e: CancellationException) {
             throw e
@@ -1038,13 +1029,14 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     }
 
     suspend fun clearThreadUnread(thread: MessageThread): Result<Unit> = runCatching {
-        if (thread.unreadCount <= 0L) return@runCatching
         val uid = requireUserId()
+        if (thread.unreadUid != uid || thread.unreadCount <= 0L) return@runCatching
         require(thread.id.isNotBlank()) { "Thread ID must not be blank" }
-        val docRef = userDoc(uid).collection("threads").document(thread.id)
+        val docRef = threadsCol().document(thread.id)
         try {
             docRef.update(
                 mapOf(
+                    "unreadUid" to "",
                     "unreadCount" to 0L,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
@@ -1054,6 +1046,34 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, docRef.path)
             throw e
+        }
+    }
+
+    private suspend fun sendNotificationSafe(
+        targetUid: String,
+        actorProfile: UserProfile,
+        message: String,
+        previewImageKey: String?,
+        isFollowAction: Boolean
+    ) {
+        runCatching {
+            val notifRef = userDoc(targetUid).collection("notifications").document()
+            val payload = buildMap<String, Any> {
+                put("userId", targetUid)
+                put("actorUid", actorProfile.userId)
+                put("actorUsername", actorProfile.username.ifBlank { "creator" }.take(50))
+                put("actorAvatarKey", actorProfile.avatarKey.ifBlank { "avatar_aria" }.take(64))
+                put("message", message.take(300))
+                put("timeLabel", "now")
+                put("section", "Today")
+                if (!previewImageKey.isNullOrBlank()) put("previewImageKey", previewImageKey.take(64))
+                put("isFollowAction", isFollowAction)
+                put("isFollowingBack", false)
+                put("isUnread", true)
+                put("createdAt", FieldValue.serverTimestamp())
+                put("updatedAt", FieldValue.serverTimestamp())
+            }
+            notifRef.set(payload).await()
         }
     }
 
@@ -1083,6 +1103,6 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             .replace(Regex("[^a-z0-9]+"), ".")
             .trim('.')
             .takeIf { it.isNotBlank() }
-        return (fromName ?: "aria.studio").take(50)
+        return (fromName ?: "momi.creator").take(50)
     }
 }

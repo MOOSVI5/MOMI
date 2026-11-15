@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -23,6 +24,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.filled.AddBox
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.GridOn
@@ -30,7 +32,6 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material.icons.filled.Verified
-import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.LightMode
@@ -85,6 +86,8 @@ private val DefaultHighlights = listOf(
 @Composable
 fun ProfileScreen(
     profile: UserProfile?,
+    allCreators: List<UserProfile>,
+    followingUids: Set<String>,
     allPosts: List<Post>,
     themePreference: ThemePreference,
     onThemeChange: (ThemePreference) -> Unit,
@@ -92,15 +95,19 @@ fun ProfileScreen(
     onPostClick: (Post) -> Unit,
     onShareProfile: () -> Unit,
     onUpdateProfile: (displayName: String, username: String, category: String, bio: String, website: String) -> Unit,
+    onToggleFollowCreator: (UserProfile, Boolean) -> Unit,
+    onMessageCreator: (UserProfile) -> Unit,
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var showEditDialog by remember { mutableStateOf(false) }
     var showSettingsSheet by remember { mutableStateOf(false) }
+    var showCreatorsSheet by remember { mutableStateOf(false) }
 
-    val ownPosts = remember(allPosts, profile?.username) {
-        allPosts.filter { it.authorUsername == (profile?.username ?: "aria.studio") }
+    val ownPosts = remember(allPosts, profile?.userId) {
+        val uid = profile?.userId.orEmpty()
+        allPosts.filter { it.userId == uid && !it.id.startsWith("showcase_") }
     }
     val ownClips = remember(ownPosts) { ownPosts.filter { it.isReel } }
     val savedPosts = remember(allPosts) { allPosts.filter { it.isBookmarked } }
@@ -117,6 +124,117 @@ fun ProfileScreen(
             onDismiss = { showEditDialog = false },
             onSave = onUpdateProfile
         )
+    }
+
+    if (showCreatorsSheet) {
+        val otherCreators = remember(allCreators, profile?.userId) {
+            allCreators.filter { it.userId != profile?.userId }
+        }
+        ModalBottomSheet(
+            onDismissRequest = { showCreatorsSheet = false },
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 10.dp)
+            ) {
+                Text(
+                    text = "Creators on Momi",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Follow or message other signed-in Momi creators in real time",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+                if (otherCreators.isEmpty()) {
+                    Text(
+                        text = "No other signed-in creators yet. Sign in with another Google account on a second phone to see them appear here.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 24.dp)
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 360.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        items(otherCreators, key = { it.userId }) { creator ->
+                            val isFollowing = followingUids.contains(creator.userId)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                LumaAvatar(
+                                    username = creator.username,
+                                    avatarKey = creator.avatarKey,
+                                    size = 44.dp
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = creator.displayName,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "@${creator.username}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                                        .clickable {
+                                            showCreatorsSheet = false
+                                            onMessageCreator(creator)
+                                        }
+                                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                                ) {
+                                    Text(
+                                        text = "Message",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(
+                                            if (isFollowing) MaterialTheme.colorScheme.surfaceVariant
+                                            else MaterialTheme.colorScheme.primary
+                                        )
+                                        .clickable { onToggleFollowCreator(creator, isFollowing) }
+                                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                                ) {
+                                    Text(
+                                        text = if (isFollowing) "Following" else "Follow",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isFollowing) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onPrimary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(20.dp))
+            }
+        }
     }
 
     if (showSettingsSheet) {
@@ -233,7 +351,7 @@ fun ProfileScreen(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = profile?.username ?: "aria.studio",
+                    text = profile?.username ?: "momi.creator",
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onBackground
@@ -291,7 +409,7 @@ fun ProfileScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         LumaAvatar(
-                            username = profile?.username ?: "aria.studio",
+                            username = profile?.username ?: "momi",
                             avatarKey = profile?.avatarKey ?: "avatar_aria",
                             size = 86.dp,
                             hasActiveStory = true
@@ -303,11 +421,11 @@ fun ProfileScreen(
                         ) {
                             ProfileStatColumn(count = ownPosts.size.toString(), label = "posts")
                             ProfileStatColumn(
-                                count = MediaAssets.formatCompactCount(profile?.followersCount ?: 12840),
+                                count = MediaAssets.formatCompactCount(profile?.followersCount ?: 0L),
                                 label = "followers"
                             )
                             ProfileStatColumn(
-                                count = MediaAssets.formatCompactCount(profile?.followingCount ?: 418),
+                                count = MediaAssets.formatCompactCount(profile?.followingCount ?: 0L),
                                 label = "following"
                             )
                         }
@@ -317,7 +435,7 @@ fun ProfileScreen(
 
                     // Name, Category, Bio, Link
                     Text(
-                        text = profile?.displayName ?: "Aria Vance",
+                        text = profile?.displayName ?: "Momi Creator",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onBackground
@@ -394,7 +512,8 @@ fun ProfileScreen(
                                 .size(36.dp)
                                 .clip(RoundedCornerShape(10.dp))
                                 .background(MaterialTheme.colorScheme.surfaceVariant)
-                                .clickable { showSettingsSheet = true },
+                                .clickable { showCreatorsSheet = true }
+                                .testTag("discover_creators_button"),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
@@ -534,6 +653,7 @@ fun ProfileScreen(
                                 PostMediaImage(
                                     imageKey = post.imageKey,
                                     localImagePath = post.localImagePath,
+                                    imageData = post.imageData,
                                     filterTag = post.filterTag,
                                     contentDescription = "Post thumbnail",
                                     modifier = Modifier.fillMaxSize()

@@ -242,6 +242,7 @@ fun PostCard(
             PostMediaImage(
                 imageKey = post.imageKey,
                 localImagePath = post.localImagePath,
+                imageData = post.imageData,
                 filterTag = post.filterTag,
                 contentDescription = "Post by ${post.authorUsername}",
                 modifier = Modifier.fillMaxWidth().aspectRatio(1f)
