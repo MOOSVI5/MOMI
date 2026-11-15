@@ -57,10 +57,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -197,6 +199,7 @@ private fun ReelPageItem(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .clipToBounds()
             .let { base ->
                 if (!reel.isVideoPost) {
                     base.pointerInput(reel.id) {
@@ -223,11 +226,14 @@ private fun ReelPageItem(
                 fallbackImageData = reel.imageData,
                 filterTag = reel.filterTag,
                 isPlaying = isActivePage,
+                localAudioPath = reel.localAudioPath,
+                audioTitle = reel.audioTitle,
                 initialMuted = false,
                 showMuteButton = true,
                 showDurationBadge = false,
                 muteButtonAlignment = Alignment.TopEnd,
                 muteButtonPadding = PaddingValues(top = 92.dp, end = 16.dp),
+                contentScale = ContentScale.Crop,
                 onDoubleTap = {
                     showHeartBurst = true
                     onDoubleTapLike()
@@ -298,6 +304,7 @@ private fun ReelPageItem(
                     LumaAvatar(
                         username = reel.authorUsername,
                         avatarKey = reel.authorAvatarKey,
+                        avatarData = reel.authorAvatarData,
                         size = 36.dp,
                         hasActiveStory = true
                     )

@@ -46,10 +46,8 @@ import androidx.compose.ui.unit.sp
 import androidx.credentials.CredentialManager
 import com.example.auth.attemptAutoSignIn
 import com.example.auth.onGoogleSignInClicked
-import com.example.ui.theme.LumaGradientColors
+import com.example.ui.theme.LocalMomiBrandGradient
 import com.example.ui.theme.LumaScriptFamily
-import com.example.ui.theme.MaroonDeep
-import com.example.ui.theme.SilkBlue
 
 @Composable
 fun SignInScreen(
@@ -114,7 +112,7 @@ fun SignInScreen(
                     modifier = Modifier
                         .size(76.dp)
                         .clip(CircleShape)
-                        .background(Brush.linearGradient(LumaGradientColors))
+                        .background(Brush.linearGradient(LocalMomiBrandGradient.current))
                         .border(2.dp, MaterialTheme.colorScheme.surface, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
@@ -151,7 +149,7 @@ fun SignInScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .background(MaroonDeep.copy(alpha = 0.12f))
+                            .background(MaterialTheme.colorScheme.secondary.copy(alpha = 0.12f))
                             .padding(horizontal = 14.dp, vertical = 10.dp)
                     ) {
                         Text(
@@ -189,8 +187,8 @@ fun SignInScreen(
                     enabled = !isSigningIn && !isAutoChecking,
                     shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = SilkBlue,
-                        contentColor = Color.White
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
                     ),
                     modifier = Modifier
                         .fillMaxWidth()

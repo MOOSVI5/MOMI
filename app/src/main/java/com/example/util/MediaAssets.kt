@@ -211,6 +211,79 @@ object MediaAssets {
         }.getOrNull()
     }
 
+    fun encodeAvatarFileToBase64(filePath: String?): String? {
+        if (filePath.isNullOrBlank()) return null
+        return runCatching {
+            val file = File(filePath)
+            if (!file.exists()) return null
+
+            val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(filePath, boundsOptions)
+            val srcWidth = boundsOptions.outWidth
+            val srcHeight = boundsOptions.outHeight
+            if (srcWidth <= 0 || srcHeight <= 0) return null
+
+            var sampleSize = 1
+            while ((srcWidth / sampleSize) > 720 || (srcHeight / sampleSize) > 720) {
+                sampleSize *= 2
+            }
+
+            var bitmap = BitmapFactory.decodeFile(
+                filePath,
+                BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            ) ?: return null
+
+            val orientation = runCatching {
+                ExifInterface(filePath).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL
+                )
+            }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+
+            val rotationDegrees = when (orientation) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                else -> 0f
+            }
+            if (rotationDegrees != 0f) {
+                val matrix = Matrix().apply { postRotate(rotationDegrees) }
+                val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                if (rotated !== bitmap) bitmap.recycle()
+                bitmap = rotated
+            }
+
+            val side = minOf(bitmap.width, bitmap.height)
+            val xOff = (bitmap.width - side) / 2
+            val yOff = (bitmap.height - side) / 2
+            val cropped = Bitmap.createBitmap(bitmap, xOff, yOff, side, side)
+            if (cropped !== bitmap) bitmap.recycle()
+            bitmap = cropped
+
+            val targetSize = 320
+            if (bitmap.width > targetSize) {
+                val scaled = Bitmap.createScaledBitmap(bitmap, targetSize, targetSize, true)
+                if (scaled !== bitmap) bitmap.recycle()
+                bitmap = scaled
+            }
+
+            val out = ByteArrayOutputStream()
+            var quality = 78
+            while (quality >= 40) {
+                out.reset()
+                bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+                if (out.size() <= 95_000) break
+                quality -= 12
+            }
+            bitmap.recycle()
+
+            val bytes = out.toByteArray()
+            if (bytes.isEmpty()) return null
+            val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+            if (b64.length <= 180_000) b64 else null
+        }.getOrNull()
+    }
+
     fun decodeBase64ToBytes(imageData: String?): ByteArray? {
         if (imageData.isNullOrBlank()) return null
         return runCatching {

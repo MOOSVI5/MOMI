@@ -1,15 +1,208 @@
 package com.example.ui.theme
 
+import android.content.Context
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 
 enum class ThemePreference {
     SYSTEM, LIGHT, DARK
 }
+
+enum class AppColorScheme(
+    val displayName: String,
+    val subtitle: String,
+    val gradientColors: List<Color>
+) {
+    MIDNIGHT_SUNSET(
+        displayName = "Midnight Sunset",
+        subtitle = "OLED Black & Rose Amber",
+        gradientColors = LumaGradientColors
+    ),
+    EMERALD_GOLD(
+        displayName = "Emerald & Gold",
+        subtitle = "Teal & Warm Gold",
+        gradientColors = EmeraldGradientColors
+    ),
+    COBALT_INDIGO(
+        displayName = "Electric Indigo",
+        subtitle = "Cobalt Blue & Coral",
+        gradientColors = IndigoGradientColors
+    ),
+    SILK_MAROON(
+        displayName = "Silk & Maroon",
+        subtitle = "Classic Momi Palette",
+        gradientColors = ClassicGradientColors
+    )
+}
+
+val LocalMomiBrandGradient = staticCompositionLocalOf { LumaGradientColors }
+
+object AppearancePrefs {
+    private const val PREFS_NAME = "momi_appearance_prefs"
+    private const val KEY_THEME_MODE = "theme_mode"
+    private const val KEY_COLOR_SCHEME = "color_scheme"
+
+    fun loadThemePreference(context: Context): ThemePreference {
+        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_THEME_MODE, ThemePreference.SYSTEM.name)
+        return runCatching { ThemePreference.valueOf(raw ?: ThemePreference.SYSTEM.name) }
+            .getOrDefault(ThemePreference.SYSTEM)
+    }
+
+    fun saveThemePreference(context: Context, preference: ThemePreference) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_THEME_MODE, preference.name)
+            .apply()
+    }
+
+    fun loadColorScheme(context: Context): AppColorScheme {
+        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_COLOR_SCHEME, AppColorScheme.MIDNIGHT_SUNSET.name)
+        return runCatching { AppColorScheme.valueOf(raw ?: AppColorScheme.MIDNIGHT_SUNSET.name) }
+            .getOrDefault(AppColorScheme.MIDNIGHT_SUNSET)
+    }
+
+    fun saveColorScheme(context: Context, scheme: AppColorScheme) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_COLOR_SCHEME, scheme.name)
+            .apply()
+    }
+}
+
+private val SunsetDarkColorScheme = darkColorScheme(
+    primary = SunsetRoseBright,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF4C0D22),
+    onPrimaryContainer = Color(0xFFFFD9E2),
+    secondary = SunsetAmber,
+    onSecondary = Color(0xFF281100),
+    secondaryContainer = Color(0xFF1A1A20),
+    onSecondaryContainer = Color(0xFFF5F5F7),
+    tertiary = SunsetRoseBright,
+    onTertiary = Color.White,
+    background = Color(0xFF000000),
+    onBackground = Color(0xFFF5F5F7),
+    surface = Color(0xFF0D0D11),
+    onSurface = Color(0xFFF5F5F7),
+    surfaceVariant = Color(0xFF1A1A22),
+    onSurfaceVariant = Color(0xFFA8A8B8),
+    outline = Color(0xFF2B2B36),
+    outlineVariant = Color(0xFF262630)
+)
+
+private val SunsetLightColorScheme = lightColorScheme(
+    primary = SunsetRose,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFFFE4EC),
+    onPrimaryContainer = Color(0xFF6B0B26),
+    secondary = SunsetAmber,
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFF3F4F6),
+    onSecondaryContainer = Color(0xFF111827),
+    tertiary = SunsetRose,
+    onTertiary = Color.White,
+    background = Color(0xFFFFFFFF),
+    onBackground = Color(0xFF111827),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF111827),
+    surfaceVariant = Color(0xFFF3F4F6),
+    onSurfaceVariant = Color(0xFF4B5563),
+    outline = Color(0xFFE5E7EB),
+    outlineVariant = Color(0xFFE5E7EB)
+)
+
+private val EmeraldDarkColorScheme = darkColorScheme(
+    primary = EmeraldBright,
+    onPrimary = Color(0xFF032623),
+    primaryContainer = Color(0xFF0F3F3A),
+    onPrimaryContainer = Color(0xFFCCFBF1),
+    secondary = GoldBright,
+    onSecondary = Color(0xFF261900),
+    secondaryContainer = Color(0xFF162422),
+    onSecondaryContainer = Color(0xFFECFEFF),
+    tertiary = GoldBright,
+    onTertiary = Color(0xFF261900),
+    background = Color(0xFF071110),
+    onBackground = Color(0xFFEEF7F6),
+    surface = Color(0xFF0E1B1A),
+    onSurface = Color(0xFFEEF7F6),
+    surfaceVariant = Color(0xFF172B29),
+    onSurfaceVariant = Color(0xFF9BC2BE),
+    outline = Color(0xFF26423F),
+    outlineVariant = Color(0xFF213A37)
+)
+
+private val EmeraldLightColorScheme = lightColorScheme(
+    primary = EmeraldPrimary,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFCCFBF1),
+    onPrimaryContainer = Color(0xFF0B4641),
+    secondary = GoldAccent,
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFF1F5F3),
+    onSecondaryContainer = Color(0xFF11211F),
+    tertiary = GoldAccent,
+    onTertiary = Color.White,
+    background = Color(0xFFFAF9F5),
+    onBackground = Color(0xFF11211F),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF11211F),
+    surfaceVariant = Color(0xFFEEF3F0),
+    onSurfaceVariant = Color(0xFF48615D),
+    outline = Color(0xFFD5E1DD),
+    outlineVariant = Color(0xFFD5E1DD)
+)
+
+private val IndigoDarkColorScheme = darkColorScheme(
+    primary = IndigoBright,
+    onPrimary = Color(0xFF061B3E),
+    primaryContainer = Color(0xFF173166),
+    onPrimaryContainer = Color(0xFFDBEAFE),
+    secondary = CoralBright,
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFF161E31),
+    onSecondaryContainer = Color(0xFFF1F5F9),
+    tertiary = CoralBright,
+    onTertiary = Color.White,
+    background = Color(0xFF080D1A),
+    onBackground = Color(0xFFF1F5F9),
+    surface = Color(0xFF101729),
+    onSurface = Color(0xFFF1F5F9),
+    surfaceVariant = Color(0xFF1A243D),
+    onSurfaceVariant = Color(0xFF94A3B8),
+    outline = Color(0xFF283554),
+    outlineVariant = Color(0xFF232E4A)
+)
+
+private val IndigoLightColorScheme = lightColorScheme(
+    primary = IndigoPrimary,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFDBEAFE),
+    onPrimaryContainer = Color(0xFF1E3A8A),
+    secondary = CoralAccent,
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFF1F5F9),
+    onSecondaryContainer = Color(0xFF0F172A),
+    tertiary = CoralAccent,
+    onTertiary = Color.White,
+    background = Color(0xFFF8FAFC),
+    onBackground = Color(0xFF0F172A),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF0F172A),
+    surfaceVariant = Color(0xFFEEF2F6),
+    onSurfaceVariant = Color(0xFF475569),
+    outline = Color(0xFFD6DFEB),
+    outlineVariant = Color(0xFFD6DFEB)
+)
 
 private val LumaDarkColorScheme = darkColorScheme(
     primary = SilkBlueLight,
@@ -53,9 +246,20 @@ private val LumaLightColorScheme = lightColorScheme(
     outlineVariant = LightOutline
 )
 
+private fun resolveColorScheme(
+    appColorScheme: AppColorScheme,
+    darkTheme: Boolean
+): ColorScheme = when (appColorScheme) {
+    AppColorScheme.MIDNIGHT_SUNSET -> if (darkTheme) SunsetDarkColorScheme else SunsetLightColorScheme
+    AppColorScheme.EMERALD_GOLD -> if (darkTheme) EmeraldDarkColorScheme else EmeraldLightColorScheme
+    AppColorScheme.COBALT_INDIGO -> if (darkTheme) IndigoDarkColorScheme else IndigoLightColorScheme
+    AppColorScheme.SILK_MAROON -> if (darkTheme) LumaDarkColorScheme else LumaLightColorScheme
+}
+
 @Composable
 fun LumaTheme(
     themePreference: ThemePreference = ThemePreference.SYSTEM,
+    appColorScheme: AppColorScheme = AppColorScheme.MIDNIGHT_SUNSET,
     content: @Composable () -> Unit,
 ) {
     val darkTheme = when (themePreference) {
@@ -64,11 +268,15 @@ fun LumaTheme(
         ThemePreference.DARK -> true
     }
 
-    val colorScheme = if (darkTheme) LumaDarkColorScheme else LumaLightColorScheme
+    val colorScheme = resolveColorScheme(appColorScheme, darkTheme)
 
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = LumaTypography,
-        content = content
-    )
+    CompositionLocalProvider(
+        LocalMomiBrandGradient provides appColorScheme.gradientColors
+    ) {
+        MaterialTheme(
+            colorScheme = colorScheme,
+            typography = LumaTypography,
+            content = content
+        )
+    }
 }

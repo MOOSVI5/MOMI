@@ -12,6 +12,8 @@ import com.example.data.model.Post
 import com.example.data.model.Story
 import com.example.data.model.UserProfile
 import com.example.data.repository.MomiFirestoreRepository
+import com.example.ui.theme.AppColorScheme
+import com.example.ui.theme.AppearancePrefs
 import com.example.ui.theme.ThemePreference
 import com.example.util.MediaAssets
 import com.google.firebase.Timestamp
@@ -46,6 +48,8 @@ class MomiViewModel(
     initialDisplayName: String?,
     initialEmail: String?
 ) : ViewModel() {
+
+    val isAdminUser: Boolean = initialEmail?.trim().equals("syali6511@gmail.com", ignoreCase = true)
 
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
@@ -136,12 +140,18 @@ class MomiViewModel(
 
     val allPostsState: StateFlow<StreamUiState<List<Post>>> = combine(
         repository.observeAllPosts(currentUserId),
+        allProfiles,
         likedPostIds,
         bookmarkedPostIds,
         followingUids
-    ) { posts, liked, bookmarked, following ->
+    ) { posts, profiles, liked, bookmarked, following ->
+        val profilesByUid = profiles.associateBy { it.userId }
         val enriched = posts.map { post ->
+            val authorProfile = profilesByUid[post.userId]
+            val isShowcase = post.id.startsWith("showcase_")
             post.copy(
+                authorAvatarData = if (isShowcase) null else authorProfile?.avatarData,
+                authorVerified = if (isShowcase) post.authorVerified else (authorProfile?.isVerified ?: post.authorVerified),
                 isLiked = liked.contains(post.id),
                 isBookmarked = bookmarked.contains(post.id),
                 isFollowingAuthor = post.userId == currentUserId || following.contains(post.userId)
@@ -167,11 +177,14 @@ class MomiViewModel(
 
     val stories: StateFlow<List<Story>> = combine(
         repository.observeStories(currentUserId),
+        allProfiles,
         seenStoryIds
-    ) { rawStories, seen ->
+    ) { rawStories, profiles, seen ->
+        val profilesByUid = profiles.associateBy { it.userId }
         rawStories
             .map { story ->
                 story.copy(
+                    avatarData = profilesByUid[story.userId]?.avatarData,
                     isOwnStory = story.userId == currentUserId,
                     isSeen = seen.contains(story.id)
                 )
@@ -230,6 +243,9 @@ class MomiViewModel(
     private val _themePreference = MutableStateFlow(ThemePreference.SYSTEM)
     val themePreference: StateFlow<ThemePreference> = _themePreference.asStateFlow()
 
+    private val _colorScheme = MutableStateFlow(AppColorScheme.MIDNIGHT_SUNSET)
+    val colorScheme: StateFlow<AppColorScheme> = _colorScheme.asStateFlow()
+
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
@@ -274,9 +290,16 @@ class MomiViewModel(
             } else {
                 combine(
                     repository.observeComments(currentUserId, postId),
+                    allProfiles,
                     likedCommentIds
-                ) { comments, liked ->
-                    comments.map { it.copy(isLiked = liked.contains(it.id)) }
+                ) { comments, profiles, liked ->
+                    val profilesByUid = profiles.associateBy { it.userId }
+                    comments.map {
+                        it.copy(
+                            authorAvatarData = profilesByUid[it.userId]?.avatarData,
+                            isLiked = liked.contains(it.id)
+                        )
+                    }
                 }.catch { error ->
                     val root = unwrapOrRethrowCancellation(error)
                     Log.w(TAG, "Error observing comments", root)
@@ -288,15 +311,22 @@ class MomiViewModel(
 
     fun observePost(postId: String): Flow<Post?> = combine(
         repository.observePost(currentUserId, postId),
+        allProfiles,
         likedPostIds,
         bookmarkedPostIds,
         followingUids
-    ) { rawPost, liked, bookmarked, following ->
-        rawPost?.copy(
-            isLiked = liked.contains(rawPost.id),
-            isBookmarked = bookmarked.contains(rawPost.id),
-            isFollowingAuthor = rawPost.userId == currentUserId || following.contains(rawPost.userId)
-        )
+    ) { rawPost, profiles, liked, bookmarked, following ->
+        rawPost?.let { post ->
+            val authorProfile = profiles.firstOrNull { it.userId == post.userId }
+            val isShowcase = post.id.startsWith("showcase_")
+            post.copy(
+                authorAvatarData = if (isShowcase) null else authorProfile?.avatarData,
+                authorVerified = if (isShowcase) post.authorVerified else (authorProfile?.isVerified ?: post.authorVerified),
+                isLiked = liked.contains(post.id),
+                isBookmarked = bookmarked.contains(post.id),
+                isFollowingAuthor = post.userId == currentUserId || following.contains(post.userId)
+            )
+        }
     }.catch { error ->
         val root = unwrapOrRethrowCancellation(error)
         Log.w(TAG, "Error observing post $postId", root)
@@ -314,8 +344,19 @@ class MomiViewModel(
         _errorMessage.value = null
     }
 
-    fun setThemePreference(preference: ThemePreference) {
+    fun loadAppearance(context: android.content.Context) {
+        _themePreference.value = AppearancePrefs.loadThemePreference(context)
+        _colorScheme.value = AppearancePrefs.loadColorScheme(context)
+    }
+
+    fun setThemePreference(context: android.content.Context, preference: ThemePreference) {
         _themePreference.value = preference
+        AppearancePrefs.saveThemePreference(context, preference)
+    }
+
+    fun setColorScheme(context: android.content.Context, scheme: AppColorScheme) {
+        _colorScheme.value = scheme
+        AppearancePrefs.saveColorScheme(context, scheme)
     }
 
     fun setSearchQuery(query: String) {
@@ -398,6 +439,8 @@ class MomiViewModel(
         mediaType: String,
         localVideoPath: String?,
         videoDurationMs: Long,
+        audioTitle: String,
+        localAudioPath: String?,
         filterTag: String,
         caption: String,
         location: String,
@@ -424,6 +467,8 @@ class MomiViewModel(
                 localVideoPath = localVideoPath,
                 videoData = encodedVideo,
                 videoDurationMs = videoDurationMs,
+                audioTitle = audioTitle,
+                localAudioPath = localAudioPath,
                 filterTag = filterTag,
                 caption = caption,
                 location = location,
@@ -447,6 +492,8 @@ class MomiViewModel(
         mediaType: String,
         localVideoPath: String?,
         videoDurationMs: Long,
+        audioTitle: String,
+        localAudioPath: String?,
         caption: String,
         onComplete: () -> Unit
     ) {
@@ -469,6 +516,8 @@ class MomiViewModel(
                 localVideoPath = localVideoPath,
                 videoData = encodedVideo,
                 videoDurationMs = videoDurationMs,
+                audioTitle = audioTitle,
+                localAudioPath = localAudioPath,
                 caption = caption
             ).onSuccess {
                 onComplete()
@@ -497,14 +546,42 @@ class MomiViewModel(
         username: String,
         category: String,
         bio: String,
-        website: String
+        website: String,
+        pickedAvatarLocalPath: String? = null,
+        removeAvatar: Boolean = false
     ) {
         val currentProfile = profile.value ?: return
         viewModelScope.launch {
-            repository.updateProfile(currentProfile, displayName, username, category, bio, website)
-                .onFailure {
-                    _errorMessage.value = unwrapErrorMessage(it, "Could not update profile")
-                }
+            val nextAvatarData = when {
+                removeAvatar -> null
+                !pickedAvatarLocalPath.isNullOrBlank() -> withContext(Dispatchers.IO) {
+                    MediaAssets.encodeAvatarFileToBase64(pickedAvatarLocalPath)
+                } ?: currentProfile.avatarData
+                else -> currentProfile.avatarData
+            }
+            repository.updateProfile(
+                current = currentProfile,
+                displayName = displayName,
+                username = username,
+                category = category,
+                bio = bio,
+                website = website,
+                avatarData = nextAvatarData
+            ).onFailure {
+                _errorMessage.value = unwrapErrorMessage(it, "Could not update profile")
+            }
+        }
+    }
+
+    fun setUserVerified(targetUid: String, verified: Boolean) {
+        if (!isAdminUser) {
+            _errorMessage.value = "Only the Momi owner can manage verified checkmarks."
+            return
+        }
+        viewModelScope.launch {
+            repository.setUserVerified(targetUid, verified).onFailure {
+                _errorMessage.value = unwrapErrorMessage(it, "Could not update verified badge")
+            }
         }
     }
 

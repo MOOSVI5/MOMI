@@ -27,7 +27,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.outlined.LocationOn
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.VideoLibrary
@@ -54,16 +56,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.ui.components.MomiVideoPlayer
 import com.example.ui.components.PostMediaImage
 import com.example.util.MediaAssets
+import com.example.util.StudioMusicCatalog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -87,6 +92,8 @@ fun CreatePostScreen(
         mediaType: String,
         localVideoPath: String?,
         videoDurationMs: Long,
+        audioTitle: String,
+        localAudioPath: String?,
         filterTag: String,
         caption: String,
         location: String,
@@ -99,6 +106,8 @@ fun CreatePostScreen(
         mediaType: String,
         localVideoPath: String?,
         videoDurationMs: Long,
+        audioTitle: String,
+        localAudioPath: String?,
         caption: String
     ) -> Unit,
     modifier: Modifier = Modifier
@@ -112,6 +121,8 @@ fun CreatePostScreen(
     var mediaType by remember { mutableStateOf("IMAGE") }
     var localVideoPath by remember { mutableStateOf<String?>(null) }
     var videoDurationMs by remember { mutableLongStateOf(0L) }
+    var selectedAudioTitle by remember { mutableStateOf("") }
+    var localAudioPath by remember { mutableStateOf<String?>(null) }
     var selectedFilter by remember { mutableStateOf("NONE") }
     var caption by remember { mutableStateOf("") }
     var location by remember { mutableStateOf("") }
@@ -155,6 +166,24 @@ fun CreatePostScreen(
                     videoDurationMs = extracted.durationMs
                     mediaType = "VIDEO"
                     shareAsClip = true
+                }
+                isProcessingMedia = false
+            }
+        }
+    }
+
+    val audioPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            isProcessingMedia = true
+            coroutineScope.launch {
+                val copied = withContext(Dispatchers.IO) {
+                    StudioMusicCatalog.copyPickedAudioToInternalStorage(context, uri)
+                }
+                if (copied != null) {
+                    localAudioPath = copied.first
+                    selectedAudioTitle = copied.second
                 }
                 isProcessingMedia = false
             }
@@ -223,6 +252,8 @@ fun CreatePostScreen(
                             mediaType,
                             localVideoPath,
                             videoDurationMs,
+                            selectedAudioTitle,
+                            localAudioPath,
                             caption
                         )
                     } else {
@@ -232,8 +263,10 @@ fun CreatePostScreen(
                             mediaType,
                             localVideoPath,
                             videoDurationMs,
+                            selectedAudioTitle,
+                            localAudioPath,
                             selectedFilter,
-                            caption.ifBlank { "Captured in silk blue & maroon light. #momi" },
+                            caption.ifBlank { "Captured on Momi #momi" },
                             location,
                             selectedCategory,
                             shareAsClip
@@ -275,12 +308,13 @@ fun CreatePostScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(1f)
+                    .clipToBounds()
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center
             ) {
                 if (mediaType == "VIDEO" && localVideoPath != null) {
                     MomiVideoPlayer(
-                        mediaId = localVideoPath ?: "draft_video",
+                        mediaId = "${localVideoPath}_${selectedAudioTitle}_${localAudioPath.orEmpty()}",
                         localVideoPath = localVideoPath,
                         videoData = null,
                         videoDurationMs = videoDurationMs,
@@ -289,9 +323,12 @@ fun CreatePostScreen(
                         fallbackImageData = null,
                         filterTag = selectedFilter,
                         isPlaying = true,
+                        localAudioPath = localAudioPath,
+                        audioTitle = selectedAudioTitle,
                         initialMuted = false,
                         showMuteButton = true,
                         showDurationBadge = true,
+                        contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
@@ -418,6 +455,155 @@ fun CreatePostScreen(
                             text = label,
                             style = MaterialTheme.typography.labelSmall,
                             color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            // Music & Sound Selector (Studio Tracks + Pick Song From Phone)
+            Spacer(modifier = Modifier.height(16.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Filled.MusicNote,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Music & Sound",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                if (selectedAudioTitle.isNotBlank()) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.primaryContainer)
+                            .clickable {
+                                selectedAudioTitle = ""
+                                localAudioPath = null
+                            }
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = selectedAudioTitle,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = "Remove music",
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                item(key = "music_original") {
+                    val active = selectedAudioTitle.isBlank()
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(
+                                if (active) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.surfaceVariant
+                            )
+                            .clickable {
+                                selectedAudioTitle = ""
+                                localAudioPath = null
+                            }
+                            .padding(horizontal = 14.dp, vertical = 9.dp)
+                    ) {
+                        Text(
+                            text = "Original",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                            color = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                item(key = "music_pick_phone") {
+                    val customPicked = localAudioPath != null
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(
+                                if (customPicked) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.surfaceVariant
+                            )
+                            .clickable(enabled = !isProcessingMedia && !isPublishing) {
+                                audioPickerLauncher.launch(arrayOf("audio/*"))
+                            }
+                            .padding(horizontal = 12.dp, vertical = 9.dp)
+                            .testTag("pick_audio_button"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.AudioFile,
+                            contentDescription = null,
+                            tint = if (customPicked) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "From Phone",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (customPicked) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+
+                items(StudioMusicCatalog.tracks, key = { it.id }) { track ->
+                    val active = localAudioPath == null && selectedAudioTitle == track.fullTitle
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(
+                                if (active) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.surfaceVariant
+                            )
+                            .clickable {
+                                localAudioPath = null
+                                selectedAudioTitle = track.fullTitle
+                            }
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.MusicNote,
+                            contentDescription = null,
+                            tint = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = "${track.title} · ${track.mood}",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                            color = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
@@ -563,4 +749,3 @@ fun CreatePostScreen(
         }
     }
 }
-

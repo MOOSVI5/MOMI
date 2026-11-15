@@ -36,6 +36,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -55,6 +56,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.compose.ContentFrame
 import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
 import com.example.util.MediaAssets
+import com.example.util.StudioMusicCatalog
 import kotlinx.coroutines.delay
 
 @OptIn(UnstableApi::class)
@@ -70,11 +72,15 @@ fun MomiVideoPlayer(
     filterTag: String,
     isPlaying: Boolean,
     modifier: Modifier = Modifier,
+    localAudioPath: String? = null,
+    audioTitle: String = "",
+    muteOriginalVideoWhenMusicAdded: Boolean = true,
     initialMuted: Boolean = true,
     showMuteButton: Boolean = true,
     showDurationBadge: Boolean = true,
     muteButtonAlignment: Alignment = Alignment.BottomEnd,
     muteButtonPadding: PaddingValues = PaddingValues(12.dp),
+    contentScale: ContentScale = ContentScale.Fit,
     overrideVideoUri: Uri? = null,
     onDoubleTap: (() -> Unit)? = null
 ) {
@@ -90,6 +96,14 @@ fun MomiVideoPlayer(
         )
     }
 
+    val playableMusicUri = remember(mediaId, localAudioPath, audioTitle) {
+        StudioMusicCatalog.resolvePlayableMusicUri(
+            context = context,
+            localAudioPath = localAudioPath,
+            audioTitle = audioTitle
+        )
+    }
+
     var isMuted by remember(mediaId) { mutableStateOf(initialMuted) }
     var userPaused by remember(mediaId) { mutableStateOf(false) }
     var showTapPlayIndicator by remember { mutableStateOf(false) }
@@ -101,7 +115,11 @@ fun MomiVideoPlayer(
         }
     }
 
-    Box(modifier = modifier) {
+    Box(
+        modifier = modifier
+            .clipToBounds()
+            .background(Color.Black)
+    ) {
         if (playableUri != null) {
             val exoPlayer = remember(playableUri) {
                 ExoPlayer.Builder(context).build().apply {
@@ -111,20 +129,44 @@ fun MomiVideoPlayer(
                 }
             }
 
-            LaunchedEffect(exoPlayer, isPlaying, userPaused) {
-                exoPlayer.playWhenReady = isPlaying && !userPaused
+            val musicPlayer = remember(playableMusicUri) {
+                playableMusicUri?.let { uri ->
+                    ExoPlayer.Builder(context).build().apply {
+                        repeatMode = Player.REPEAT_MODE_ONE
+                        setMediaItem(MediaItem.fromUri(uri))
+                        prepare()
+                    }
+                }
             }
 
-            LaunchedEffect(exoPlayer, isMuted) {
-                exoPlayer.volume = if (isMuted) 0f else 1f
+            LaunchedEffect(exoPlayer, musicPlayer, isPlaying, userPaused) {
+                val shouldPlay = isPlaying && !userPaused
+                exoPlayer.playWhenReady = shouldPlay
+                musicPlayer?.playWhenReady = shouldPlay
             }
 
-            DisposableEffect(lifecycleOwner, exoPlayer, isPlaying, userPaused) {
+            LaunchedEffect(exoPlayer, musicPlayer, isMuted, muteOriginalVideoWhenMusicAdded) {
+                val hasAddedMusic = musicPlayer != null
+                exoPlayer.volume = when {
+                    isMuted -> 0f
+                    hasAddedMusic && muteOriginalVideoWhenMusicAdded -> 0f
+                    hasAddedMusic -> 0.35f
+                    else -> 1f
+                }
+                musicPlayer?.volume = if (isMuted) 0f else 1f
+            }
+
+            DisposableEffect(lifecycleOwner, exoPlayer, musicPlayer, isPlaying, userPaused) {
                 val observer = LifecycleEventObserver { _, event ->
                     when (event) {
-                        Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> exoPlayer.pause()
+                        Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> {
+                            exoPlayer.pause()
+                            musicPlayer?.pause()
+                        }
                         Lifecycle.Event.ON_RESUME -> {
-                            exoPlayer.playWhenReady = isPlaying && !userPaused
+                            val shouldPlay = isPlaying && !userPaused
+                            exoPlayer.playWhenReady = shouldPlay
+                            musicPlayer?.playWhenReady = shouldPlay
                         }
                         else -> Unit
                     }
@@ -133,15 +175,23 @@ fun MomiVideoPlayer(
                 onDispose {
                     lifecycleOwner.lifecycle.removeObserver(observer)
                     exoPlayer.release()
+                    musicPlayer?.release()
                 }
             }
 
-            ContentFrame(
-                player = exoPlayer,
-                modifier = Modifier.fillMaxSize(),
-                surfaceType = SURFACE_TYPE_TEXTURE_VIEW,
-                contentScale = ContentScale.Crop
-            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clipToBounds(),
+                contentAlignment = Alignment.Center
+            ) {
+                ContentFrame(
+                    player = exoPlayer,
+                    modifier = Modifier.fillMaxSize(),
+                    surfaceType = SURFACE_TYPE_TEXTURE_VIEW,
+                    contentScale = contentScale
+                )
+            }
 
             // Gesture overlay: single-tap toggles play/pause, double-tap triggers like
             Box(

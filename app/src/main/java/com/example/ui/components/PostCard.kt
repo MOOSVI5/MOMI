@@ -28,6 +28,7 @@ import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
@@ -49,9 +50,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -114,6 +117,7 @@ fun PostCard(
             LumaAvatar(
                 username = post.authorUsername,
                 avatarKey = post.authorAvatarKey,
+                avatarData = post.authorAvatarData,
                 size = 38.dp,
                 hasActiveStory = true,
                 isSeenStory = false,
@@ -144,14 +148,30 @@ fun PostCard(
                         )
                     }
                 }
-                if (post.location.isNotBlank()) {
-                    Text(
-                        text = post.location,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                val subtitleText = when {
+                    post.audioTitle.isNotBlank() -> post.audioTitle
+                    post.location.isNotBlank() -> post.location
+                    else -> ""
+                }
+                if (subtitleText.isNotBlank()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (post.audioTitle.isNotBlank()) {
+                            Icon(
+                                imageVector = Icons.Filled.MusicNote,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(modifier = Modifier.width(3.dp))
+                        }
+                        Text(
+                            text = subtitleText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
 
@@ -225,11 +245,13 @@ fun PostCard(
         }
 
         // Edge-to-Edge Media with Double-Tap Coral Heart (or Live ExoPlayer for Video Posts)
+        val mediaAspectRatio = if (post.isVideoPost) 0.85f else 1f
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(1f)
-                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .aspectRatio(mediaAspectRatio)
+                .clipToBounds()
+                .background(if (post.isVideoPost) Color.Black else MaterialTheme.colorScheme.surfaceVariant)
                 .let { base ->
                     if (!post.isVideoPost) {
                         base.pointerInput(post.id) {
@@ -257,14 +279,17 @@ fun PostCard(
                     fallbackImageData = post.imageData,
                     filterTag = post.filterTag,
                     isPlaying = isPlaybackActive,
+                    localAudioPath = post.localAudioPath,
+                    audioTitle = post.audioTitle,
                     initialMuted = true,
                     showMuteButton = true,
                     showDurationBadge = true,
+                    contentScale = ContentScale.Fit,
                     onDoubleTap = {
                         showDoubleTapHeart = true
                         onDoubleTapLike()
                     },
-                    modifier = Modifier.fillMaxWidth().aspectRatio(1f)
+                    modifier = Modifier.fillMaxWidth().aspectRatio(mediaAspectRatio)
                 )
             } else {
                 PostMediaImage(
@@ -273,7 +298,7 @@ fun PostCard(
                     imageData = post.imageData,
                     filterTag = post.filterTag,
                     contentDescription = "Post by ${post.authorUsername}",
-                    modifier = Modifier.fillMaxWidth().aspectRatio(1f)
+                    modifier = Modifier.fillMaxWidth().aspectRatio(mediaAspectRatio)
                 )
             }
 

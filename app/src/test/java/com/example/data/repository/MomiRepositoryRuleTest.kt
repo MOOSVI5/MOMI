@@ -198,6 +198,47 @@ class MomiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         assertEquals(FirebaseFirestoreException.Code.PERMISSION_DENIED, firestoreException.code)
     }
 
+    @Test
+    fun userVerificationAndAvatar_ownerCanUpdateAvatar_nonAdminCannotSelfVerify() = runBlocking {
+        val aliceEmail = "alice_avatar_${UUID.randomUUID()}@momi.photo"
+        val aliceUid = signInTestUser(aliceEmail)
+        val aliceRepo = MomiFirestoreRepository(firestore)
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            aliceRepo.ensureUserSeeded("Alice Avatar", aliceEmail).getOrThrow()
+        }
+        val aliceProfile = withTimeout(FLOW_TIMEOUT_MS) {
+            aliceRepo.observeProfile(aliceUid).first { it != null }
+        }!!
+
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            aliceRepo.updateProfile(
+                current = aliceProfile,
+                displayName = "Alice Updated",
+                username = aliceProfile.username,
+                category = "Photographer",
+                bio = "New bio",
+                website = aliceProfile.website,
+                avatarData = "Q1VTVE9NX0FWQVRBUl9EQVRB"
+            ).getOrThrow()
+        }
+        val updated = withTimeout(FLOW_TIMEOUT_MS) {
+            aliceRepo.observeProfile(aliceUid).first { it?.avatarData == "Q1VTVE9NX0FWQVRBUl9EQVRB" }
+        }!!
+        assertEquals("Alice Updated", updated.displayName)
+        assertFalse(updated.isVerified)
+
+        val selfVerifyError = try {
+            withTimeout(DEFAULT_TIMEOUT_MS) {
+                aliceRepo.setUserVerified(aliceUid, true).getOrThrow()
+            }
+            null
+        } catch (e: Exception) {
+            e.unwrapFirestoreException()
+        }
+        assertNotNull(selfVerifyError)
+        assertEquals(FirebaseFirestoreException.Code.PERMISSION_DENIED, selfVerifyError?.code)
+    }
+
     private companion object {
         const val DEFAULT_TIMEOUT_MS = 10000L
         const val FLOW_TIMEOUT_MS = 5000L

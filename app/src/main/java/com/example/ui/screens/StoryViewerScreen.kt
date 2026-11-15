@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -43,9 +44,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -117,7 +120,34 @@ fun StoryViewerScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
+            .clipToBounds()
             .background(DarkBackground)
+            .pointerInput(currentIndex, stories.size) {
+                detectTapGestures(
+                    onPress = {
+                        isPaused = true
+                        tryAwaitRelease()
+                        isPaused = false
+                    },
+                    onTap = { offset ->
+                        if (offset.x < size.width * 0.35f) {
+                            if (currentIndex > 0) {
+                                currentIndex--
+                                progress = 0f
+                            } else {
+                                progress = 0f
+                            }
+                        } else {
+                            if (currentIndex < stories.lastIndex) {
+                                currentIndex++
+                                progress = 0f
+                            } else {
+                                onClose()
+                            }
+                        }
+                    }
+                )
+            }
     ) {
         if (currentStory.isVideoStory) {
             MomiVideoPlayer(
@@ -130,11 +160,14 @@ fun StoryViewerScreen(
                 fallbackImageData = currentStory.imageData,
                 filterTag = "NONE",
                 isPlaying = !isPaused,
+                localAudioPath = currentStory.localAudioPath,
+                audioTitle = currentStory.audioTitle,
                 initialMuted = false,
                 showMuteButton = true,
                 showDurationBadge = false,
                 muteButtonAlignment = Alignment.TopEnd,
                 muteButtonPadding = PaddingValues(top = 92.dp, end = 14.dp),
+                contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
         } else {
@@ -147,38 +180,6 @@ fun StoryViewerScreen(
                 modifier = Modifier.fillMaxSize()
             )
         }
-
-        // Tap Zones: Left = Previous, Right = Next, LongPress = Pause
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .pointerInput(currentIndex, stories.size) {
-                    detectTapGestures(
-                        onPress = {
-                            isPaused = true
-                            tryAwaitRelease()
-                            isPaused = false
-                        },
-                        onTap = { offset ->
-                            if (offset.x < size.width * 0.35f) {
-                                if (currentIndex > 0) {
-                                    currentIndex--
-                                    progress = 0f
-                                } else {
-                                    progress = 0f
-                                }
-                            } else {
-                                if (currentIndex < stories.lastIndex) {
-                                    currentIndex++
-                                    progress = 0f
-                                } else {
-                                    onClose()
-                                }
-                            }
-                        }
-                    )
-                }
-        )
 
         // Top Scrim + Progress Segments + Header
         Column(
@@ -230,6 +231,7 @@ fun StoryViewerScreen(
                     LumaAvatar(
                         username = currentStory.username,
                         avatarKey = currentStory.avatarKey,
+                        avatarData = currentStory.avatarData,
                         size = 34.dp
                     )
                     Spacer(modifier = Modifier.width(10.dp))
@@ -273,6 +275,30 @@ fun StoryViewerScreen(
                 .navigationBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 16.dp)
         ) {
+            if (currentStory.audioTitle.isNotBlank()) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color.Black.copy(alpha = 0.5f))
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.MusicNote,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = currentStory.audioTitle,
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
             if (currentStory.caption.isNotBlank()) {
                 Box(
                     modifier = Modifier

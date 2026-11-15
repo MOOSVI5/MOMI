@@ -29,12 +29,15 @@ import androidx.compose.material.icons.filled.AddBox
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.LightMode
+import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.PersonAdd
 import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material3.ButtonDefaults
@@ -45,6 +48,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
@@ -56,6 +61,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -67,6 +73,7 @@ import com.example.data.model.UserProfile
 import com.example.ui.components.EditProfileDialog
 import com.example.ui.components.LumaAvatar
 import com.example.ui.components.PostMediaImage
+import com.example.ui.theme.AppColorScheme
 import com.example.ui.theme.ThemePreference
 import com.example.util.MediaAssets
 
@@ -90,12 +97,24 @@ fun ProfileScreen(
     followingUids: Set<String>,
     allPosts: List<Post>,
     themePreference: ThemePreference,
+    appColorScheme: AppColorScheme,
+    isAdminUser: Boolean = false,
     onThemeChange: (ThemePreference) -> Unit,
+    onColorSchemeChange: (AppColorScheme) -> Unit,
     onCreateClick: () -> Unit,
     onPostClick: (Post) -> Unit,
     onShareProfile: () -> Unit,
-    onUpdateProfile: (displayName: String, username: String, category: String, bio: String, website: String) -> Unit,
+    onUpdateProfile: (
+        displayName: String,
+        username: String,
+        category: String,
+        bio: String,
+        website: String,
+        pickedAvatarLocalPath: String?,
+        removeAvatar: Boolean
+    ) -> Unit,
     onToggleFollowCreator: (UserProfile, Boolean) -> Unit,
+    onToggleUserVerified: (UserProfile, Boolean) -> Unit = { _, _ -> },
     onMessageCreator: (UserProfile) -> Unit,
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier
@@ -104,6 +123,7 @@ fun ProfileScreen(
     var showEditDialog by remember { mutableStateOf(false) }
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showCreatorsSheet by remember { mutableStateOf(false) }
+    var showAdminVerifySheet by remember { mutableStateOf(false) }
 
     val ownPosts = remember(allPosts, profile?.userId) {
         val uid = profile?.userId.orEmpty()
@@ -174,17 +194,29 @@ fun ProfileScreen(
                                 LumaAvatar(
                                     username = creator.username,
                                     avatarKey = creator.avatarKey,
+                                    avatarData = creator.avatarData,
                                     size = 44.dp
                                 )
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = creator.displayName,
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = creator.displayName,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (creator.isVerified) {
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Icon(
+                                                imageVector = Icons.Filled.Verified,
+                                                contentDescription = "Verified",
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        }
+                                    }
                                     Text(
                                         text = "@${creator.username}",
                                         style = MaterialTheme.typography.bodySmall,
@@ -254,7 +286,7 @@ fun ProfileScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "Choose your Momi Maroon & Silk Blue theme mode",
+                    text = "Choose light or dark mode and your Momi color scheme",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -282,7 +314,7 @@ fun ProfileScreen(
                                     shape = RoundedCornerShape(14.dp)
                                 )
                                 .clickable { onThemeChange(pref) }
-                                .padding(vertical = 14.dp),
+                                .padding(vertical = 12.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Icon(
@@ -300,6 +332,94 @@ fun ProfileScreen(
                         }
                     }
                 }
+
+                Text(
+                    text = "Color scheme",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AppColorScheme.entries.chunked(2).forEach { rowSchemes ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            rowSchemes.forEach { scheme ->
+                                val active = appColorScheme == scheme
+                                Row(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(
+                                            if (active) MaterialTheme.colorScheme.primaryContainer
+                                            else MaterialTheme.colorScheme.surfaceVariant
+                                        )
+                                        .border(
+                                            width = if (active) 1.5.dp else 0.dp,
+                                            color = if (active) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                            shape = RoundedCornerShape(14.dp)
+                                        )
+                                        .clickable { onColorSchemeChange(scheme) }
+                                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                                        .testTag("color_scheme_${scheme.name}"),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(24.dp)
+                                            .clip(CircleShape)
+                                            .background(Brush.linearGradient(scheme.gradientColors))
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column {
+                                        Text(
+                                            text = scheme.displayName,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = scheme.subtitle,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (isAdminUser) {
+                    OutlinedButton(
+                        onClick = {
+                            showSettingsSheet = false
+                            showAdminVerifySheet = true
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("admin_verify_users_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Verified,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Manage Verified Checkmarks",
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
                 HorizontalDivider(
                     modifier = Modifier.padding(top = 6.dp),
                     thickness = 0.5.dp,
@@ -329,6 +449,117 @@ fun ProfileScreen(
                         text = "Sign out of @${profile?.username ?: "account"}",
                         fontWeight = FontWeight.Bold
                     )
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+        }
+    }
+
+    if (showAdminVerifySheet && isAdminUser) {
+        var userFilter by remember { mutableStateOf("") }
+        val filteredUsers = remember(allCreators, userFilter) {
+            val q = userFilter.trim()
+            if (q.isEmpty()) {
+                allCreators
+            } else {
+                allCreators.filter {
+                    it.username.contains(q, ignoreCase = true) ||
+                        it.displayName.contains(q, ignoreCase = true)
+                }
+            }
+        }
+        ModalBottomSheet(
+            onDismissRequest = { showAdminVerifySheet = false },
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 10.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Filled.Verified,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Verified Checkmarks",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Only you can grant or remove the verified badge for any user.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = userFilter,
+                    onValueChange = { userFilter = it },
+                    placeholder = { Text("Search users by name or @username") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 360.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(filteredUsers, key = { "verify_${it.userId}" }) { creator ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            LumaAvatar(
+                                username = creator.username,
+                                avatarKey = creator.avatarKey,
+                                avatarData = creator.avatarData,
+                                size = 42.dp
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = creator.displayName,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (creator.isVerified) {
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Icon(
+                                            imageVector = Icons.Filled.Verified,
+                                            contentDescription = "Verified",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = "@${creator.username}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Switch(
+                                checked = creator.isVerified,
+                                onCheckedChange = { next ->
+                                    onToggleUserVerified(creator, next)
+                                }
+                            )
+                        }
+                    }
                 }
                 Spacer(modifier = Modifier.height(16.dp))
             }
@@ -369,6 +600,16 @@ fun ProfileScreen(
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(
+                    onClick = { showSettingsSheet = true },
+                    modifier = Modifier.minimumInteractiveComponentSize()
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Palette,
+                        contentDescription = "Color scheme and theme",
+                        tint = MaterialTheme.colorScheme.onBackground
+                    )
+                }
+                IconButton(
                     onClick = onCreateClick,
                     modifier = Modifier.minimumInteractiveComponentSize()
                 ) {
@@ -403,17 +644,39 @@ fun ProfileScreen(
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 8.dp)
                 ) {
-                    // Avatar + Stats
+                    // Avatar + Stats (Tap avatar to edit profile picture)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        LumaAvatar(
-                            username = profile?.username ?: "momi",
-                            avatarKey = profile?.avatarKey ?: "avatar_aria",
-                            size = 86.dp,
-                            hasActiveStory = true
-                        )
+                        Box(contentAlignment = Alignment.BottomEnd) {
+                            LumaAvatar(
+                                username = profile?.username ?: "momi",
+                                avatarKey = profile?.avatarKey ?: "avatar_aria",
+                                avatarData = profile?.avatarData,
+                                size = 86.dp,
+                                hasActiveStory = true,
+                                onClick = { showEditDialog = true }
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(26.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.surface)
+                                    .padding(2.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primary)
+                                    .clickable { showEditDialog = true },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.PhotoCamera,
+                                    contentDescription = "Change profile photo",
+                                    tint = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                        }
                         Spacer(modifier = Modifier.width(20.dp))
                         Row(
                             modifier = Modifier.weight(1f),
@@ -521,6 +784,34 @@ fun ProfileScreen(
                                 contentDescription = "Discover creators",
                                 tint = MaterialTheme.colorScheme.onSurface,
                                 modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+
+                    if (isAdminUser) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f))
+                                .clickable { showAdminVerifySheet = true }
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Verified,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Verify users (Admin)",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
                             )
                         }
                     }

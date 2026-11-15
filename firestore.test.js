@@ -32,7 +32,7 @@ function validProfilePayload(uid, username = "aria.studio", displayName = "Aria 
     avatarKey: "avatar_aria",
     followersCount: 0,
     followingCount: 0,
-    isVerified: true,
+    isVerified: false,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
@@ -176,17 +176,66 @@ test("Unauthenticated user: cannot read or write any shared or private Momi coll
 
 // --- 2. Public Creator Profiles + Private Subcollections ---
 
-test("Users: signed-in users can read creator profiles, only owner can update; private subcollections isolated", async () => {
-  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
-  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+test("Users: signed-in users can read creator profiles, only owner updates profile/avatarData, only admin verifies; private subcollections isolated", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, { email: "alice@example.com", email_verified: true }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, { email: "bob@example.com", email_verified: true }).firestore();
+  const adminDb = testEnv.authenticatedContext("admin_momi", {
+    email: "syali6511@gmail.com",
+    email_verified: true,
+  }).firestore();
+
+  // Non-admin cannot self-create as verified
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).set({
+      ...validProfilePayload(ALICE_UID),
+      isVerified: true,
+    })
+  );
 
   await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
   await assertSucceeds(bobDb.collection("users").doc(ALICE_UID).get());
   await assertSucceeds(bobDb.collection("users").get());
 
-  // Bob cannot edit or delete Alice's profile
+  // Owner can upload custom compressed avatarData and update own profile, but cannot self-verify
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      avatarData: "Q1VTVE9NX0FWQVRBUg==",
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      isVerified: true,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Admin (syali6511@gmail.com) can grant & revoke verified badge, but cannot alter Alice's displayName
+  await assertSucceeds(
+    adminDb.collection("users").doc(ALICE_UID).update({
+      isVerified: true,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    adminDb.collection("users").doc(ALICE_UID).update({
+      isVerified: false,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    adminDb.collection("users").doc(ALICE_UID).update({
+      displayName: "Admin Edited",
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Bob cannot edit, verify, or delete Alice's profile
   await assertFails(
     bobDb.collection("users").doc(ALICE_UID).update({ displayName: "Hacked", updatedAt: serverTimestamp() })
+  );
+  await assertFails(
+    bobDb.collection("users").doc(ALICE_UID).update({ isVerified: true, updatedAt: serverTimestamp() })
   );
   await assertFails(bobDb.collection("users").doc(ALICE_UID).delete());
 
@@ -269,6 +318,8 @@ test("Posts & Stories: allow compressed imageData/videoData under 700KB, reject 
     localVideoPath: "/data/user/0/app/files/luma_media/clip_1.mp4",
     videoData: "B".repeat(2048),
     videoDurationMs: 6500,
+    audioTitle: "Golden Hour Lo-Fi",
+    localAudioPath: "/data/user/0/app/cache/momi_music/golden_hour.wav",
     isReel: true,
   };
   await assertSucceeds(aliceDb.collection("posts").doc("post_vid_ok").set(okVideoPayload));
@@ -298,6 +349,8 @@ test("Posts & Stories: allow compressed imageData/videoData under 700KB, reject 
       mediaType: "VIDEO",
       videoData: "C".repeat(1024),
       videoDurationMs: 4200,
+      audioTitle: "Silk Breeze",
+      localAudioPath: "/data/user/0/app/cache/momi_music/silk_breeze.wav",
     })
   );
   await assertFails(

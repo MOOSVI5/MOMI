@@ -27,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -241,19 +242,31 @@ fun ExploreScreen(
                             LumaAvatar(
                                 username = creator.username,
                                 avatarKey = creator.avatarKey,
+                                avatarData = creator.avatarData,
                                 size = 44.dp,
                                 hasActiveStory = true
                             )
                             Spacer(modifier = Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = creator.displayName,
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onBackground,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = creator.displayName,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onBackground,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (creator.isVerified) {
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Icon(
+                                            imageVector = Icons.Filled.Verified,
+                                            contentDescription = "Verified",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                }
                                 Text(
                                     text = "@${creator.username}",
                                     style = MaterialTheme.typography.bodySmall,

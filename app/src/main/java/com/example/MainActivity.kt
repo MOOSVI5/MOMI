@@ -80,6 +80,8 @@ import com.example.ui.screens.ProfileScreen
 import com.example.ui.screens.ReelsScreen
 import com.example.ui.screens.SignInScreen
 import com.example.ui.screens.StoryViewerScreen
+import com.example.ui.theme.AppColorScheme
+import com.example.ui.theme.AppearancePrefs
 import com.example.ui.theme.LumaTheme
 import com.example.ui.theme.ThemePreference
 import com.example.ui.viewmodel.MomiViewModel
@@ -135,11 +137,16 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            var themePreference by remember { mutableStateOf(ThemePreference.SYSTEM) }
+            var themePreference by remember { mutableStateOf(AppearancePrefs.loadThemePreference(this)) }
+            var appColorScheme by remember { mutableStateOf(AppearancePrefs.loadColorScheme(this)) }
 
-            LumaTheme(themePreference = themePreference) {
+            LumaTheme(
+                themePreference = themePreference,
+                appColorScheme = appColorScheme
+            ) {
                 AppNavigation(
-                    onThemePreferenceChange = { themePreference = it }
+                    onThemePreferenceChange = { themePreference = it },
+                    onColorSchemeChange = { appColorScheme = it }
                 )
             }
         }
@@ -148,7 +155,8 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun AppNavigation(
-    onThemePreferenceChange: (ThemePreference) -> Unit
+    onThemePreferenceChange: (ThemePreference) -> Unit,
+    onColorSchemeChange: (AppColorScheme) -> Unit
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -183,9 +191,16 @@ private fun AppNavigation(
                     }
                 }
             )
+            LaunchedEffect(viewModel) {
+                viewModel.loadAppearance(context)
+            }
             val vmThemePreference by viewModel.themePreference.collectAsStateWithLifecycle()
+            val vmColorScheme by viewModel.colorScheme.collectAsStateWithLifecycle()
             LaunchedEffect(vmThemePreference) {
                 onThemePreferenceChange(vmThemePreference)
+            }
+            LaunchedEffect(vmColorScheme) {
+                onColorSchemeChange(vmColorScheme)
             }
 
             LumaApp(
@@ -226,6 +241,7 @@ private fun LumaApp(
     val messageThreads by viewModel.messageThreads.collectAsStateWithLifecycle()
     val unreadMessages by viewModel.unreadMessageCount.collectAsStateWithLifecycle()
     val themePreference by viewModel.themePreference.collectAsStateWithLifecycle()
+    val appColorScheme by viewModel.colorScheme.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val selectedCategory by viewModel.selectedExploreCategory.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
@@ -291,6 +307,7 @@ private fun LumaApp(
                                         LumaAvatar(
                                             username = profile?.username ?: "momi",
                                             avatarKey = profile?.avatarKey ?: "avatar_aria",
+                                            avatarData = profile?.avatarData,
                                             size = 26.dp,
                                             hasActiveStory = selected
                                         )
@@ -442,7 +459,7 @@ private fun LumaApp(
                             CreatePostScreen(
                                 initialModeStory = startAsStory,
                                 onClose = { navController.popBackStack() },
-                                onPublishPost = { imageKey, localPath, mediaType, localVideoPath, videoDurationMs, filter, caption, location, category, isReel ->
+                                onPublishPost = { imageKey, localPath, mediaType, localVideoPath, videoDurationMs, audioTitle, localAudioPath, filter, caption, location, category, isReel ->
                                     viewModel.createPost(
                                         context = context,
                                         imageKey = imageKey,
@@ -450,6 +467,8 @@ private fun LumaApp(
                                         mediaType = mediaType,
                                         localVideoPath = localVideoPath,
                                         videoDurationMs = videoDurationMs,
+                                        audioTitle = audioTitle,
+                                        localAudioPath = localAudioPath,
                                         filterTag = filter,
                                         caption = caption,
                                         location = location,
@@ -460,7 +479,7 @@ private fun LumaApp(
                                         navigatePrimaryTab(LumaRoutes.HOME)
                                     }
                                 },
-                                onPublishStory = { imageKey, localPath, mediaType, localVideoPath, videoDurationMs, caption ->
+                                onPublishStory = { imageKey, localPath, mediaType, localVideoPath, videoDurationMs, audioTitle, localAudioPath, caption ->
                                     viewModel.createStory(
                                         context = context,
                                         imageKey = imageKey,
@@ -468,6 +487,8 @@ private fun LumaApp(
                                         mediaType = mediaType,
                                         localVideoPath = localVideoPath,
                                         videoDurationMs = videoDurationMs,
+                                        audioTitle = audioTitle,
+                                        localAudioPath = localAudioPath,
                                         caption = caption
                                     ) {
                                         navController.popBackStack()
@@ -503,7 +524,10 @@ private fun LumaApp(
                                 followingUids = followingUids,
                                 allPosts = allPosts,
                                 themePreference = themePreference,
-                                onThemeChange = viewModel::setThemePreference,
+                                appColorScheme = appColorScheme,
+                                isAdminUser = viewModel.isAdminUser,
+                                onThemeChange = { viewModel.setThemePreference(context, it) },
+                                onColorSchemeChange = { viewModel.setColorScheme(context, it) },
                                 onCreateClick = { navController.navigate(LumaRoutes.createRoute(false)) },
                                 onPostClick = { post ->
                                     navController.navigate(LumaRoutes.postDetailRoute(post.id))
@@ -524,6 +548,9 @@ private fun LumaApp(
                                         currentlyFollowing = isFollowing
                                     )
                                 },
+                                onToggleUserVerified = { creator, verified ->
+                                    viewModel.setUserVerified(creator.userId, verified)
+                                },
                                 onMessageCreator = { creator ->
                                     viewModel.startDirectChat(creator) { thread ->
                                         navController.navigate(LumaRoutes.messagesRoute(thread.id))
@@ -536,6 +563,7 @@ private fun LumaApp(
                         composable(LumaRoutes.NOTIFICATIONS) {
                             NotificationsScreen(
                                 notifications = notifications,
+                                allCreators = allCreators,
                                 onToggleFollowBack = viewModel::toggleNotificationFollow,
                                 onMarkAllRead = viewModel::markNotificationsRead,
                                 onBack = { navController.popBackStack() }

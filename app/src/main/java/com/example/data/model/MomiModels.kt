@@ -2,6 +2,7 @@ package com.example.data.model
 
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.DocumentId
+import com.google.firebase.firestore.Exclude
 import com.google.firebase.firestore.IgnoreExtraProperties
 import com.google.firebase.firestore.PropertyName
 import com.google.firebase.firestore.ServerTimestamp
@@ -16,9 +17,10 @@ data class UserProfile(
     val bio: String = "",
     val website: String = "",
     val avatarKey: String = "avatar_aria",
+    val avatarData: String? = null,
     val followersCount: Long = 0L,
     val followingCount: Long = 0L,
-    @get:PropertyName("isVerified") val isVerified: Boolean = true,
+    @get:PropertyName("isVerified") val isVerified: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -30,6 +32,7 @@ data class Post(
     val authorUsername: String = "",
     val authorDisplayName: String = "",
     val authorAvatarKey: String = "avatar_aria",
+    @get:Exclude val authorAvatarData: String? = null,
     val authorVerified: Boolean = false,
     val location: String = "",
     val imageKey: String = "img_post_coastal",
@@ -49,6 +52,7 @@ data class Post(
     val category: String = "For You",
     @get:PropertyName("isReel") val isReel: Boolean = false,
     val audioTitle: String = "",
+    val localAudioPath: String? = null,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
@@ -62,6 +66,7 @@ data class Comment(
     val userId: String = "",
     val authorUsername: String = "",
     val authorAvatarKey: String = "avatar_aria",
+    @get:Exclude val authorAvatarData: String? = null,
     val text: String = "",
     val likesCount: Long = 0L,
     @get:PropertyName("isLiked") val isLiked: Boolean = false,
@@ -75,6 +80,7 @@ data class Story(
     val userId: String = "",
     val username: String = "",
     val avatarKey: String = "avatar_aria",
+    @get:Exclude val avatarData: String? = null,
     val imageKey: String = "img_post_coastal",
     val localImagePath: String? = null,
     val imageData: String? = null,
@@ -82,6 +88,8 @@ data class Story(
     val localVideoPath: String? = null,
     val videoData: String? = null,
     val videoDurationMs: Long = 0L,
+    val audioTitle: String = "",
+    val localAudioPath: String? = null,
     val caption: String = "",
     @get:PropertyName("isSeen") val isSeen: Boolean = false,
     @get:PropertyName("isOwnStory") val isOwnStory: Boolean = false,

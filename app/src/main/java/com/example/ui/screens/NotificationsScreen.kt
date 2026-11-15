@@ -39,12 +39,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.example.data.model.NotificationItem
+import com.example.data.model.UserProfile
 import com.example.ui.components.LumaAvatar
 import com.example.ui.components.PostMediaImage
 
 @Composable
 fun NotificationsScreen(
     notifications: List<NotificationItem>,
+    allCreators: List<UserProfile> = emptyList(),
     onToggleFollowBack: (NotificationItem) -> Unit,
     onMarkAllRead: () -> Unit,
     onBack: () -> Unit,
@@ -139,9 +141,11 @@ fun NotificationsScreen(
                                 .padding(horizontal = 16.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            val actorAvatarData = allCreators.firstOrNull { it.userId == notification.actorUid }?.avatarData
                             LumaAvatar(
                                 username = notification.actorUsername,
                                 avatarKey = notification.actorAvatarKey,
+                                avatarData = actorAvatarData,
                                 size = 44.dp,
                                 hasActiveStory = true
                             )

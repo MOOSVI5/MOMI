@@ -100,9 +100,12 @@ fun MessagesScreen(
             observeChatMessages(openThread.id)
         }.collectAsStateWithLifecycle(initialValue = emptyList())
 
+        val peerUid = openThread.participantUids.firstOrNull { it != currentUserId }
+        val peerAvatarData = allCreators.firstOrNull { it.userId == peerUid }?.avatarData
         ChatThreadView(
             currentUserId = currentUserId,
             thread = openThread,
+            peerAvatarData = peerAvatarData,
             messages = messages,
             onSend = { text -> onSendMessage(openThread, text) },
             onBack = {
@@ -190,6 +193,7 @@ fun MessagesScreen(
                                     LumaAvatar(
                                         username = profile?.username ?: "you",
                                         avatarKey = profile?.avatarKey ?: "avatar_aria",
+                                        avatarData = profile?.avatarData,
                                         size = 58.dp
                                     )
                                     Spacer(modifier = Modifier.height(4.dp))
@@ -232,6 +236,7 @@ fun MessagesScreen(
                                         LumaAvatar(
                                             username = creator.username,
                                             avatarKey = creator.avatarKey,
+                                            avatarData = creator.avatarData,
                                             size = 58.dp
                                         )
                                         Box(
@@ -305,6 +310,8 @@ fun MessagesScreen(
                         val peerUsername = thread.peerUsernameFor(currentUserId)
                         val peerDisplayName = thread.peerDisplayNameFor(currentUserId)
                         val peerAvatarKey = thread.peerAvatarKeyFor(currentUserId)
+                        val peerUid = thread.participantUids.firstOrNull { it != currentUserId }
+                        val peerAvatarData = allCreators.firstOrNull { it.userId == peerUid }?.avatarData
                         val isUnread = thread.isUnreadFor(currentUserId)
 
                         Row(
@@ -322,6 +329,7 @@ fun MessagesScreen(
                                 LumaAvatar(
                                     username = peerUsername,
                                     avatarKey = peerAvatarKey,
+                                    avatarData = peerAvatarData,
                                     size = 54.dp,
                                     hasActiveStory = true
                                 )
@@ -375,6 +383,7 @@ fun MessagesScreen(
 private fun ChatThreadView(
     currentUserId: String,
     thread: MessageThread,
+    peerAvatarData: String?,
     messages: List<ChatMessage>,
     onSend: (String) -> Unit,
     onBack: () -> Unit,
@@ -412,6 +421,7 @@ private fun ChatThreadView(
             LumaAvatar(
                 username = peerUsername,
                 avatarKey = peerAvatarKey,
+                avatarData = peerAvatarData,
                 size = 36.dp
             )
             Spacer(modifier = Modifier.width(10.dp))

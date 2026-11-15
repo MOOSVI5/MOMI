@@ -700,6 +700,8 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         localVideoPath: String? = null,
         videoData: String? = null,
         videoDurationMs: Long = 0L,
+        audioTitle: String = "",
+        localAudioPath: String? = null,
         filterTag: String,
         caption: String,
         location: String,
@@ -708,6 +710,9 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     ): Result<String> = runCatching {
         val uid = requireUserId()
         val docRef = postsCol().document()
+        val resolvedAudioTitle = audioTitle.trim().take(120).ifBlank {
+            if (isReel || mediaType == "VIDEO") "${profile.displayName} · Original Audio" else ""
+        }
         val payload = buildMap<String, Any> {
             put("userId", uid)
             put("authorUsername", profile.username)
@@ -722,13 +727,14 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             if (!localVideoPath.isNullOrBlank()) put("localVideoPath", localVideoPath.take(500))
             if (!videoData.isNullOrBlank()) put("videoData", videoData)
             put("videoDurationMs", videoDurationMs.coerceIn(0L, 3_600_000L))
+            if (!localAudioPath.isNullOrBlank()) put("localAudioPath", localAudioPath.take(500))
             put("filterTag", filterTag)
             put("caption", caption.trim().take(1000))
             put("likesCount", 0L)
             put("commentsCount", 0L)
             put("category", category)
             put("isReel", isReel)
-            put("audioTitle", if (isReel || mediaType == "VIDEO") "${profile.displayName} · Original Audio" else "")
+            put("audioTitle", resolvedAudioTitle)
             put("createdAt", FieldValue.serverTimestamp())
             put("updatedAt", FieldValue.serverTimestamp())
         }
@@ -752,6 +758,8 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         localVideoPath: String? = null,
         videoData: String? = null,
         videoDurationMs: Long = 0L,
+        audioTitle: String = "",
+        localAudioPath: String? = null,
         caption: String
     ): Result<String> = runCatching {
         val uid = requireUserId()
@@ -767,6 +775,8 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             if (!localVideoPath.isNullOrBlank()) put("localVideoPath", localVideoPath.take(500))
             if (!videoData.isNullOrBlank()) put("videoData", videoData)
             put("videoDurationMs", videoDurationMs.coerceIn(0L, 3_600_000L))
+            if (audioTitle.isNotBlank()) put("audioTitle", audioTitle.trim().take(120))
+            if (!localAudioPath.isNullOrBlank()) put("localAudioPath", localAudioPath.take(500))
             put("caption", caption.ifBlank { "Shared a moment" }.take(300))
             put("createdAt", FieldValue.serverTimestamp())
             put("updatedAt", FieldValue.serverTimestamp())
@@ -824,7 +834,8 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         username: String,
         category: String,
         bio: String,
-        website: String
+        website: String,
+        avatarData: String? = current.avatarData
     ): Result<Unit> = runCatching {
         val uid = requireUserId()
         val docRef = userDoc(uid)
@@ -832,13 +843,35 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         val cleanUsername = username.trim().lowercase().replace(" ", "_")
             .ifBlank { current.username }.take(50)
         try {
+            val updates = hashMapOf<String, Any?>(
+                "displayName" to cleanDisplay,
+                "username" to cleanUsername,
+                "category" to category.trim().take(80),
+                "bio" to bio.trim().take(300),
+                "website" to website.trim().take(200),
+                "avatarData" to avatarData,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            docRef.update(updates).await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            throw e
+        }
+    }
+
+    suspend fun setUserVerified(
+        targetUid: String,
+        verified: Boolean
+    ): Result<Unit> = runCatching {
+        requireUserId()
+        require(targetUid.isNotBlank()) { "Target user ID must not be blank" }
+        val docRef = userDoc(targetUid)
+        try {
             docRef.update(
                 mapOf(
-                    "displayName" to cleanDisplay,
-                    "username" to cleanUsername,
-                    "category" to category.trim().take(80),
-                    "bio" to bio.trim().take(300),
-                    "website" to website.trim().take(200),
+                    "isVerified" to verified,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()

@@ -120,6 +120,7 @@ fun CommentsBottomSheet(
                             LumaAvatar(
                                 username = comment.authorUsername,
                                 avatarKey = comment.authorAvatarKey,
+                                avatarData = comment.authorAvatarData,
                                 size = 34.dp
                             )
                             Spacer(modifier = Modifier.width(12.dp))
@@ -183,6 +184,7 @@ fun CommentsBottomSheet(
                 LumaAvatar(
                     username = currentUser?.username ?: "aria.studio",
                     avatarKey = currentUser?.avatarKey ?: "avatar_aria",
+                    avatarData = currentUser?.avatarData,
                     size = 34.dp
                 )
                 Spacer(modifier = Modifier.width(10.dp))

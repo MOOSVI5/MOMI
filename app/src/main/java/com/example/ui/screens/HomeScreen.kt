@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material3.DropdownMenu
@@ -269,6 +270,7 @@ fun HomeScreen(
                             LumaAvatar(
                                 username = profile?.username ?: "aria.studio",
                                 avatarKey = profile?.avatarKey ?: "avatar_aria",
+                                avatarData = profile?.avatarData,
                                 size = 70.dp,
                                 hasActiveStory = ownStory != null,
                                 isSeenStory = ownStory?.isSeen ?: false,
@@ -297,6 +299,7 @@ fun HomeScreen(
                             LumaAvatar(
                                 username = story.username,
                                 avatarKey = story.avatarKey,
+                                avatarData = story.avatarData,
                                 size = 70.dp,
                                 hasActiveStory = true,
                                 isSeenStory = story.isSeen,
@@ -440,18 +443,34 @@ private fun SuggestedCreatorsSection(
                     LumaAvatar(
                         username = creator.username,
                         avatarKey = creator.avatarKey,
+                        avatarData = creator.avatarData,
                         size = 64.dp,
                         hasActiveStory = true
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = creator.displayName,
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onBackground,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            text = creator.displayName,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (creator.isVerified) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.Filled.Verified,
+                                contentDescription = "Verified",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
                     Text(
                         text = "@${creator.username}",
                         style = MaterialTheme.typography.labelSmall,

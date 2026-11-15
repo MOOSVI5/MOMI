@@ -15,6 +15,14 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    function isAdmin() {
+      return isSignedIn() &&
+             ('email' in request.auth.token) &&
+             ('email_verified' in request.auth.token) &&
+             request.auth.token.email == 'syali6511@gmail.com' &&
+             request.auth.token.email_verified == true;
+    }
+
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
@@ -36,6 +44,7 @@ service cloud.firestore {
              (!('bio' in data) || (data.bio is string && data.bio.size() <= 300)) &&
              (!('website' in data) || (data.website is string && data.website.size() <= 200)) &&
              data.avatarKey is string && data.avatarKey.size() >= 1 && data.avatarKey.size() <= 64 &&
+             (!('avatarData' in data) || data.avatarData == null || (data.avatarData is string && data.avatarData.size() <= 200000)) &&
              data.followersCount is int && data.followersCount >= 0 &&
              data.followingCount is int && data.followingCount >= 0 &&
              data.isVerified is bool &&
@@ -64,6 +73,7 @@ service cloud.firestore {
              data.category is string && data.category.size() >= 1 && data.category.size() <= 40 &&
              data.isReel is bool &&
              (!('audioTitle' in data) || (data.audioTitle is string && data.audioTitle.size() <= 120)) &&
+             (!('localAudioPath' in data) || data.localAudioPath == null || (data.localAudioPath is string && data.localAudioPath.size() <= 500)) &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
     }
@@ -89,6 +99,8 @@ service cloud.firestore {
              (!('localVideoPath' in data) || data.localVideoPath == null || (data.localVideoPath is string && data.localVideoPath.size() <= 500)) &&
              (!('videoData' in data) || data.videoData == null || (data.videoData is string && data.videoData.size() <= 700000)) &&
              (!('videoDurationMs' in data) || data.videoDurationMs == null || (data.videoDurationMs is int && data.videoDurationMs >= 0 && data.videoDurationMs <= 3600000)) &&
+             (!('audioTitle' in data) || data.audioTitle == null || (data.audioTitle is string && data.audioTitle.size() <= 120)) &&
+             (!('localAudioPath' in data) || data.localAudioPath == null || (data.localAudioPath is string && data.localAudioPath.size() <= 500)) &&
              data.caption is string && data.caption.size() <= 300 &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
@@ -170,15 +182,20 @@ service cloud.firestore {
       allow create: if isOwner(userId) &&
                        isValidId(userId) &&
                        incoming().keys().hasAll(['userId', 'username', 'displayName', 'avatarKey', 'followersCount', 'followingCount', 'isVerified', 'createdAt']) &&
-                       incoming().keys().hasOnly(['userId', 'username', 'displayName', 'category', 'bio', 'website', 'avatarKey', 'followersCount', 'followingCount', 'isVerified', 'createdAt', 'updatedAt']) &&
-                       isValidUserProfile(incoming(), userId);
+                       incoming().keys().hasOnly(['userId', 'username', 'displayName', 'category', 'bio', 'website', 'avatarKey', 'avatarData', 'followersCount', 'followingCount', 'isVerified', 'createdAt', 'updatedAt']) &&
+                       isValidUserProfile(incoming(), userId) &&
+                       (incoming().isVerified == false || isAdmin());
 
-      allow update: if isOwner(userId) &&
-                       isValidId(userId) &&
+      allow update: if isValidId(userId) &&
                        isValidUserProfile(incoming(), userId) &&
                        incoming().userId == existing().userId &&
                        incoming().createdAt == existing().createdAt &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['username', 'displayName', 'category', 'bio', 'website', 'avatarKey', 'updatedAt']);
+                       (
+                         (isOwner(userId) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['username', 'displayName', 'category', 'bio', 'website', 'avatarKey', 'avatarData', 'updatedAt'])) ||
+                         (isAdmin() &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['isVerified', 'updatedAt']))
+                       );
 
       allow delete: if isOwner(userId) && isValidId(userId);
 
@@ -263,7 +280,7 @@ service cloud.firestore {
                        isValidId(postId) &&
                        incoming().userId == request.auth.uid &&
                        incoming().keys().hasAll(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'imageKey', 'filterTag', 'caption', 'likesCount', 'commentsCount', 'category', 'isReel', 'createdAt']) &&
-                       incoming().keys().hasOnly(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'location', 'imageKey', 'localImagePath', 'imageData', 'mediaType', 'localVideoPath', 'videoData', 'videoDurationMs', 'filterTag', 'caption', 'likesCount', 'commentsCount', 'category', 'isReel', 'audioTitle', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'location', 'imageKey', 'localImagePath', 'imageData', 'mediaType', 'localVideoPath', 'videoData', 'videoDurationMs', 'localAudioPath', 'filterTag', 'caption', 'likesCount', 'commentsCount', 'category', 'isReel', 'audioTitle', 'createdAt', 'updatedAt']) &&
                        isValidPost(incoming());
 
       allow update: if isSignedIn() &&
@@ -319,7 +336,7 @@ service cloud.firestore {
                        isValidId(storyId) &&
                        incoming().userId == request.auth.uid &&
                        incoming().keys().hasAll(['userId', 'username', 'avatarKey', 'imageKey', 'caption', 'createdAt']) &&
-                       incoming().keys().hasOnly(['userId', 'username', 'avatarKey', 'imageKey', 'localImagePath', 'imageData', 'mediaType', 'localVideoPath', 'videoData', 'videoDurationMs', 'caption', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'username', 'avatarKey', 'imageKey', 'localImagePath', 'imageData', 'mediaType', 'localVideoPath', 'videoData', 'videoDurationMs', 'audioTitle', 'localAudioPath', 'caption', 'createdAt', 'updatedAt']) &&
                        isValidStory(incoming());
 
       allow update: if false;
