@@ -36,16 +36,20 @@ class MomiRepositoryRuleTest : FirestoreEmulatorTestBase() {
                 imageKey = "img_post_coastal",
                 localImagePath = null,
                 imageData = "ZmFrZV9iYXNlNjRfanBlZ19wYXlsb2Fk",
-                filterTag = "BLUE",
-                caption = "Multi-user sunset frame",
+                mediaType = "VIDEO",
+                localVideoPath = null,
+                videoData = "ZmFrZV9iYXNlNjRfbXA0X3BheWxvYWQ=",
+                videoDurationMs = 4500L,
+                filterTag = "NONE",
+                caption = "Multi-user sunset clip",
                 location = "Positano",
                 category = "Travel",
-                isReel = false
+                isReel = true
             ).getOrThrow()
         }
         assertTrue(postId.isNotBlank())
 
-        // 2. Bob signs in on a second device, sees Alice's post and imageData in the shared feed
+        // 2. Bob signs in on a second device, sees Alice's video post, thumbnail imageData, and videoData in the shared feed
         val bobUid = signInTestUser(bobEmail)
         val bobRepo = MomiFirestoreRepository(firestore)
         withTimeout(DEFAULT_TIMEOUT_MS) {
@@ -60,6 +64,10 @@ class MomiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         }.first { it.id == postId }
         assertEquals(aliceUid, sharedPost.userId)
         assertEquals("ZmFrZV9iYXNlNjRfanBlZ19wYXlsb2Fk", sharedPost.imageData)
+        assertEquals("VIDEO", sharedPost.mediaType)
+        assertEquals("ZmFrZV9iYXNlNjRfbXA0X3BheWxvYWQ=", sharedPost.videoData)
+        assertEquals(4500L, sharedPost.videoDurationMs)
+        assertTrue(sharedPost.isVideoPost)
 
         // 3. Bob likes, bookmarks, comments, follows Alice, and sends Alice a DM
         withTimeout(DEFAULT_TIMEOUT_MS) {

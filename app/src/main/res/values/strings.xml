@@ -1,10 +1,12 @@
 <resources>
     <string name="app_name">Momi</string>
     <string name="nav_home">Home</string>
+    <string name="nav_search">Search</string>
     <string name="nav_explore">Explore</string>
     <string name="nav_create">Create</string>
     <string name="nav_clips">Clips</string>
     <string name="nav_profile">Profile</string>
+    <string name="action_search">Search</string>
     <string name="action_notifications">Activity</string>
     <string name="action_messages">Messages</string>
     <string name="action_like">Like</string>

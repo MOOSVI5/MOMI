@@ -18,14 +18,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddBox
-import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material.icons.outlined.AddBox
-import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.SmartDisplay
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -118,7 +118,7 @@ private data class BottomNavTab(
 
 private val PrimaryTabs = listOf(
     BottomNavTab(LumaRoutes.HOME, "Home", Icons.Filled.Home, Icons.Outlined.Home, "tab_home"),
-    BottomNavTab(LumaRoutes.EXPLORE, "Explore", Icons.Filled.Explore, Icons.Outlined.Explore, "tab_explore"),
+    BottomNavTab(LumaRoutes.EXPLORE, "Search", Icons.Filled.Search, Icons.Outlined.Search, "tab_explore"),
     BottomNavTab("create?story=false", "Create", Icons.Filled.AddBox, Icons.Outlined.AddBox, "tab_create"),
     BottomNavTab(LumaRoutes.CLIPS, "Clips", Icons.Filled.SmartDisplay, Icons.Outlined.SmartDisplay, "tab_clips"),
     BottomNavTab(LumaRoutes.PROFILE, "Profile", Icons.Filled.Person, Icons.Outlined.Person, "tab_profile")
@@ -351,10 +351,13 @@ private fun LumaApp(
                         composable(LumaRoutes.HOME) {
                             HomeScreen(
                                 profile = profile,
+                                creators = allCreators,
+                                followingUids = followingUids,
                                 posts = allPosts,
                                 stories = stories,
                                 unreadNotificationCount = unreadNotifications,
                                 unreadMessageCount = unreadMessages,
+                                onOpenSearch = { navigatePrimaryTab(LumaRoutes.EXPLORE) },
                                 onOpenNotifications = { navController.navigate(LumaRoutes.NOTIFICATIONS) },
                                 onOpenMessages = { navController.navigate(LumaRoutes.messagesRoute()) },
                                 onOpenStory = { story -> navController.navigate(LumaRoutes.storyRoute(story.id)) },
@@ -379,6 +382,13 @@ private fun LumaApp(
                                         currentlyFollowing = it.isFollowingAuthor
                                     )
                                 },
+                                onFollowCreator = { creator, isFollowing ->
+                                    viewModel.toggleFollow(
+                                        targetUid = creator.userId,
+                                        targetUsername = creator.username,
+                                        currentlyFollowing = isFollowing
+                                    )
+                                },
                                 onDeletePost = { viewModel.deletePost(it.id) },
                                 onAuthorClick = { username ->
                                     if (username == profile?.username) {
@@ -394,12 +404,27 @@ private fun LumaApp(
                         composable(LumaRoutes.EXPLORE) {
                             ExploreScreen(
                                 posts = explorePosts,
+                                creators = allCreators,
+                                currentUserId = viewModel.currentUserId,
+                                followingUids = followingUids,
                                 searchQuery = searchQuery,
                                 selectedCategory = selectedCategory,
                                 onSearchQueryChange = viewModel::setSearchQuery,
                                 onCategorySelected = viewModel::setExploreCategory,
                                 onPostClick = { post ->
                                     navController.navigate(LumaRoutes.postDetailRoute(post.id))
+                                },
+                                onFollowCreator = { creator, isFollowing ->
+                                    viewModel.toggleFollow(
+                                        targetUid = creator.userId,
+                                        targetUsername = creator.username,
+                                        currentlyFollowing = isFollowing
+                                    )
+                                },
+                                onMessageCreator = { creator ->
+                                    viewModel.startDirectChat(creator) { thread ->
+                                        navController.navigate(LumaRoutes.messagesRoute(thread.id))
+                                    }
                                 }
                             )
                         }
@@ -417,10 +442,14 @@ private fun LumaApp(
                             CreatePostScreen(
                                 initialModeStory = startAsStory,
                                 onClose = { navController.popBackStack() },
-                                onPublishPost = { imageKey, localPath, filter, caption, location, category, isReel ->
+                                onPublishPost = { imageKey, localPath, mediaType, localVideoPath, videoDurationMs, filter, caption, location, category, isReel ->
                                     viewModel.createPost(
+                                        context = context,
                                         imageKey = imageKey,
                                         localImagePath = localPath,
+                                        mediaType = mediaType,
+                                        localVideoPath = localVideoPath,
+                                        videoDurationMs = videoDurationMs,
                                         filterTag = filter,
                                         caption = caption,
                                         location = location,
@@ -431,8 +460,16 @@ private fun LumaApp(
                                         navigatePrimaryTab(LumaRoutes.HOME)
                                     }
                                 },
-                                onPublishStory = { imageKey, localPath, caption ->
-                                    viewModel.createStory(imageKey, localPath, caption) {
+                                onPublishStory = { imageKey, localPath, mediaType, localVideoPath, videoDurationMs, caption ->
+                                    viewModel.createStory(
+                                        context = context,
+                                        imageKey = imageKey,
+                                        localImagePath = localPath,
+                                        mediaType = mediaType,
+                                        localVideoPath = localVideoPath,
+                                        videoDurationMs = videoDurationMs,
+                                        caption = caption
+                                    ) {
                                         navController.popBackStack()
                                         navigatePrimaryTab(LumaRoutes.HOME)
                                     }

@@ -658,16 +658,32 @@ fun ProfileScreen(
                                     contentDescription = "Post thumbnail",
                                     modifier = Modifier.fillMaxSize()
                                 )
-                                if (post.isReel) {
-                                    Icon(
-                                        imageVector = Icons.Filled.PlayArrow,
-                                        contentDescription = "Clip",
-                                        tint = Color.White,
+                                if (post.isReel || post.isVideoPost) {
+                                    Row(
                                         modifier = Modifier
                                             .align(Alignment.TopEnd)
                                             .padding(6.dp)
-                                            .size(18.dp)
-                                    )
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(Color.Black.copy(alpha = 0.6f))
+                                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.PlayArrow,
+                                            contentDescription = "Video clip",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        if (post.videoDurationMs > 0L) {
+                                            Spacer(modifier = Modifier.width(3.dp))
+                                            Text(
+                                                text = MediaAssets.formatDuration(post.videoDurationMs),
+                                                color = Color.White,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }

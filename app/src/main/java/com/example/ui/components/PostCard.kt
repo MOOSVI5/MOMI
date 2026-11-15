@@ -68,6 +68,7 @@ import kotlinx.coroutines.delay
 fun PostCard(
     post: Post,
     isOwnPost: Boolean,
+    isPlaybackActive: Boolean = false,
     onLikeToggle: () -> Unit,
     onDoubleTapLike: () -> Unit,
     onCommentClick: () -> Unit,
@@ -223,30 +224,58 @@ fun PostCard(
             }
         }
 
-        // Edge-to-Edge Media with Double-Tap Coral Heart
+        // Edge-to-Edge Media with Double-Tap Coral Heart (or Live ExoPlayer for Video Posts)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
                 .background(MaterialTheme.colorScheme.surfaceVariant)
-                .pointerInput(post.id) {
-                    detectTapGestures(
-                        onDoubleTap = {
-                            showDoubleTapHeart = true
-                            onDoubleTapLike()
+                .let { base ->
+                    if (!post.isVideoPost) {
+                        base.pointerInput(post.id) {
+                            detectTapGestures(
+                                onDoubleTap = {
+                                    showDoubleTapHeart = true
+                                    onDoubleTapLike()
+                                }
+                            )
                         }
-                    )
+                    } else {
+                        base
+                    }
                 },
             contentAlignment = Alignment.Center
         ) {
-            PostMediaImage(
-                imageKey = post.imageKey,
-                localImagePath = post.localImagePath,
-                imageData = post.imageData,
-                filterTag = post.filterTag,
-                contentDescription = "Post by ${post.authorUsername}",
-                modifier = Modifier.fillMaxWidth().aspectRatio(1f)
-            )
+            if (post.isVideoPost) {
+                MomiVideoPlayer(
+                    mediaId = post.id,
+                    localVideoPath = post.localVideoPath,
+                    videoData = post.videoData,
+                    videoDurationMs = post.videoDurationMs,
+                    fallbackImageKey = post.imageKey,
+                    fallbackLocalImagePath = post.localImagePath,
+                    fallbackImageData = post.imageData,
+                    filterTag = post.filterTag,
+                    isPlaying = isPlaybackActive,
+                    initialMuted = true,
+                    showMuteButton = true,
+                    showDurationBadge = true,
+                    onDoubleTap = {
+                        showDoubleTapHeart = true
+                        onDoubleTapLike()
+                    },
+                    modifier = Modifier.fillMaxWidth().aspectRatio(1f)
+                )
+            } else {
+                PostMediaImage(
+                    imageKey = post.imageKey,
+                    localImagePath = post.localImagePath,
+                    imageData = post.imageData,
+                    filterTag = post.filterTag,
+                    contentDescription = "Post by ${post.authorUsername}",
+                    modifier = Modifier.fillMaxWidth().aspectRatio(1f)
+                )
+            }
 
             if (post.filterTag != "NONE") {
                 Box(

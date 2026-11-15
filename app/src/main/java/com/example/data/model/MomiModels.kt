@@ -35,6 +35,10 @@ data class Post(
     val imageKey: String = "img_post_coastal",
     val localImagePath: String? = null,
     val imageData: String? = null,
+    val mediaType: String = "IMAGE",
+    val localVideoPath: String? = null,
+    val videoData: String? = null,
+    val videoDurationMs: Long = 0L,
     val filterTag: String = "NONE",
     val caption: String = "",
     val likesCount: Long = 0L,
@@ -47,7 +51,10 @@ data class Post(
     val audioTitle: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
-)
+) {
+    val isVideoPost: Boolean
+        get() = mediaType == "VIDEO" || !localVideoPath.isNullOrBlank() || !videoData.isNullOrBlank()
+}
 
 @IgnoreExtraProperties
 data class Comment(
@@ -71,12 +78,19 @@ data class Story(
     val imageKey: String = "img_post_coastal",
     val localImagePath: String? = null,
     val imageData: String? = null,
+    val mediaType: String = "IMAGE",
+    val localVideoPath: String? = null,
+    val videoData: String? = null,
+    val videoDurationMs: Long = 0L,
     val caption: String = "",
     @get:PropertyName("isSeen") val isSeen: Boolean = false,
     @get:PropertyName("isOwnStory") val isOwnStory: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
-)
+) {
+    val isVideoStory: Boolean
+        get() = mediaType == "VIDEO" || !localVideoPath.isNullOrBlank() || !videoData.isNullOrBlank()
+}
 
 @IgnoreExtraProperties
 data class FollowEdge(

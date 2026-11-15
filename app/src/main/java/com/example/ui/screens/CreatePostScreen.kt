@@ -30,8 +30,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.LocationOn
 import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,20 +46,27 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.ui.components.MomiVideoPlayer
 import com.example.ui.components.PostMediaImage
 import com.example.util.MediaAssets
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private val FilterOptions = listOf(
     "NONE" to "Original",
@@ -75,32 +84,79 @@ fun CreatePostScreen(
     onPublishPost: (
         imageKey: String,
         localImagePath: String?,
+        mediaType: String,
+        localVideoPath: String?,
+        videoDurationMs: Long,
         filterTag: String,
         caption: String,
         location: String,
         category: String,
         isReel: Boolean
     ) -> Unit,
-    onPublishStory: (imageKey: String, localImagePath: String?, caption: String) -> Unit,
+    onPublishStory: (
+        imageKey: String,
+        localImagePath: String?,
+        mediaType: String,
+        localVideoPath: String?,
+        videoDurationMs: Long,
+        caption: String
+    ) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+
     var isStoryMode by remember { mutableStateOf(initialModeStory) }
     var selectedImageKey by remember { mutableStateOf("img_post_coastal") }
     var localImagePath by remember { mutableStateOf<String?>(null) }
+    var mediaType by remember { mutableStateOf("IMAGE") }
+    var localVideoPath by remember { mutableStateOf<String?>(null) }
+    var videoDurationMs by remember { mutableLongStateOf(0L) }
     var selectedFilter by remember { mutableStateOf("NONE") }
     var caption by remember { mutableStateOf("") }
     var location by remember { mutableStateOf("") }
     var selectedCategory by remember { mutableStateOf("Travel") }
     var shareAsClip by remember { mutableStateOf(false) }
+    var isProcessingMedia by remember { mutableStateOf(false) }
+    var isPublishing by remember { mutableStateOf(false) }
 
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
-            val savedPath = MediaAssets.copyPickedImageToInternalStorage(context, uri)
-            if (savedPath != null) {
-                localImagePath = savedPath
+            isProcessingMedia = true
+            coroutineScope.launch {
+                val savedPath = withContext(Dispatchers.IO) {
+                    MediaAssets.copyPickedImageToInternalStorage(context, uri)
+                }
+                if (savedPath != null) {
+                    localImagePath = savedPath
+                    localVideoPath = null
+                    videoDurationMs = 0L
+                    mediaType = "IMAGE"
+                }
+                isProcessingMedia = false
+            }
+        }
+    }
+
+    val videoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            isProcessingMedia = true
+            coroutineScope.launch {
+                val extracted = withContext(Dispatchers.IO) {
+                    MediaAssets.copyPickedVideoToInternalStorage(context, uri)
+                }
+                if (extracted != null) {
+                    localVideoPath = extracted.localVideoPath
+                    localImagePath = extracted.thumbnailPath
+                    videoDurationMs = extracted.durationMs
+                    mediaType = "VIDEO"
+                    shareAsClip = true
+                }
+                isProcessingMedia = false
             }
         }
     }
@@ -142,7 +198,7 @@ fun CreatePostScreen(
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(16.dp))
-                            .background(if (active) MaterialTheme.colorScheme.primary else ColorTransparent)
+                            .background(if (active) MaterialTheme.colorScheme.primary else Color.Transparent)
                             .clickable { isStoryMode = storyOption }
                             .padding(horizontal = 16.dp, vertical = 6.dp)
                     ) {
@@ -157,13 +213,25 @@ fun CreatePostScreen(
             }
 
             Button(
+                enabled = !isProcessingMedia && !isPublishing,
                 onClick = {
+                    isPublishing = true
                     if (isStoryMode) {
-                        onPublishStory(selectedImageKey, localImagePath, caption)
+                        onPublishStory(
+                            selectedImageKey,
+                            localImagePath,
+                            mediaType,
+                            localVideoPath,
+                            videoDurationMs,
+                            caption
+                        )
                     } else {
                         onPublishPost(
                             selectedImageKey,
                             localImagePath,
+                            mediaType,
+                            localVideoPath,
+                            videoDurationMs,
                             selectedFilter,
                             caption.ifBlank { "Captured in silk blue & maroon light. #momi" },
                             location,
@@ -179,10 +247,18 @@ fun CreatePostScreen(
                 ),
                 modifier = Modifier.testTag("publish_post_button")
             ) {
-                Text(
-                    text = "Share",
-                    fontWeight = FontWeight.Bold
-                )
+                if (isPublishing) {
+                    CircularProgressIndicator(
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(16.dp)
+                    )
+                } else {
+                    Text(
+                        text = "Share",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
         }
 
@@ -199,20 +275,59 @@ fun CreatePostScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(1f)
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center
             ) {
-                PostMediaImage(
-                    imageKey = selectedImageKey,
-                    localImagePath = localImagePath,
-                    filterTag = selectedFilter,
-                    contentDescription = "Selected post preview",
-                    modifier = Modifier.fillMaxSize()
-                )
+                if (mediaType == "VIDEO" && localVideoPath != null) {
+                    MomiVideoPlayer(
+                        mediaId = localVideoPath ?: "draft_video",
+                        localVideoPath = localVideoPath,
+                        videoData = null,
+                        videoDurationMs = videoDurationMs,
+                        fallbackImageKey = selectedImageKey,
+                        fallbackLocalImagePath = localImagePath,
+                        fallbackImageData = null,
+                        filterTag = selectedFilter,
+                        isPlaying = true,
+                        initialMuted = false,
+                        showMuteButton = true,
+                        showDurationBadge = true,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    PostMediaImage(
+                        imageKey = selectedImageKey,
+                        localImagePath = localImagePath,
+                        filterTag = selectedFilter,
+                        contentDescription = "Selected post preview",
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+
+                if (isProcessingMedia || isPublishing) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.45f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(color = Color.White)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = if (isPublishing) "Publishing..." else "Loading media...",
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Photo Picker & Studio Presets
+            // Media Pickers (Photo & Video via Zero-Permission Android Photo Picker)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -221,26 +336,47 @@ fun CreatePostScreen(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = "Select photo",
+                    text = "Select media",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )
-                OutlinedButton(
-                    onClick = {
-                        photoPickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        enabled = !isProcessingMedia && !isPublishing,
+                        onClick = {
+                            photoPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.testTag("pick_photo_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.PhotoLibrary,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
                         )
-                    },
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.testTag("pick_photo_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.PhotoLibrary,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Library")
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Photo")
+                    }
+                    OutlinedButton(
+                        enabled = !isProcessingMedia && !isPublishing,
+                        onClick = {
+                            videoPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
+                            )
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.testTag("pick_video_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.VideoLibrary,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Video")
+                    }
                 }
             }
 
@@ -251,11 +387,14 @@ fun CreatePostScreen(
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(MediaAssets.presetPhotoOptions) { (key, label) ->
-                    val selected = localImagePath == null && selectedImageKey == key
+                    val selected = mediaType == "IMAGE" && localImagePath == null && selectedImageKey == key
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.clickable {
                             localImagePath = null
+                            localVideoPath = null
+                            videoDurationMs = 0L
+                            mediaType = "IMAGE"
                             selectedImageKey = key
                         }
                     ) {
@@ -284,7 +423,7 @@ fun CreatePostScreen(
                 }
             }
 
-            if (!isStoryMode) {
+            if (!isStoryMode && mediaType == "IMAGE") {
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // Filter Strip
@@ -425,4 +564,3 @@ fun CreatePostScreen(
     }
 }
 
-private val ColorTransparent = androidx.compose.ui.graphics.Color.Transparent

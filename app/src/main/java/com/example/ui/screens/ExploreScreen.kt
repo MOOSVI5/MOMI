@@ -13,9 +13,11 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -26,11 +28,14 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Explore
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,38 +43,63 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.data.model.Post
+import com.example.data.model.UserProfile
+import com.example.ui.components.LumaAvatar
 import com.example.ui.components.MomiAnchoredExploreBanner
 import com.example.ui.components.PostMediaImage
+import com.example.util.MediaAssets
 
-private val ExploreCategories = listOf("For You", "Travel", "Architecture", "Coffee", "Night", "Minimal")
+private val ExploreCategories = listOf("For You", "Clips", "Travel", "Architecture", "Coffee", "Night", "Minimal")
 
 @Composable
 fun ExploreScreen(
     posts: List<Post>,
+    creators: List<UserProfile> = emptyList(),
+    currentUserId: String = "",
+    followingUids: Set<String> = emptySet(),
     searchQuery: String,
     selectedCategory: String,
     onSearchQueryChange: (String) -> Unit,
     onCategorySelected: (String) -> Unit,
     onPostClick: (Post) -> Unit,
+    onFollowCreator: (UserProfile, Boolean) -> Unit = { _, _ -> },
+    onMessageCreator: (UserProfile) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val matchingCreators = remember(creators, searchQuery, currentUserId) {
+        val q = searchQuery.trim()
+        if (q.isEmpty()) {
+            emptyList()
+        } else {
+            creators.filter { creator ->
+                creator.userId != currentUserId && (
+                    creator.username.contains(q, ignoreCase = true) ||
+                        creator.displayName.contains(q, ignoreCase = true) ||
+                        creator.category.contains(q, ignoreCase = true)
+                    )
+            }
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
             .statusBarsPadding()
     ) {
-        // Search Bar
+        // Search Bar — uses heightIn(min = 48.dp) so text never clips on large system fonts
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 10.dp)
-                .height(44.dp)
+                .heightIn(min = 48.dp)
                 .clip(RoundedCornerShape(14.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant)
-                .padding(horizontal = 12.dp),
+                .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
@@ -88,7 +118,9 @@ fun ExploreScreen(
                     Text(
                         text = "Search creators, tags, or places",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
                 BasicTextField(
@@ -107,7 +139,9 @@ fun ExploreScreen(
             if (searchQuery.isNotEmpty()) {
                 IconButton(
                     onClick = { onSearchQueryChange("") },
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .size(32.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Filled.Close,
@@ -148,7 +182,7 @@ fun ExploreScreen(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        if (posts.isEmpty()) {
+        if (posts.isEmpty() && matchingCreators.isEmpty()) {
             Column(
                 modifier = Modifier
                     .weight(1f)
@@ -165,7 +199,7 @@ fun ExploreScreen(
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
-                    text = "No matching posts",
+                    text = "No matching creators or posts",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -177,7 +211,6 @@ fun ExploreScreen(
                 )
             }
         } else {
-            // Instagram Asymmetric 3-Column Mosaic Grid
             val chunks = posts.chunked(3)
             LazyColumn(
                 modifier = Modifier
@@ -186,6 +219,94 @@ fun ExploreScreen(
                 verticalArrangement = Arrangement.spacedBy(2.dp),
                 contentPadding = PaddingValues(bottom = 16.dp)
             ) {
+                if (matchingCreators.isNotEmpty()) {
+                    item(key = "matching_creators_header") {
+                        Text(
+                            text = "Creators",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                        )
+                    }
+                    items(matchingCreators, key = { "search_creator_${it.userId}" }) { creator ->
+                        val isFollowing = followingUids.contains(creator.userId)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSearchQueryChange(creator.username) }
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            LumaAvatar(
+                                username = creator.username,
+                                avatarKey = creator.avatarKey,
+                                size = 44.dp,
+                                hasActiveStory = true
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = creator.displayName,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onBackground,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "@${creator.username}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    .clickable { onMessageCreator(creator) }
+                                    .padding(horizontal = 12.dp, vertical = 7.dp)
+                            ) {
+                                Text(
+                                    text = "Message",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(
+                                        if (isFollowing) MaterialTheme.colorScheme.surfaceVariant
+                                        else MaterialTheme.colorScheme.primary
+                                    )
+                                    .clickable { onFollowCreator(creator, isFollowing) }
+                                    .padding(horizontal = 12.dp, vertical = 7.dp)
+                            ) {
+                                Text(
+                                    text = if (isFollowing) "Following" else "Follow",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isFollowing) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onPrimary
+                                )
+                            }
+                        }
+                    }
+                    if (posts.isNotEmpty()) {
+                        item(key = "creators_posts_divider") {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(vertical = 8.dp),
+                                thickness = 0.5.dp,
+                                color = MaterialTheme.colorScheme.outlineVariant
+                            )
+                        }
+                    }
+                }
+
                 chunks.forEachIndexed { rowIndex, rowItems ->
                     item(key = "explore_row_${rowIndex}_${rowItems.first().id}") {
                         if (rowIndex % 2 == 0 && rowItems.size == 3) {
@@ -274,23 +395,33 @@ private fun ExploreGridTile(
             contentDescription = "Explore post by ${post.authorUsername}",
             modifier = Modifier.fillMaxSize()
         )
-        if (post.isReel) {
-            Box(
+        if (post.isReel || post.isVideoPost) {
+            Row(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(6.dp)
-                    .size(24.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color.Black.copy(alpha = 0.55f)),
-                contentAlignment = Alignment.Center
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(horizontal = 6.dp, vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
                     imageVector = Icons.Filled.PlayArrow,
-                    contentDescription = "Clip",
+                    contentDescription = "Video clip",
                     tint = Color.White,
-                    modifier = Modifier.size(16.dp)
+                    modifier = Modifier.size(14.dp)
                 )
+                if (post.videoDurationMs > 0L) {
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = MediaAssets.formatDuration(post.videoDurationMs),
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
             }
         }
     }
 }
+

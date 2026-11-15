@@ -255,7 +255,7 @@ test("Posts: Bob can view, like (+1/-1), and comment on Alice's post, but cannot
 
 // --- 4. ImageData payload bounds ---
 
-test("Posts & Stories: allow compressed imageData under 700KB, reject oversized strings", async () => {
+test("Posts & Stories: allow compressed imageData/videoData under 700KB, reject oversized strings or invalid mediaType", async () => {
   const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
   const okPayload = {
     ...validPostPayload(ALICE_UID),
@@ -263,14 +263,42 @@ test("Posts & Stories: allow compressed imageData under 700KB, reject oversized 
   };
   await assertSucceeds(aliceDb.collection("posts").doc("post_img_ok").set(okPayload));
 
+  const okVideoPayload = {
+    ...validPostPayload(ALICE_UID),
+    mediaType: "VIDEO",
+    localVideoPath: "/data/user/0/app/files/luma_media/clip_1.mp4",
+    videoData: "B".repeat(2048),
+    videoDurationMs: 6500,
+    isReel: true,
+  };
+  await assertSucceeds(aliceDb.collection("posts").doc("post_vid_ok").set(okVideoPayload));
+
   const badPayload = {
     ...validPostPayload(ALICE_UID),
     imageData: "A".repeat(700001),
   };
   await assertFails(aliceDb.collection("posts").doc("post_img_bad").set(badPayload));
 
+  const badVideoPayload = {
+    ...validPostPayload(ALICE_UID),
+    mediaType: "VIDEO",
+    videoData: "B".repeat(700001),
+  };
+  await assertFails(aliceDb.collection("posts").doc("post_vid_bad").set(badVideoPayload));
+
+  const badMediaType = {
+    ...validPostPayload(ALICE_UID),
+    mediaType: "EXE",
+  };
+  await assertFails(aliceDb.collection("posts").doc("post_type_bad").set(badMediaType));
+
   await assertSucceeds(
-    aliceDb.collection("stories").doc("story_1").set(validStoryPayload(ALICE_UID))
+    aliceDb.collection("stories").doc("story_1").set({
+      ...validStoryPayload(ALICE_UID),
+      mediaType: "VIDEO",
+      videoData: "C".repeat(1024),
+      videoDurationMs: 4200,
+    })
   );
   await assertFails(
     testEnv.authenticatedContext(BOB_UID).firestore().collection("stories").doc("story_1").delete()

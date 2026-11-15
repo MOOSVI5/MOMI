@@ -242,7 +242,11 @@ class MomiViewModel(
         _selectedExploreCategory
     ) { posts, query, category ->
         posts.filter { post ->
-            val matchesCategory = category == "For You" || post.category.equals(category, ignoreCase = true)
+            val matchesCategory = when (category) {
+                "For You" -> true
+                "Clips" -> post.isReel || post.isVideoPost
+                else -> post.category.equals(category, ignoreCase = true)
+            }
             val q = query.trim()
             val matchesQuery = q.isEmpty() ||
                 post.authorUsername.contains(q, ignoreCase = true) ||
@@ -388,8 +392,12 @@ class MomiViewModel(
     }
 
     fun createPost(
+        context: android.content.Context,
         imageKey: String,
         localImagePath: String?,
+        mediaType: String,
+        localVideoPath: String?,
+        videoDurationMs: Long,
         filterTag: String,
         caption: String,
         location: String,
@@ -402,17 +410,29 @@ class MomiViewModel(
             val encodedImage = withContext(Dispatchers.IO) {
                 MediaAssets.encodeImageFileToBase64(localImagePath)
             }
+            val (encodedVideo, videoSynced) = if (mediaType == "VIDEO" && !localVideoPath.isNullOrBlank()) {
+                MediaAssets.prepareVideoDataForFirestore(context.applicationContext, localVideoPath)
+            } else {
+                null to false
+            }
             repository.createPost(
                 profile = currentProfile,
                 imageKey = imageKey,
                 localImagePath = localImagePath,
                 imageData = encodedImage,
+                mediaType = mediaType,
+                localVideoPath = localVideoPath,
+                videoData = encodedVideo,
+                videoDurationMs = videoDurationMs,
                 filterTag = filterTag,
                 caption = caption,
                 location = location,
                 category = category,
                 isReel = isReel
             ).onSuccess {
+                if (mediaType == "VIDEO" && !videoSynced) {
+                    _errorMessage.value = "Video posted! Long clips play in full on this device and sync a cover preview."
+                }
                 onComplete()
             }.onFailure {
                 _errorMessage.value = unwrapErrorMessage(it, "Could not publish post")
@@ -421,8 +441,12 @@ class MomiViewModel(
     }
 
     fun createStory(
+        context: android.content.Context,
         imageKey: String,
         localImagePath: String?,
+        mediaType: String,
+        localVideoPath: String?,
+        videoDurationMs: Long,
         caption: String,
         onComplete: () -> Unit
     ) {
@@ -431,11 +455,20 @@ class MomiViewModel(
             val encodedImage = withContext(Dispatchers.IO) {
                 MediaAssets.encodeImageFileToBase64(localImagePath)
             }
+            val (encodedVideo, _) = if (mediaType == "VIDEO" && !localVideoPath.isNullOrBlank()) {
+                MediaAssets.prepareVideoDataForFirestore(context.applicationContext, localVideoPath)
+            } else {
+                null to false
+            }
             repository.createStory(
                 profile = currentProfile,
                 imageKey = imageKey,
                 localImagePath = localImagePath,
                 imageData = encodedImage,
+                mediaType = mediaType,
+                localVideoPath = localVideoPath,
+                videoData = encodedVideo,
+                videoDurationMs = videoDurationMs,
                 caption = caption
             ).onSuccess {
                 onComplete()

@@ -19,6 +19,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -66,6 +67,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.Post
 import com.example.ui.components.LumaAvatar
+import com.example.ui.components.MomiVideoPlayer
 import com.example.ui.components.PostMediaImage
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.MaroonBright
@@ -110,11 +112,13 @@ fun ReelsScreen(
     ) {
         VerticalPager(
             state = pagerState,
+            key = { reels[it].id },
             modifier = Modifier.fillMaxSize()
         ) { page ->
             val reel = reels[page]
             ReelPageItem(
                 reel = reel,
+                isActivePage = pagerState.currentPage == page,
                 isOwnReel = reel.userId == currentUserId && !reel.id.startsWith("showcase_"),
                 onLikeToggle = { onLikeToggle(reel) },
                 onDoubleTapLike = { onDoubleTapLike(reel) },
@@ -161,6 +165,7 @@ fun ReelsScreen(
 @Composable
 private fun ReelPageItem(
     reel: Post,
+    isActivePage: Boolean,
     isOwnReel: Boolean,
     onLikeToggle: () -> Unit,
     onDoubleTapLike: () -> Unit,
@@ -192,25 +197,55 @@ private fun ReelPageItem(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .pointerInput(reel.id) {
-                detectTapGestures(
-                    onDoubleTap = {
-                        showHeartBurst = true
-                        onDoubleTapLike()
+            .let { base ->
+                if (!reel.isVideoPost) {
+                    base.pointerInput(reel.id) {
+                        detectTapGestures(
+                            onDoubleTap = {
+                                showHeartBurst = true
+                                onDoubleTapLike()
+                            }
+                        )
                     }
-                )
+                } else {
+                    base
+                }
             }
     ) {
-        PostMediaImage(
-            imageKey = reel.imageKey,
-            localImagePath = reel.localImagePath,
-            imageData = reel.imageData,
-            filterTag = reel.filterTag,
-            contentDescription = "Clip by ${reel.authorUsername}",
-            modifier = Modifier
-                .fillMaxSize()
-                .scale(zoomScale)
-        )
+        if (reel.isVideoPost) {
+            MomiVideoPlayer(
+                mediaId = reel.id,
+                localVideoPath = reel.localVideoPath,
+                videoData = reel.videoData,
+                videoDurationMs = reel.videoDurationMs,
+                fallbackImageKey = reel.imageKey,
+                fallbackLocalImagePath = reel.localImagePath,
+                fallbackImageData = reel.imageData,
+                filterTag = reel.filterTag,
+                isPlaying = isActivePage,
+                initialMuted = false,
+                showMuteButton = true,
+                showDurationBadge = false,
+                muteButtonAlignment = Alignment.TopEnd,
+                muteButtonPadding = PaddingValues(top = 92.dp, end = 16.dp),
+                onDoubleTap = {
+                    showHeartBurst = true
+                    onDoubleTapLike()
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            PostMediaImage(
+                imageKey = reel.imageKey,
+                localImagePath = reel.localImagePath,
+                imageData = reel.imageData,
+                filterTag = reel.filterTag,
+                contentDescription = "Clip by ${reel.authorUsername}",
+                modifier = Modifier
+                    .fillMaxSize()
+                    .scale(zoomScale)
+            )
+        }
 
         // Top & Bottom Scrim
         Box(

@@ -53,6 +53,10 @@ service cloud.firestore {
              data.imageKey is string && data.imageKey.size() >= 1 && data.imageKey.size() <= 64 &&
              (!('localImagePath' in data) || data.localImagePath == null || (data.localImagePath is string && data.localImagePath.size() <= 500)) &&
              (!('imageData' in data) || data.imageData == null || (data.imageData is string && data.imageData.size() <= 700000)) &&
+             (!('mediaType' in data) || data.mediaType == null || (data.mediaType is string && data.mediaType in ['IMAGE', 'VIDEO'])) &&
+             (!('localVideoPath' in data) || data.localVideoPath == null || (data.localVideoPath is string && data.localVideoPath.size() <= 500)) &&
+             (!('videoData' in data) || data.videoData == null || (data.videoData is string && data.videoData.size() <= 700000)) &&
+             (!('videoDurationMs' in data) || data.videoDurationMs == null || (data.videoDurationMs is int && data.videoDurationMs >= 0 && data.videoDurationMs <= 3600000)) &&
              data.filterTag is string && data.filterTag in ['NONE', 'BLUE', 'MAROON', 'MONO'] &&
              data.caption is string && data.caption.size() <= 1000 &&
              data.likesCount is int && data.likesCount >= 0 &&
@@ -81,6 +85,10 @@ service cloud.firestore {
              data.imageKey is string && data.imageKey.size() >= 1 && data.imageKey.size() <= 64 &&
              (!('localImagePath' in data) || data.localImagePath == null || (data.localImagePath is string && data.localImagePath.size() <= 500)) &&
              (!('imageData' in data) || data.imageData == null || (data.imageData is string && data.imageData.size() <= 700000)) &&
+             (!('mediaType' in data) || data.mediaType == null || (data.mediaType is string && data.mediaType in ['IMAGE', 'VIDEO'])) &&
+             (!('localVideoPath' in data) || data.localVideoPath == null || (data.localVideoPath is string && data.localVideoPath.size() <= 500)) &&
+             (!('videoData' in data) || data.videoData == null || (data.videoData is string && data.videoData.size() <= 700000)) &&
+             (!('videoDurationMs' in data) || data.videoDurationMs == null || (data.videoDurationMs is int && data.videoDurationMs >= 0 && data.videoDurationMs <= 3600000)) &&
              data.caption is string && data.caption.size() <= 300 &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
@@ -255,7 +263,7 @@ service cloud.firestore {
                        isValidId(postId) &&
                        incoming().userId == request.auth.uid &&
                        incoming().keys().hasAll(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'imageKey', 'filterTag', 'caption', 'likesCount', 'commentsCount', 'category', 'isReel', 'createdAt']) &&
-                       incoming().keys().hasOnly(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'location', 'imageKey', 'localImagePath', 'imageData', 'filterTag', 'caption', 'likesCount', 'commentsCount', 'category', 'isReel', 'audioTitle', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'location', 'imageKey', 'localImagePath', 'imageData', 'mediaType', 'localVideoPath', 'videoData', 'videoDurationMs', 'filterTag', 'caption', 'likesCount', 'commentsCount', 'category', 'isReel', 'audioTitle', 'createdAt', 'updatedAt']) &&
                        isValidPost(incoming());
 
       allow update: if isSignedIn() &&
@@ -311,7 +319,7 @@ service cloud.firestore {
                        isValidId(storyId) &&
                        incoming().userId == request.auth.uid &&
                        incoming().keys().hasAll(['userId', 'username', 'avatarKey', 'imageKey', 'caption', 'createdAt']) &&
-                       incoming().keys().hasOnly(['userId', 'username', 'avatarKey', 'imageKey', 'localImagePath', 'imageData', 'caption', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'username', 'avatarKey', 'imageKey', 'localImagePath', 'imageData', 'mediaType', 'localVideoPath', 'videoData', 'videoDurationMs', 'caption', 'createdAt', 'updatedAt']) &&
                        isValidStory(incoming());
 
       allow update: if false;

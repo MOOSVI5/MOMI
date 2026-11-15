@@ -5,17 +5,43 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.media.ExifInterface
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.util.Base64
 import androidx.annotation.DrawableRes
+import androidx.annotation.OptIn
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.Presentation
+import androidx.media3.transformer.Composition
+import androidx.media3.transformer.DefaultEncoderFactory
+import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.Effects
+import androidx.media3.transformer.ExportException
+import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.Transformer
+import androidx.media3.transformer.VideoEncoderSettings
 import com.example.R
 import com.google.firebase.Timestamp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.Locale
 import java.util.UUID
+import kotlin.coroutines.resume
+
+data class ExtractedVideoMedia(
+    val localVideoPath: String,
+    val thumbnailPath: String?,
+    val durationMs: Long
+)
 
 object MediaAssets {
     @DrawableRes
@@ -190,6 +216,182 @@ object MediaAssets {
         return runCatching {
             Base64.decode(imageData, Base64.DEFAULT)
         }.getOrNull()
+    }
+
+    fun copyPickedVideoToInternalStorage(context: Context, uri: Uri): ExtractedVideoMedia? {
+        return runCatching {
+            val dir = File(context.filesDir, "luma_media")
+            if (!dir.exists()) dir.mkdirs()
+            val outFile = File(dir, "clip_${UUID.randomUUID()}.mp4")
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                outFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            if (!outFile.exists() || outFile.length() == 0L) return null
+
+            var durationMs = 0L
+            var thumbnailPath: String? = null
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(outFile.absolutePath)
+                durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    ?.toLongOrNull()
+                    ?.coerceAtLeast(0L)
+                    ?: 0L
+                val frame = retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    ?: retriever.getFrameAtTime(500_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                if (frame != null) {
+                    val thumbFile = File(dir, "thumb_${UUID.randomUUID()}.jpg")
+                    thumbFile.outputStream().use { thumbOut ->
+                        frame.compress(Bitmap.CompressFormat.JPEG, 82, thumbOut)
+                    }
+                    frame.recycle()
+                    if (thumbFile.exists() && thumbFile.length() > 0L) {
+                        thumbnailPath = thumbFile.absolutePath
+                    }
+                }
+            } finally {
+                runCatching { retriever.release() }
+            }
+
+            ExtractedVideoMedia(
+                localVideoPath = outFile.absolutePath,
+                thumbnailPath = thumbnailPath,
+                durationMs = durationMs
+            )
+        }.getOrNull()
+    }
+
+    /**
+     * Prepares a video file for cross-device Firestore sync (< 480 KB raw / < 680 KB Base64).
+     * Short/light videos encode directly; larger videos are downscaled via Media3 Transformer.
+     * If still above Firestore's 1 MB document budget, returns (null, false) so the video still
+     * plays locally and syncs its JPEG thumbnail cleanly across all devices.
+     */
+    @OptIn(UnstableApi::class)
+    suspend fun prepareVideoDataForFirestore(
+        context: Context,
+        localVideoPath: String?
+    ): Pair<String?, Boolean> {
+        if (localVideoPath.isNullOrBlank()) return null to false
+        val sourceFile = File(localVideoPath)
+        if (!sourceFile.exists() || sourceFile.length() == 0L) return null to false
+
+        val maxRawBytes = 480_000L
+        if (sourceFile.length() <= maxRawBytes) {
+            val b64 = withContext(Dispatchers.IO) {
+                runCatching {
+                    val encoded = Base64.encodeToString(sourceFile.readBytes(), Base64.NO_WRAP)
+                    if (encoded.length <= 680_000) encoded else null
+                }.getOrNull()
+            }
+            if (b64 != null) return b64 to true
+        }
+
+        val compressedFile = File(context.cacheDir, "momi_tx_${UUID.randomUUID()}.mp4")
+        val exported = withTimeoutOrNull(25_000L) {
+            withContext(Dispatchers.Main.immediate) {
+                suspendCancellableCoroutine { cont ->
+                    val encoderFactory = DefaultEncoderFactory.Builder(context)
+                        .setRequestedVideoEncoderSettings(
+                            VideoEncoderSettings.Builder()
+                                .setBitrate(280_000)
+                                .build()
+                        )
+                        .build()
+
+                    val editedMediaItem = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(sourceFile)))
+                        .setEffects(
+                            Effects(
+                                emptyList(),
+                                listOf(Presentation.createForHeight(360))
+                            )
+                        )
+                        .build()
+
+                    val transformer = Transformer.Builder(context)
+                        .setEncoderFactory(encoderFactory)
+                        .setVideoMimeType(MimeTypes.VIDEO_H264)
+                        .addListener(object : Transformer.Listener {
+                            override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                                if (cont.isActive) cont.resume(true)
+                            }
+
+                            override fun onError(
+                                composition: Composition,
+                                exportResult: ExportResult,
+                                exportException: ExportException
+                            ) {
+                                if (cont.isActive) cont.resume(false)
+                            }
+                        })
+                        .build()
+
+                    cont.invokeOnCancellation {
+                        runCatching { transformer.cancel() }
+                    }
+                    runCatching {
+                        transformer.start(editedMediaItem, compressedFile.absolutePath)
+                    }.onFailure {
+                        if (cont.isActive) cont.resume(false)
+                    }
+                }
+            }
+        } ?: false
+
+        return withContext(Dispatchers.IO) {
+            try {
+                if (exported && compressedFile.exists() && compressedFile.length() in 1..maxRawBytes) {
+                    val encoded = Base64.encodeToString(compressedFile.readBytes(), Base64.NO_WRAP)
+                    if (encoded.length <= 680_000) {
+                        encoded to true
+                    } else {
+                        null to false
+                    }
+                } else {
+                    null to false
+                }
+            } finally {
+                runCatching { compressedFile.delete() }
+            }
+        }
+    }
+
+    fun resolvePlayableVideoUri(
+        context: Context,
+        mediaId: String,
+        localVideoPath: String?,
+        videoData: String?
+    ): Uri? {
+        if (!localVideoPath.isNullOrBlank()) {
+            val localFile = File(localVideoPath)
+            if (localFile.exists() && localFile.length() > 0L) {
+                return Uri.fromFile(localFile)
+            }
+        }
+        if (!videoData.isNullOrBlank()) {
+            return runCatching {
+                val cacheDir = File(context.cacheDir, "momi_video_cache")
+                if (!cacheDir.exists()) cacheDir.mkdirs()
+                val safeId = mediaId.ifBlank { videoData.hashCode().toString() }
+                    .replace(Regex("[^a-zA-Z0-9_\\-]"), "_")
+                val cachedFile = File(cacheDir, "$safeId.mp4")
+                if (!cachedFile.exists() || cachedFile.length() == 0L) {
+                    val bytes = Base64.decode(videoData, Base64.DEFAULT)
+                    cachedFile.writeBytes(bytes)
+                }
+                Uri.fromFile(cachedFile)
+            }.getOrNull()
+        }
+        return null
+    }
+
+    fun formatDuration(durationMs: Long): String {
+        val totalSeconds = (durationMs / 1000L).coerceAtLeast(0L)
+        val minutes = totalSeconds / 60L
+        val seconds = totalSeconds % 60L
+        return String.format(Locale.US, "%d:%02d", minutes, seconds)
     }
 
     fun formatRelativeTime(timestamp: Timestamp?): String {

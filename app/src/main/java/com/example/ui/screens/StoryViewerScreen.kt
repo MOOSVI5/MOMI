@@ -49,8 +49,10 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.PaddingValues
 import com.example.data.model.Story
 import com.example.ui.components.LumaAvatar
+import com.example.ui.components.MomiVideoPlayer
 import com.example.ui.components.PostMediaImage
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.MaroonBright
@@ -88,11 +90,20 @@ fun StoryViewerScreen(
         progress = 0f
     }
 
+    val stepFraction = remember(currentStory.id, currentStory.isVideoStory, currentStory.videoDurationMs) {
+        val storyDurationMs = if (currentStory.isVideoStory && currentStory.videoDurationMs > 0L) {
+            currentStory.videoDurationMs.coerceIn(5_000L, 20_000L)
+        } else {
+            5_000L
+        }
+        50f / storyDurationMs.toFloat()
+    }
+
     LaunchedEffect(currentIndex, isPaused) {
         while (progress < 1f) {
             delay(50L)
             if (!isPaused) {
-                progress += 0.01f
+                progress += stepFraction
             }
         }
         if (currentIndex < stories.lastIndex) {
@@ -108,14 +119,34 @@ fun StoryViewerScreen(
             .fillMaxSize()
             .background(DarkBackground)
     ) {
-        PostMediaImage(
-            imageKey = currentStory.imageKey,
-            localImagePath = currentStory.localImagePath,
-            imageData = currentStory.imageData,
-            filterTag = "NONE",
-            contentDescription = "Story by ${currentStory.username}",
-            modifier = Modifier.fillMaxSize()
-        )
+        if (currentStory.isVideoStory) {
+            MomiVideoPlayer(
+                mediaId = currentStory.id,
+                localVideoPath = currentStory.localVideoPath,
+                videoData = currentStory.videoData,
+                videoDurationMs = currentStory.videoDurationMs,
+                fallbackImageKey = currentStory.imageKey,
+                fallbackLocalImagePath = currentStory.localImagePath,
+                fallbackImageData = currentStory.imageData,
+                filterTag = "NONE",
+                isPlaying = !isPaused,
+                initialMuted = false,
+                showMuteButton = true,
+                showDurationBadge = false,
+                muteButtonAlignment = Alignment.TopEnd,
+                muteButtonPadding = PaddingValues(top = 92.dp, end = 14.dp),
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            PostMediaImage(
+                imageKey = currentStory.imageKey,
+                localImagePath = currentStory.localImagePath,
+                imageData = currentStory.imageData,
+                filterTag = "NONE",
+                contentDescription = "Story by ${currentStory.username}",
+                modifier = Modifier.fillMaxSize()
+            )
+        }
 
         // Tap Zones: Left = Previous, Right = Next, LongPress = Pause
         Box(

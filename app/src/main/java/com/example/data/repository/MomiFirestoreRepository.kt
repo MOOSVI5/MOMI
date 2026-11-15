@@ -696,6 +696,10 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         imageKey: String,
         localImagePath: String?,
         imageData: String?,
+        mediaType: String = "IMAGE",
+        localVideoPath: String? = null,
+        videoData: String? = null,
+        videoDurationMs: Long = 0L,
         filterTag: String,
         caption: String,
         location: String,
@@ -714,13 +718,17 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             put("imageKey", imageKey)
             if (!localImagePath.isNullOrBlank()) put("localImagePath", localImagePath.take(500))
             if (!imageData.isNullOrBlank()) put("imageData", imageData)
+            put("mediaType", mediaType)
+            if (!localVideoPath.isNullOrBlank()) put("localVideoPath", localVideoPath.take(500))
+            if (!videoData.isNullOrBlank()) put("videoData", videoData)
+            put("videoDurationMs", videoDurationMs.coerceIn(0L, 3_600_000L))
             put("filterTag", filterTag)
             put("caption", caption.trim().take(1000))
             put("likesCount", 0L)
             put("commentsCount", 0L)
             put("category", category)
             put("isReel", isReel)
-            put("audioTitle", if (isReel) "${profile.displayName} · Original Audio" else "")
+            put("audioTitle", if (isReel || mediaType == "VIDEO") "${profile.displayName} · Original Audio" else "")
             put("createdAt", FieldValue.serverTimestamp())
             put("updatedAt", FieldValue.serverTimestamp())
         }
@@ -740,6 +748,10 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         imageKey: String,
         localImagePath: String?,
         imageData: String?,
+        mediaType: String = "IMAGE",
+        localVideoPath: String? = null,
+        videoData: String? = null,
+        videoDurationMs: Long = 0L,
         caption: String
     ): Result<String> = runCatching {
         val uid = requireUserId()
@@ -751,6 +763,10 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             put("imageKey", imageKey)
             if (!localImagePath.isNullOrBlank()) put("localImagePath", localImagePath.take(500))
             if (!imageData.isNullOrBlank()) put("imageData", imageData)
+            put("mediaType", mediaType)
+            if (!localVideoPath.isNullOrBlank()) put("localVideoPath", localVideoPath.take(500))
+            if (!videoData.isNullOrBlank()) put("videoData", videoData)
+            put("videoDurationMs", videoDurationMs.coerceIn(0L, 3_600_000L))
             put("caption", caption.ifBlank { "Shared a moment" }.take(300))
             put("createdAt", FieldValue.serverTimestamp())
             put("updatedAt", FieldValue.serverTimestamp())

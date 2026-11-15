@@ -17,8 +17,8 @@ android {
     applicationId = "com.aistudio.luma.xkpqrm"
     minSdk = 24
     targetSdk = 36
-    versionCode = 2
-    versionName = "1.1"
+    versionCode = 3
+    versionName = "1.2"
 
     val startIoAppId = System.getenv("STARTIO_APP_ID")?.takeIf { it.isNotBlank() }
         ?: "210719378"
@@ -125,6 +125,11 @@ dependencies {
   implementation(libs.androidx.credentials.play.services)
   implementation(libs.googleid)
   implementation(libs.startapp.inapp.sdk)
+  implementation(libs.androidx.media3.exoplayer)
+  implementation(libs.androidx.media3.ui.compose)
+  implementation(libs.androidx.media3.transformer)
+  implementation(libs.androidx.media3.effect)
+  implementation(libs.androidx.media3.common)
   // implementation(libs.firebase.appcheck.recaptcha)
   // implementation(libs.firebase.appcheck.debug)
   implementation(libs.kotlinx.coroutines.android)

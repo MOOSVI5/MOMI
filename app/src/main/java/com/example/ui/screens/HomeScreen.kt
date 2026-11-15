@@ -19,11 +19,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material3.DropdownMenu
@@ -35,6 +37,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,10 +62,13 @@ import com.example.ui.theme.LumaScriptFamily
 @Composable
 fun HomeScreen(
     profile: UserProfile?,
+    creators: List<UserProfile> = emptyList(),
+    followingUids: Set<String> = emptySet(),
     posts: List<Post>,
     stories: List<Story>,
     unreadNotificationCount: Int,
     unreadMessageCount: Int,
+    onOpenSearch: () -> Unit = {},
     onOpenNotifications: () -> Unit,
     onOpenMessages: () -> Unit,
     onOpenStory: (Story) -> Unit,
@@ -73,18 +79,32 @@ fun HomeScreen(
     onShareClick: (Post) -> Unit,
     onBookmarkToggle: (Post) -> Unit,
     onFollowToggle: (Post) -> Unit,
+    onFollowCreator: (UserProfile, Boolean) -> Unit = { _, _ -> },
     onDeletePost: (Post) -> Unit,
     onAuthorClick: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var feedFilter by remember { mutableStateOf("For You") }
     var filterMenuOpen by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState()
 
     val displayedPosts = remember(posts, feedFilter, profile?.username) {
         when (feedFilter) {
             "Following" -> posts.filter { it.isFollowingAuthor || it.authorUsername == profile?.username }
             "Saved" -> posts.filter { it.isBookmarked }
             else -> posts
+        }
+    }
+
+    val suggestedCreators = remember(creators, profile?.userId) {
+        creators.filter { it.userId.isNotBlank() && it.userId != profile?.userId }
+    }
+
+    val activeVideoPostId by remember(displayedPosts) {
+        derivedStateOf {
+            val visibleKeys = listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet()
+            displayedPosts.firstOrNull { it.isVideoPost && visibleKeys.contains(it.id) }?.id
+                ?: displayedPosts.firstOrNull { it.isVideoPost }?.id
         }
     }
 
@@ -150,6 +170,20 @@ fun HomeScreen(
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onOpenSearch,
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("home_search_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Search,
+                        contentDescription = "Search creators and posts",
+                        tint = MaterialTheme.colorScheme.onBackground,
+                        modifier = Modifier.size(25.dp)
+                    )
+                }
+
                 // Notifications / Activity Heart
                 Box(contentAlignment = Alignment.TopEnd) {
                     IconButton(
@@ -213,6 +247,7 @@ fun HomeScreen(
         }
 
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = 16.dp)
         ) {
@@ -318,6 +353,7 @@ fun HomeScreen(
                     PostCard(
                         post = post,
                         isOwnPost = post.userId == profile?.userId && !post.id.startsWith("showcase_"),
+                        isPlaybackActive = post.isVideoPost && post.id == activeVideoPostId,
                         onLikeToggle = { onLikeToggle(post) },
                         onDoubleTapLike = { onDoubleTapLike(post) },
                         onCommentClick = { onCommentClick(post) },
@@ -327,11 +363,129 @@ fun HomeScreen(
                         onDeletePost = { onDeletePost(post) },
                         onAuthorClick = { onAuthorClick(post.authorUsername) }
                     )
+                    if (index == 0 && suggestedCreators.isNotEmpty()) {
+                        SuggestedCreatorsSection(
+                            creators = suggestedCreators,
+                            followingUids = followingUids,
+                            onCreatorClick = { onAuthorClick(it.username) },
+                            onFollowClick = { creator ->
+                                onFollowCreator(creator, followingUids.contains(creator.userId))
+                            },
+                            onSeeAllClick = onOpenSearch
+                        )
+                    }
                     if (index == 1 || (index > 1 && (index - 1) % 3 == 0)) {
                         MomiInlineFeedAdCard()
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SuggestedCreatorsSection(
+    creators: List<UserProfile>,
+    followingUids: Set<String>,
+    onCreatorClick: (UserProfile) -> Unit,
+    onFollowClick: (UserProfile) -> Unit,
+    onSeeAllClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(vertical = 12.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Suggested for you",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+            Text(
+                text = "See all",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onSeeAllClick)
+                    .padding(horizontal = 6.dp, vertical = 4.dp)
+            )
+        }
+        Spacer(modifier = Modifier.height(10.dp))
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 14.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            items(creators.take(12), key = { "suggested_${it.userId}" }) { creator ->
+                val isFollowing = followingUids.contains(creator.userId)
+                Column(
+                    modifier = Modifier
+                        .width(142.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f))
+                        .clickable { onCreatorClick(creator) }
+                        .padding(horizontal = 12.dp, vertical = 14.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    LumaAvatar(
+                        username = creator.username,
+                        avatarKey = creator.avatarKey,
+                        size = 64.dp,
+                        hasActiveStory = true
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = creator.displayName,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "@${creator.username}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(
+                                if (isFollowing) MaterialTheme.colorScheme.surface
+                                else MaterialTheme.colorScheme.primary
+                            )
+                            .clickable { onFollowClick(creator) }
+                            .padding(vertical = 7.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (isFollowing) "Following" else "Follow",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isFollowing) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onPrimary
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(10.dp))
+        HorizontalDivider(
+            thickness = 0.5.dp,
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+        )
     }
 }

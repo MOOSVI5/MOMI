@@ -84,6 +84,7 @@ fun PostDetailScreen(
                 PostCard(
                     post = post,
                     isOwnPost = post.userId == currentUserId && !post.id.startsWith("showcase_"),
+                    isPlaybackActive = true,
                     onLikeToggle = { onLikeToggle(post) },
                     onDoubleTapLike = { onDoubleTapLike(post) },
                     onCommentClick = { onCommentClick(post) },
