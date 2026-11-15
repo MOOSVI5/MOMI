@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -51,6 +52,7 @@ import com.example.data.model.Post
 import com.example.data.model.Story
 import com.example.data.model.UserProfile
 import com.example.ui.components.LumaAvatar
+import com.example.ui.components.MomiInlineFeedAdCard
 import com.example.ui.components.PostCard
 import com.example.ui.theme.LumaScriptFamily
 
@@ -312,7 +314,7 @@ fun HomeScreen(
                     }
                 }
             } else {
-                items(displayedPosts, key = { it.id }) { post ->
+                itemsIndexed(displayedPosts, key = { _, post -> post.id }) { index, post ->
                     PostCard(
                         post = post,
                         isOwnPost = post.userId == profile?.userId && !post.id.startsWith("showcase_"),
@@ -325,6 +327,9 @@ fun HomeScreen(
                         onDeletePost = { onDeletePost(post) },
                         onAuthorClick = { onAuthorClick(post.authorUsername) }
                     )
+                    if (index == 1 || (index > 1 && (index - 1) % 3 == 0)) {
+                        MomiInlineFeedAdCard()
+                    }
                 }
             }
         }

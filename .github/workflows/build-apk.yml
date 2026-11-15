@@ -111,6 +111,8 @@ jobs:
           fi
 
       - name: Build Release APK
+        env:
+          STARTIO_APP_ID: ${{ secrets.STARTIO_APP_ID }}
         run: gradle :app:assembleRelease --no-daemon
 
       - name: Upload Release APK Artifact

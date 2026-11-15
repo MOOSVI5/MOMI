@@ -86,6 +86,8 @@ import com.example.ui.viewmodel.MomiViewModel
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.startapp.sdk.adsbase.StartAppAd
+import com.startapp.sdk.adsbase.StartAppSDK
 import kotlinx.coroutines.launch
 
 private object LumaRoutes {
@@ -126,6 +128,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        runCatching {
+            StartAppSDK.init(this, BuildConfig.STARTIO_APP_ID, false)
+            StartAppAd.disableSplash()
+        }
 
         setContent {
             var themePreference by remember { mutableStateOf(ThemePreference.SYSTEM) }

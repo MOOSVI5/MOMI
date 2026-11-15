@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.model.Post
+import com.example.ui.components.MomiAnchoredExploreBanner
 import com.example.ui.components.PostMediaImage
 
 private val ExploreCategories = listOf("For You", "Travel", "Architecture", "Coffee", "Night", "Minimal")
@@ -150,7 +151,8 @@ fun ExploreScreen(
         if (posts.isEmpty()) {
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
+                    .weight(1f)
+                    .fillMaxWidth()
                     .padding(32.dp),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally
@@ -178,7 +180,9 @@ fun ExploreScreen(
             // Instagram Asymmetric 3-Column Mosaic Grid
             val chunks = posts.chunked(3)
             LazyColumn(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
                 contentPadding = PaddingValues(bottom = 16.dp)
             ) {
@@ -245,6 +249,8 @@ fun ExploreScreen(
                 }
             }
         }
+
+        MomiAnchoredExploreBanner()
     }
 }
 
