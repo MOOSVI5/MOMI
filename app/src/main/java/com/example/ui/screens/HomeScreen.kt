@@ -58,6 +58,7 @@ import com.example.data.model.UserProfile
 import com.example.ui.components.LumaAvatar
 import com.example.ui.components.MomiInlineFeedAdCard
 import com.example.ui.components.PostCard
+import com.example.ui.components.rememberStartIoNativeAds
 import com.example.ui.theme.LumaScriptFamily
 
 @Composable
@@ -88,6 +89,7 @@ fun HomeScreen(
     var feedFilter by remember { mutableStateOf("For You") }
     var filterMenuOpen by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    val nativeAdState = rememberStartIoNativeAds(count = 3)
 
     val displayedPosts = remember(posts, feedFilter, profile?.username) {
         when (feedFilter) {
@@ -377,8 +379,11 @@ fun HomeScreen(
                             onSeeAllClick = onOpenSearch
                         )
                     }
-                    if (index == 1 || (index > 1 && (index - 1) % 3 == 0)) {
-                        MomiInlineFeedAdCard()
+                    if (index % 3 == 0) {
+                        MomiInlineFeedAdCard(
+                            slotIndex = index / 3,
+                            nativeAdState = nativeAdState
+                        )
                     }
                 }
             }
