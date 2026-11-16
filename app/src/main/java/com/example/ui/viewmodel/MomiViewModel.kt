@@ -18,9 +18,12 @@ import com.example.ui.theme.ThemePreference
 import com.example.util.MediaAssets
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FirebaseFirestoreException
+import android.net.Uri
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -34,6 +37,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
@@ -62,6 +67,8 @@ class MomiViewModel(
     private val optimisticFollows = MutableStateFlow<Map<String, Pair<Boolean, String>>>(emptyMap())
     private val optimisticCommentLikes = MutableStateFlow<Map<String, Boolean>>(emptyMap())
     private val optimisticCommentsByPost = MutableStateFlow<Map<String, List<Comment>>>(emptyMap())
+    private val videoDownloadMutex = Mutex()
+    private val inFlightVideoDownloads = mutableMapOf<String, Deferred<Uri?>>()
 
     init {
         viewModelScope.launch {
@@ -618,6 +625,42 @@ class MomiViewModel(
         }
     }
 
+    suspend fun resolveRemoteVideoUri(
+        context: android.content.Context,
+        collectionName: String,
+        mediaId: String,
+        expectedChunksCount: Long
+    ): Uri? {
+        if (mediaId.isBlank() || mediaId.startsWith("showcase_")) return null
+        val appContext = context.applicationContext
+        MediaAssets.resolveCachedVideoUri(appContext, mediaId)?.let { return it }
+
+        val key = "${collectionName}_$mediaId"
+        val deferred = videoDownloadMutex.withLock {
+            inFlightVideoDownloads[key] ?: viewModelScope.async(Dispatchers.IO) {
+                try {
+                    val chunks = repository.fetchVideoChunks(
+                        collectionName = collectionName,
+                        mediaId = mediaId,
+                        expectedCount = expectedChunksCount
+                    )
+                    if (chunks.isEmpty()) {
+                        null
+                    } else {
+                        MediaAssets.assembleChunksToCacheFile(appContext, mediaId, chunks)
+                    }
+                } finally {
+                    videoDownloadMutex.withLock {
+                        inFlightVideoDownloads.remove(key)
+                    }
+                }
+            }.also { created ->
+                inFlightVideoDownloads[key] = created
+            }
+        }
+        return deferred.await()
+    }
+
     fun createPost(
         context: android.content.Context,
         imageKey: String,
@@ -632,17 +675,23 @@ class MomiViewModel(
         location: String,
         category: String,
         isReel: Boolean,
-        onComplete: () -> Unit
+        onComplete: (Boolean) -> Unit
     ) {
         val currentProfile = fallbackProfile()
         viewModelScope.launch {
             val encodedImage = withContext(Dispatchers.IO) {
                 MediaAssets.encodeImageFileToBase64(localImagePath)
             }
-            val (encodedVideo, videoSynced) = if (mediaType == "VIDEO" && !localVideoPath.isNullOrBlank()) {
-                MediaAssets.prepareVideoDataForFirestore(context.applicationContext, localVideoPath)
+            val videoPayload = if (mediaType == "VIDEO" && !localVideoPath.isNullOrBlank()) {
+                MediaAssets.prepareVideoPayloadForFirestore(context.applicationContext, localVideoPath)
             } else {
-                null to false
+                null
+            }
+            if (mediaType == "VIDEO" && (videoPayload == null || !videoPayload.isReady)) {
+                _errorMessage.value = videoPayload?.failureReason
+                    ?: "Could not prepare video for cloud sync. Please try a shorter clip."
+                onComplete(false)
+                return@launch
             }
             repository.createPost(
                 profile = currentProfile,
@@ -651,7 +700,8 @@ class MomiViewModel(
                 imageData = encodedImage,
                 mediaType = mediaType,
                 localVideoPath = localVideoPath,
-                videoData = encodedVideo,
+                videoData = videoPayload?.inlineVideoData,
+                videoChunks = videoPayload?.videoChunks.orEmpty(),
                 videoDurationMs = videoDurationMs,
                 audioTitle = audioTitle,
                 localAudioPath = localAudioPath,
@@ -661,12 +711,10 @@ class MomiViewModel(
                 category = category,
                 isReel = isReel
             ).onSuccess {
-                if (mediaType == "VIDEO" && !videoSynced) {
-                    _errorMessage.value = "Video posted! Long clips play in full on this device and sync a cover preview."
-                }
-                onComplete()
+                onComplete(true)
             }.onFailure {
                 _errorMessage.value = unwrapErrorMessage(it, "Could not publish post")
+                onComplete(false)
             }
         }
     }
@@ -681,17 +729,23 @@ class MomiViewModel(
         audioTitle: String,
         localAudioPath: String?,
         caption: String,
-        onComplete: () -> Unit
+        onComplete: (Boolean) -> Unit
     ) {
         val currentProfile = fallbackProfile()
         viewModelScope.launch {
             val encodedImage = withContext(Dispatchers.IO) {
                 MediaAssets.encodeImageFileToBase64(localImagePath)
             }
-            val (encodedVideo, _) = if (mediaType == "VIDEO" && !localVideoPath.isNullOrBlank()) {
-                MediaAssets.prepareVideoDataForFirestore(context.applicationContext, localVideoPath)
+            val videoPayload = if (mediaType == "VIDEO" && !localVideoPath.isNullOrBlank()) {
+                MediaAssets.prepareVideoPayloadForFirestore(context.applicationContext, localVideoPath)
             } else {
-                null to false
+                null
+            }
+            if (mediaType == "VIDEO" && (videoPayload == null || !videoPayload.isReady)) {
+                _errorMessage.value = videoPayload?.failureReason
+                    ?: "Could not prepare story video for cloud sync. Please try a shorter clip."
+                onComplete(false)
+                return@launch
             }
             repository.createStory(
                 profile = currentProfile,
@@ -700,15 +754,17 @@ class MomiViewModel(
                 imageData = encodedImage,
                 mediaType = mediaType,
                 localVideoPath = localVideoPath,
-                videoData = encodedVideo,
+                videoData = videoPayload?.inlineVideoData,
+                videoChunks = videoPayload?.videoChunks.orEmpty(),
                 videoDurationMs = videoDurationMs,
                 audioTitle = audioTitle,
                 localAudioPath = localAudioPath,
                 caption = caption
             ).onSuccess {
-                onComplete()
+                onComplete(true)
             }.onFailure {
                 _errorMessage.value = unwrapErrorMessage(it, "Could not share story")
+                onComplete(false)
             }
         }
     }

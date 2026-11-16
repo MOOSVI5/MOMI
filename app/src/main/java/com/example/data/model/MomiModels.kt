@@ -41,6 +41,7 @@ data class Post(
     val mediaType: String = "IMAGE",
     val localVideoPath: String? = null,
     val videoData: String? = null,
+    val videoChunksCount: Long = 0L,
     val videoDurationMs: Long = 0L,
     val filterTag: String = "NONE",
     val caption: String = "",
@@ -57,7 +58,7 @@ data class Post(
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     val isVideoPost: Boolean
-        get() = mediaType == "VIDEO" || !localVideoPath.isNullOrBlank() || !videoData.isNullOrBlank()
+        get() = mediaType == "VIDEO" || !localVideoPath.isNullOrBlank() || !videoData.isNullOrBlank() || videoChunksCount > 0L
 }
 
 @IgnoreExtraProperties
@@ -87,6 +88,7 @@ data class Story(
     val mediaType: String = "IMAGE",
     val localVideoPath: String? = null,
     val videoData: String? = null,
+    val videoChunksCount: Long = 0L,
     val videoDurationMs: Long = 0L,
     val audioTitle: String = "",
     val localAudioPath: String? = null,
@@ -97,7 +99,7 @@ data class Story(
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     val isVideoStory: Boolean
-        get() = mediaType == "VIDEO" || !localVideoPath.isNullOrBlank() || !videoData.isNullOrBlank()
+        get() = mediaType == "VIDEO" || !localVideoPath.isNullOrBlank() || !videoData.isNullOrBlank() || videoChunksCount > 0L
 }
 
 @IgnoreExtraProperties

@@ -223,6 +223,7 @@ private fun ReelPageItem(
                 mediaId = reel.id,
                 localVideoPath = reel.localVideoPath,
                 videoData = reel.videoData,
+                videoChunksCount = reel.videoChunksCount,
                 videoDurationMs = reel.videoDurationMs,
                 fallbackImageKey = reel.imageKey,
                 fallbackLocalImagePath = reel.localImagePath,

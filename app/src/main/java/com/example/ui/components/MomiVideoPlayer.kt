@@ -28,6 +28,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -40,6 +41,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,7 +69,13 @@ import androidx.media3.ui.compose.ContentFrame
 import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
 import com.example.util.MediaAssets
 import com.example.util.StudioMusicCatalog
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+
+val LocalRemoteVideoResolver = staticCompositionLocalOf<
+    (suspend (collectionName: String, mediaId: String, expectedChunksCount: Long) -> Uri?)?
+> { null }
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -82,6 +90,8 @@ fun MomiVideoPlayer(
     filterTag: String,
     isPlaying: Boolean,
     modifier: Modifier = Modifier,
+    videoChunksCount: Long = 0L,
+    remoteCollection: String = "posts",
     localAudioPath: String? = null,
     audioTitle: String = "",
     muteOriginalVideoWhenMusicAdded: Boolean = true,
@@ -99,14 +109,55 @@ fun MomiVideoPlayer(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val remoteVideoResolver = LocalRemoteVideoResolver.current
 
-    val playableUri = remember(overrideVideoUri, mediaId, localVideoPath, videoData) {
-        overrideVideoUri ?: MediaAssets.resolvePlayableVideoUri(
-            context = context,
-            mediaId = mediaId,
-            localVideoPath = localVideoPath,
-            videoData = videoData
+    var playableUri by remember(overrideVideoUri, mediaId, localVideoPath, videoData) {
+        mutableStateOf(
+            overrideVideoUri ?: MediaAssets.resolvePlayableVideoUri(
+                context = context,
+                mediaId = mediaId,
+                localVideoPath = localVideoPath,
+                videoData = videoData
+            )
         )
+    }
+    var isLoadingRemoteVideo by remember(mediaId) { mutableStateOf(false) }
+
+    LaunchedEffect(
+        overrideVideoUri,
+        mediaId,
+        localVideoPath,
+        videoData,
+        videoChunksCount,
+        remoteCollection,
+        remoteVideoResolver
+    ) {
+        if (overrideVideoUri != null) {
+            playableUri = overrideVideoUri
+            isLoadingRemoteVideo = false
+            return@LaunchedEffect
+        }
+        val fastUri = withContext(Dispatchers.IO) {
+            MediaAssets.resolvePlayableVideoUri(
+                context = context,
+                mediaId = mediaId,
+                localVideoPath = localVideoPath,
+                videoData = videoData
+            )
+        }
+        if (fastUri != null) {
+            playableUri = fastUri
+            isLoadingRemoteVideo = false
+            return@LaunchedEffect
+        }
+        if (videoChunksCount > 0L && remoteVideoResolver != null) {
+            isLoadingRemoteVideo = true
+            try {
+                playableUri = remoteVideoResolver(remoteCollection, mediaId, videoChunksCount)
+            } finally {
+                isLoadingRemoteVideo = false
+            }
+        }
     }
 
     val playableMusicUri = remember(mediaId, localAudioPath, audioTitle) {
@@ -170,8 +221,26 @@ fun MomiVideoPlayer(
                 }
         )
 
-        if (playableUri != null && !playbackFailed) {
-            val exoPlayer = remember(playableUri) {
+        if (isLoadingRemoteVideo && playableUri == null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.55f)),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(
+                    color = Color.White,
+                    strokeWidth = 2.5.dp,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+        }
+
+        val activeUri = playableUri
+        if (activeUri != null && !playbackFailed) {
+            val exoPlayer = remember(activeUri) {
                 ExoPlayer.Builder(context)
                     .setAudioAttributes(
                         AudioAttributes.Builder()
@@ -183,7 +252,8 @@ fun MomiVideoPlayer(
                     .build()
                     .apply {
                         repeatMode = Player.REPEAT_MODE_ONE
-                        setMediaItem(MediaItem.fromUri(playableUri))
+                        playWhenReady = currentIsPlaying && !currentUserPaused
+                        setMediaItem(MediaItem.fromUri(activeUri))
                         prepare()
                     }
             }
@@ -268,6 +338,7 @@ fun MomiVideoPlayer(
 
                     override fun onPlayerError(error: PlaybackException) {
                         Log.w("MomiVideoPlayer", "Playback error for $mediaId: ${error.errorCodeName}", error)
+                        MediaAssets.invalidateCachedVideo(context, mediaId)
                         playbackFailed = true
                     }
                 }

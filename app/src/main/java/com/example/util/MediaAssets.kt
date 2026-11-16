@@ -31,6 +31,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import android.util.Log
+import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.Locale
@@ -43,7 +45,24 @@ data class ExtractedVideoMedia(
     val durationMs: Long
 )
 
+data class PreparedVideoPayload(
+    val inlineVideoData: String? = null,
+    val videoChunks: List<String> = emptyList(),
+    val failureReason: String? = null
+) {
+    val isReady: Boolean
+        get() = !inlineVideoData.isNullOrBlank() || videoChunks.isNotEmpty()
+    val chunksCount: Int
+        get() = videoChunks.size
+}
+
 object MediaAssets {
+    private const val TAG = "MediaAssets"
+    private const val INLINE_MAX_RAW_BYTES = 340_000L
+    private const val CHUNK_SLICE_RAW_BYTES = 340_000
+    private const val MAX_VIDEO_CHUNKS = 24
+    private const val MAX_CHUNKED_RAW_BYTES = CHUNK_SLICE_RAW_BYTES.toLong() * MAX_VIDEO_CHUNKS
+    private const val MAX_CHUNK_BASE64_LENGTH = 680_000
     @DrawableRes
     fun drawableForKey(key: String): Int = when (key) {
         "img_post_coastal" -> R.drawable.img_post_coastal
@@ -337,39 +356,45 @@ object MediaAssets {
     }
 
     /**
-     * Prepares a video file for cross-device Firestore sync (< 480 KB raw / < 680 KB Base64).
-     * Short/light videos encode directly; larger videos are downscaled via Media3 Transformer.
-     * If still above Firestore's 1 MB document budget, returns (null, false) so the video still
-     * plays locally and syncs its JPEG thumbnail cleanly across all devices.
+     * Compresses and prepares a video file for cross-device Firestore sync up to ~8.16 MB:
+     * - Clips <= 340 KB store inline in `videoData` for instant 1-read playback.
+     * - Larger clips compress cleanly via Media3 Transformer (480p -> 360p -> 240p) and split
+     *   into ordered <= 340 KB Base64 chunk documents under `/videoChunks`.
+     * - Falls back to chunking the original MP4 directly if hardware encoding throws on an unusual codec
+     *   while the source file is <= 8.16 MB.
      */
     @OptIn(UnstableApi::class)
-    suspend fun prepareVideoDataForFirestore(
+    suspend fun prepareVideoPayloadForFirestore(
         context: Context,
         localVideoPath: String?
-    ): Pair<String?, Boolean> {
-        if (localVideoPath.isNullOrBlank()) return null to false
+    ): PreparedVideoPayload {
+        if (localVideoPath.isNullOrBlank()) {
+            return PreparedVideoPayload(failureReason = "No video file selected.")
+        }
         val sourceFile = File(localVideoPath)
-        if (!sourceFile.exists() || sourceFile.length() == 0L) return null to false
+        if (!sourceFile.exists() || sourceFile.length() == 0L) {
+            return PreparedVideoPayload(failureReason = "Selected video file could not be read.")
+        }
 
-        val maxRawBytes = 480_000L
-        if (sourceFile.length() <= maxRawBytes) {
-            val b64 = withContext(Dispatchers.IO) {
-                runCatching {
-                    val encoded = Base64.encodeToString(sourceFile.readBytes(), Base64.NO_WRAP)
-                    if (encoded.length <= 680_000) encoded else null
-                }.getOrNull()
+        if (sourceFile.length() <= INLINE_MAX_RAW_BYTES) {
+            val inlinePayload = withContext(Dispatchers.IO) {
+                runCatching { splitVideoBytes(sourceFile.readBytes()) }.getOrNull()
             }
-            if (b64 != null) return b64 to true
+            if (inlinePayload != null && inlinePayload.isReady) {
+                return inlinePayload
+            }
         }
 
         val compressionPasses = listOf(
-            360 to 260_000,
-            240 to 140_000
+            480 to 650_000,
+            360 to 300_000,
+            240 to 180_000
         )
 
+        var sawExportErrorOrTimeout = false
         for ((targetHeight, bitrate) in compressionPasses) {
             val compressedFile = File(context.cacheDir, "momi_tx_${UUID.randomUUID()}.mp4")
-            val exported = withTimeoutOrNull(25_000L) {
+            val exported = withTimeoutOrNull(45_000L) {
                 withContext(Dispatchers.Main.immediate) {
                     suspendCancellableCoroutine { cont ->
                         val encoderFactory = DefaultEncoderFactory.Builder(context)
@@ -402,6 +427,7 @@ object MediaAssets {
                                     exportResult: ExportResult,
                                     exportException: ExportException
                                 ) {
+                                    Log.w(TAG, "Video compression ${targetHeight}p failed: ${exportException.errorCodeName}", exportException)
                                     if (cont.isActive) cont.resume(false)
                                 }
                             })
@@ -412,18 +438,22 @@ object MediaAssets {
                         }
                         runCatching {
                             transformer.start(editedMediaItem, compressedFile.absolutePath)
-                        }.onFailure {
+                        }.onFailure { err ->
+                            Log.w(TAG, "Transformer start failed at ${targetHeight}p", err)
                             if (cont.isActive) cont.resume(false)
                         }
                     }
                 }
             } ?: false
 
-            val encodedResult = withContext(Dispatchers.IO) {
+            if (!exported) {
+                sawExportErrorOrTimeout = true
+            }
+
+            val compressedPayload = withContext(Dispatchers.IO) {
                 try {
-                    if (exported && compressedFile.exists() && compressedFile.length() in 1..maxRawBytes) {
-                        val encoded = Base64.encodeToString(compressedFile.readBytes(), Base64.NO_WRAP)
-                        if (encoded.length <= 680_000) encoded else null
+                    if (exported && compressedFile.exists() && compressedFile.length() in 1L..MAX_CHUNKED_RAW_BYTES) {
+                        splitVideoBytes(compressedFile.readBytes())
                     } else {
                         null
                     }
@@ -431,11 +461,122 @@ object MediaAssets {
                     runCatching { compressedFile.delete() }
                 }
             }
-            if (encodedResult != null) {
-                return encodedResult to true
+            if (compressedPayload != null && compressedPayload.isReady) {
+                return compressedPayload
             }
         }
-        return null to false
+
+        // Hardware encoder fallback: if source MP4 already fits in our chunked budget, upload it directly
+        if (sourceFile.length() <= MAX_CHUNKED_RAW_BYTES) {
+            val rawPayload = withContext(Dispatchers.IO) {
+                runCatching { splitVideoBytes(sourceFile.readBytes()) }.getOrNull()
+            }
+            if (rawPayload != null && rawPayload.isReady) {
+                return rawPayload
+            }
+        }
+
+        val reason = if (sawExportErrorOrTimeout && sourceFile.length() > MAX_CHUNKED_RAW_BYTES) {
+            "This video is too large to sync across users. Please pick or trim a shorter clip (under ~2 minutes)."
+        } else {
+            "Video exceeded the 8 MB cloud clip limit. Please trim it slightly and try again."
+        }
+        return PreparedVideoPayload(failureReason = reason)
+    }
+
+    suspend fun prepareVideoDataForFirestore(
+        context: Context,
+        localVideoPath: String?
+    ): Pair<String?, Boolean> {
+        val payload = prepareVideoPayloadForFirestore(context, localVideoPath)
+        return payload.inlineVideoData to (payload.inlineVideoData != null)
+    }
+
+    internal fun splitVideoBytes(bytes: ByteArray): PreparedVideoPayload? {
+        if (bytes.isEmpty() || bytes.size.toLong() > MAX_CHUNKED_RAW_BYTES) return null
+        if (bytes.size.toLong() <= INLINE_MAX_RAW_BYTES) {
+            val encoded = Base64.encodeToString(bytes, Base64.NO_WRAP)
+            if (encoded.length <= MAX_CHUNK_BASE64_LENGTH) {
+                return PreparedVideoPayload(inlineVideoData = encoded)
+            }
+        }
+        val chunks = mutableListOf<String>()
+        var offset = 0
+        while (offset < bytes.size) {
+            val len = minOf(CHUNK_SLICE_RAW_BYTES, bytes.size - offset)
+            val sliceB64 = Base64.encodeToString(bytes, offset, len, Base64.NO_WRAP)
+            if (sliceB64.isEmpty() || sliceB64.length > MAX_CHUNK_BASE64_LENGTH) return null
+            chunks.add(sliceB64)
+            offset += len
+        }
+        if (chunks.isEmpty() || chunks.size > MAX_VIDEO_CHUNKS) return null
+        return PreparedVideoPayload(videoChunks = chunks)
+    }
+
+    private fun videoCacheDir(context: Context): File {
+        val dir = File(context.cacheDir, "momi_video_cache")
+        if (!dir.exists()) dir.mkdirs()
+        return dir
+    }
+
+    private fun safeCacheFileName(mediaId: String): String {
+        val cleaned = mediaId.ifBlank { "clip" }.replace(Regex("[^a-zA-Z0-9_\\-]"), "_")
+        return "$cleaned.mp4"
+    }
+
+    fun resolveCachedVideoUri(context: Context, mediaId: String): Uri? {
+        if (mediaId.isBlank()) return null
+        val cachedFile = File(videoCacheDir(context), safeCacheFileName(mediaId))
+        return if (cachedFile.exists() && cachedFile.length() > 0L) Uri.fromFile(cachedFile) else null
+    }
+
+    fun invalidateCachedVideo(context: Context, mediaId: String) {
+        if (mediaId.isBlank()) return
+        runCatching {
+            val cachedFile = File(videoCacheDir(context), safeCacheFileName(mediaId))
+            if (cachedFile.exists()) cachedFile.delete()
+        }
+    }
+
+    suspend fun assembleChunksToCacheFile(
+        context: Context,
+        mediaId: String,
+        orderedBase64Chunks: List<String>
+    ): Uri? = withContext(Dispatchers.IO) {
+        if (mediaId.isBlank() || orderedBase64Chunks.isEmpty()) return@withContext null
+        runCatching {
+            val cacheDir = videoCacheDir(context)
+            val cachedFile = File(cacheDir, safeCacheFileName(mediaId))
+            if (cachedFile.exists() && cachedFile.length() > 0L) {
+                return@withContext Uri.fromFile(cachedFile)
+            }
+            val tempFile = File(cacheDir, "${safeCacheFileName(mediaId)}.${UUID.randomUUID()}.tmp")
+            try {
+                BufferedOutputStream(tempFile.outputStream()).use { out ->
+                    for (chunkB64 in orderedBase64Chunks) {
+                        if (chunkB64.isBlank()) error("Empty video chunk encountered")
+                        val decoded = Base64.decode(chunkB64, Base64.DEFAULT)
+                        if (decoded.isEmpty()) error("Decoded empty video chunk")
+                        out.write(decoded)
+                    }
+                    out.flush()
+                }
+                if (!tempFile.exists() || tempFile.length() == 0L) {
+                    error("Assembled temp video file is empty")
+                }
+                if (cachedFile.exists()) cachedFile.delete()
+                if (!tempFile.renameTo(cachedFile)) {
+                    tempFile.copyTo(cachedFile, overwrite = true)
+                    tempFile.delete()
+                }
+                Uri.fromFile(cachedFile)
+            } catch (t: Throwable) {
+                runCatching { tempFile.delete() }
+                throw t
+            }
+        }.onFailure { err ->
+            Log.w(TAG, "Failed assembling video chunks for $mediaId", err)
+        }.getOrNull()
     }
 
     fun resolvePlayableVideoUri(
@@ -450,16 +591,26 @@ object MediaAssets {
                 return Uri.fromFile(localFile)
             }
         }
+        resolveCachedVideoUri(context, mediaId)?.let { return it }
         if (!videoData.isNullOrBlank()) {
             return runCatching {
-                val cacheDir = File(context.cacheDir, "momi_video_cache")
-                if (!cacheDir.exists()) cacheDir.mkdirs()
-                val safeId = mediaId.ifBlank { videoData.hashCode().toString() }
-                    .replace(Regex("[^a-zA-Z0-9_\\-]"), "_")
-                val cachedFile = File(cacheDir, "$safeId.mp4")
+                val cacheDir = videoCacheDir(context)
+                val safeName = safeCacheFileName(mediaId.ifBlank { videoData.hashCode().toString() })
+                val cachedFile = File(cacheDir, safeName)
                 if (!cachedFile.exists() || cachedFile.length() == 0L) {
-                    val bytes = Base64.decode(videoData, Base64.DEFAULT)
-                    cachedFile.writeBytes(bytes)
+                    val tempFile = File(cacheDir, "$safeName.${UUID.randomUUID()}.tmp")
+                    try {
+                        val bytes = Base64.decode(videoData, Base64.DEFAULT)
+                        if (bytes.isEmpty()) return null
+                        tempFile.writeBytes(bytes)
+                        if (!tempFile.renameTo(cachedFile)) {
+                            tempFile.copyTo(cachedFile, overwrite = true)
+                            tempFile.delete()
+                        }
+                    } catch (t: Throwable) {
+                        runCatching { tempFile.delete() }
+                        throw t
+                    }
                 }
                 Uri.fromFile(cachedFile)
             }.getOrNull()

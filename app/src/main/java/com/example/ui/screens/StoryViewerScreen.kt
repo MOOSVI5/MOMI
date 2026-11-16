@@ -156,6 +156,8 @@ fun StoryViewerScreen(
                 mediaId = currentStory.id,
                 localVideoPath = currentStory.localVideoPath,
                 videoData = currentStory.videoData,
+                videoChunksCount = currentStory.videoChunksCount,
+                remoteCollection = "stories",
                 videoDurationMs = currentStory.videoDurationMs,
                 fallbackImageKey = currentStory.imageKey,
                 fallbackLocalImagePath = currentStory.localImagePath,

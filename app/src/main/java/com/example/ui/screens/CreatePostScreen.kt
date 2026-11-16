@@ -98,7 +98,8 @@ fun CreatePostScreen(
         caption: String,
         location: String,
         category: String,
-        isReel: Boolean
+        isReel: Boolean,
+        onFinished: (Boolean) -> Unit
     ) -> Unit,
     onPublishStory: (
         imageKey: String,
@@ -108,7 +109,8 @@ fun CreatePostScreen(
         videoDurationMs: Long,
         audioTitle: String,
         localAudioPath: String?,
-        caption: String
+        caption: String,
+        onFinished: (Boolean) -> Unit
     ) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -255,7 +257,9 @@ fun CreatePostScreen(
                             selectedAudioTitle,
                             localAudioPath,
                             caption
-                        )
+                        ) { _ ->
+                            isPublishing = false
+                        }
                     } else {
                         onPublishPost(
                             selectedImageKey,
@@ -270,7 +274,9 @@ fun CreatePostScreen(
                             location,
                             selectedCategory,
                             shareAsClip
-                        )
+                        ) { _ ->
+                            isPublishing = false
+                        }
                     }
                 },
                 shape = RoundedCornerShape(20.dp),

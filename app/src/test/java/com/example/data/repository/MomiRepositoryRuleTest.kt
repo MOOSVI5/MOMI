@@ -1,16 +1,20 @@
 package com.example.data.repository
 
+import androidx.test.core.app.ApplicationProvider
 import com.example.base.FirestoreEmulatorTestBase
+import com.example.util.MediaAssets
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeout
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 import java.util.UUID
 
 class MomiRepositoryRuleTest : FirestoreEmulatorTestBase() {
@@ -237,6 +241,72 @@ class MomiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         }
         assertNotNull(selfVerifyError)
         assertEquals(FirebaseFirestoreException.Code.PERMISSION_DENIED, selfVerifyError?.code)
+    }
+
+    @Test
+    fun chunkedVideoSync_aliceUploadsMultiChunkVideo_bobFetchesAndReassemblesExactBytes() = runBlocking {
+        val aliceEmail = "alice_vid_${UUID.randomUUID()}@momi.photo"
+        val bobEmail = "bob_vid_${UUID.randomUUID()}@momi.photo"
+
+        val originalBytes = ByteArray(750_000) { idx -> ((idx * 31) and 0xFF).toByte() }
+        val prepared = MediaAssets.splitVideoBytes(originalBytes)
+        assertNotNull(prepared)
+        assertEquals(3, prepared!!.chunksCount)
+
+        val aliceUid = signInTestUser(aliceEmail)
+        val aliceRepo = MomiFirestoreRepository(firestore)
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            aliceRepo.ensureUserSeeded("Alice Video", aliceEmail).getOrThrow()
+        }
+        val aliceProfile = withTimeout(FLOW_TIMEOUT_MS) {
+            aliceRepo.observeProfile(aliceUid).first { it != null }
+        }!!
+
+        val postId = withTimeout(DEFAULT_TIMEOUT_MS) {
+            aliceRepo.createPost(
+                profile = aliceProfile,
+                imageKey = "img_post_coastal",
+                localImagePath = "/nonexistent/alice_device_only.mp4",
+                imageData = "dGh1bWI=",
+                mediaType = "VIDEO",
+                localVideoPath = "/nonexistent/alice_device_only.mp4",
+                videoData = null,
+                videoChunks = prepared.videoChunks,
+                videoDurationMs = 24_000L,
+                filterTag = "NONE",
+                caption = "Cross-device chunked video",
+                location = "Amalfi",
+                category = "Travel",
+                isReel = true
+            ).getOrThrow()
+        }
+
+        // Bob signs in on another device where Alice's localVideoPath does not exist
+        val bobUid = signInTestUser(bobEmail)
+        val bobRepo = MomiFirestoreRepository(firestore)
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            bobRepo.ensureUserSeeded("Bob Viewer", bobEmail).getOrThrow()
+        }
+
+        val sharedPost = withTimeout(FLOW_TIMEOUT_MS) {
+            bobRepo.observeAllPosts(bobUid).first { list -> list.any { it.id == postId } }
+        }.first { it.id == postId }
+        assertTrue(sharedPost.isVideoPost)
+        assertEquals(3L, sharedPost.videoChunksCount)
+
+        val fetchedChunks = withTimeout(DEFAULT_TIMEOUT_MS) {
+            bobRepo.fetchVideoChunks("posts", postId, sharedPost.videoChunksCount)
+        }
+        assertEquals(3, fetchedChunks.size)
+
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val cachedUri = withTimeout(DEFAULT_TIMEOUT_MS) {
+            MediaAssets.assembleChunksToCacheFile(context, postId, fetchedChunks)
+        }
+        assertNotNull(cachedUri)
+        val assembledFile = File(cachedUri!!.path!!)
+        assertTrue(assembledFile.exists())
+        assertArrayEquals(originalBytes, assembledFile.readBytes())
     }
 
     private companion object {

@@ -34,6 +34,11 @@
         "imageKey": { "type": "string" },
         "localImagePath": { "type": "string" },
         "imageData": { "type": "string", "description": "Compressed Base64 JPEG payload for cross-device photo sync." },
+        "mediaType": { "type": "string", "enum": ["IMAGE", "VIDEO"] },
+        "localVideoPath": { "type": "string" },
+        "videoData": { "type": "string" },
+        "videoChunksCount": { "type": "integer" },
+        "videoDurationMs": { "type": "integer" },
         "filterTag": { "type": "string", "enum": ["NONE", "BLUE", "MAROON", "MONO"] },
         "caption": { "type": "string" },
         "likesCount": { "type": "integer" },
@@ -41,10 +46,22 @@
         "category": { "type": "string" },
         "isReel": { "type": "boolean" },
         "audioTitle": { "type": "string" },
+        "localAudioPath": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
       "required": ["userId", "authorUsername", "authorDisplayName", "authorAvatarKey", "authorVerified", "imageKey", "filterTag", "caption", "likesCount", "commentsCount", "category", "isReel", "createdAt"]
+    },
+    "VideoChunk": {
+      "title": "VideoChunk",
+      "description": "Ordered Base64 MP4 chunk slice enabling cross-device video playback up to ~8MB.",
+      "type": "object",
+      "properties": {
+        "index": { "type": "integer" },
+        "data": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["index", "data", "createdAt"]
     },
     "Comment": {
       "title": "Comment",
@@ -72,6 +89,13 @@
         "imageKey": { "type": "string" },
         "localImagePath": { "type": "string" },
         "imageData": { "type": "string" },
+        "mediaType": { "type": "string", "enum": ["IMAGE", "VIDEO"] },
+        "localVideoPath": { "type": "string" },
+        "videoData": { "type": "string" },
+        "videoChunksCount": { "type": "integer" },
+        "videoDurationMs": { "type": "integer" },
+        "audioTitle": { "type": "string" },
+        "localAudioPath": { "type": "string" },
         "caption": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }

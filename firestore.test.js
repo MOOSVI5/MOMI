@@ -324,6 +324,41 @@ test("Posts & Stories: allow compressed imageData/videoData under 700KB, reject 
   };
   await assertSucceeds(aliceDb.collection("posts").doc("post_vid_ok").set(okVideoPayload));
 
+  await assertSucceeds(
+    aliceDb.collection("posts").doc("post_vid_ok").collection("videoChunks").doc("chunk_000").set({
+      index: 0,
+      data: "B".repeat(2048),
+      createdAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    testEnv.authenticatedContext(BOB_UID).firestore().collection("posts").doc("post_vid_ok").collection("videoChunks").get()
+  );
+  await assertFails(
+    testEnv.authenticatedContext(BOB_UID).firestore().collection("posts").doc("post_vid_ok").collection("videoChunks").doc("chunk_001").set({
+      index: 1,
+      data: "C".repeat(128),
+      createdAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    testEnv.authenticatedContext(BOB_UID).firestore().collection("posts").doc("post_vid_ok").collection("videoChunks").doc("chunk_000").delete()
+  );
+  await assertFails(
+    aliceDb.collection("posts").doc("post_vid_ok").collection("videoChunks").doc("chunk_025").set({
+      index: 25,
+      data: "B".repeat(128),
+      createdAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    aliceDb.collection("posts").doc("post_vid_ok").collection("videoChunks").doc("chunk_big").set({
+      index: 1,
+      data: "B".repeat(700001),
+      createdAt: serverTimestamp(),
+    })
+  );
+
   const badPayload = {
     ...validPostPayload(ALICE_UID),
     imageData: "A".repeat(700001),
@@ -348,10 +383,21 @@ test("Posts & Stories: allow compressed imageData/videoData under 700KB, reject 
       ...validStoryPayload(ALICE_UID),
       mediaType: "VIDEO",
       videoData: "C".repeat(1024),
+      videoChunksCount: 1,
       videoDurationMs: 4200,
       audioTitle: "Silk Breeze",
       localAudioPath: "/data/user/0/app/cache/momi_music/silk_breeze.wav",
     })
+  );
+  await assertSucceeds(
+    aliceDb.collection("stories").doc("story_1").collection("videoChunks").doc("chunk_000").set({
+      index: 0,
+      data: "C".repeat(1024),
+      createdAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    testEnv.authenticatedContext(BOB_UID).firestore().collection("stories").doc("story_1").collection("videoChunks").get()
   );
   await assertFails(
     testEnv.authenticatedContext(BOB_UID).firestore().collection("stories").doc("story_1").delete()

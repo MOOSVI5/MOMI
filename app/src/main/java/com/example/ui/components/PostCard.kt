@@ -280,6 +280,7 @@ fun PostCard(
                     mediaId = post.id,
                     localVideoPath = post.localVideoPath,
                     videoData = post.videoData,
+                    videoChunksCount = post.videoChunksCount,
                     videoDurationMs = post.videoDurationMs,
                     fallbackImageKey = post.imageKey,
                     fallbackLocalImagePath = post.localImagePath,

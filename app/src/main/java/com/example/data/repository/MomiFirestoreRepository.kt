@@ -25,6 +25,7 @@ import com.google.firebase.firestore.MetadataChanges
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
@@ -710,6 +711,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         mediaType: String = "IMAGE",
         localVideoPath: String? = null,
         videoData: String? = null,
+        videoChunks: List<String> = emptyList(),
         videoDurationMs: Long = 0L,
         audioTitle: String = "",
         localAudioPath: String? = null,
@@ -737,6 +739,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             put("mediaType", mediaType)
             if (!localVideoPath.isNullOrBlank()) put("localVideoPath", localVideoPath.take(500))
             if (!videoData.isNullOrBlank()) put("videoData", videoData)
+            if (videoChunks.isNotEmpty()) put("videoChunksCount", videoChunks.size.toLong())
             put("videoDurationMs", videoDurationMs.coerceIn(0L, 3_600_000L))
             if (!localAudioPath.isNullOrBlank()) put("localAudioPath", localAudioPath.take(500))
             put("filterTag", filterTag)
@@ -751,6 +754,14 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         }
         try {
             docRef.set(payload).await()
+            if (videoChunks.isNotEmpty()) {
+                try {
+                    uploadVideoChunks(docRef.collection("videoChunks"), videoChunks)
+                } catch (chunkErr: Exception) {
+                    runCatching { docRef.delete().await() }
+                    throw chunkErr
+                }
+            }
             docRef.id
         } catch (e: CancellationException) {
             throw e
@@ -768,6 +779,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         mediaType: String = "IMAGE",
         localVideoPath: String? = null,
         videoData: String? = null,
+        videoChunks: List<String> = emptyList(),
         videoDurationMs: Long = 0L,
         audioTitle: String = "",
         localAudioPath: String? = null,
@@ -785,6 +797,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             put("mediaType", mediaType)
             if (!localVideoPath.isNullOrBlank()) put("localVideoPath", localVideoPath.take(500))
             if (!videoData.isNullOrBlank()) put("videoData", videoData)
+            if (videoChunks.isNotEmpty()) put("videoChunksCount", videoChunks.size.toLong())
             put("videoDurationMs", videoDurationMs.coerceIn(0L, 3_600_000L))
             if (audioTitle.isNotBlank()) put("audioTitle", audioTitle.trim().take(120))
             if (!localAudioPath.isNullOrBlank()) put("localAudioPath", localAudioPath.take(500))
@@ -794,6 +807,14 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         }
         try {
             docRef.set(payload).await()
+            if (videoChunks.isNotEmpty()) {
+                try {
+                    uploadVideoChunks(docRef.collection("videoChunks"), videoChunks)
+                } catch (chunkErr: Exception) {
+                    runCatching { docRef.delete().await() }
+                    throw chunkErr
+                }
+            }
             docRef.id
         } catch (e: CancellationException) {
             throw e
@@ -803,11 +824,85 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         }
     }
 
+    private suspend fun uploadVideoChunks(
+        chunksCollection: com.google.firebase.firestore.CollectionReference,
+        chunks: List<String>
+    ) {
+        // Commit 5 chunks (~2.3 MB Base64 max) per Firestore batch so RPC stays safely below 10 MiB.
+        chunks.chunked(5).forEachIndexed { groupIdx, slice ->
+            val batch = db.batch()
+            slice.forEachIndexed { offset, chunkData ->
+                val globalIndex = groupIdx * 5 + offset
+                val chunkDocId = "chunk_${globalIndex.toString().padStart(3, '0')}"
+                batch.set(
+                    chunksCollection.document(chunkDocId),
+                    mapOf(
+                        "index" to globalIndex.toLong(),
+                        "data" to chunkData,
+                        "createdAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
+            batch.commit().await()
+        }
+    }
+
+    suspend fun fetchVideoChunks(
+        collectionName: String,
+        mediaId: String,
+        expectedCount: Long
+    ): List<String> {
+        requireUserId()
+        if (mediaId.isBlank() || mediaId.startsWith("showcase_")) return emptyList()
+        val safeCollection = if (collectionName == "stories") "stories" else "posts"
+        val chunksRef = db.collection(safeCollection).document(mediaId).collection("videoChunks")
+        val retryDelaysMs = longArrayOf(600L, 1000L, 1500L, 2000L, 2500L)
+
+        try {
+            for (attempt in 0..retryDelaysMs.size) {
+                val snap = chunksRef.orderBy("index", Query.Direction.ASCENDING).get().await()
+                val ordered = snap.documents
+                    .mapNotNull { doc ->
+                        val idx = doc.getLong("index") ?: return@mapNotNull null
+                        val data = doc.getString("data") ?: return@mapNotNull null
+                        if (data.isBlank()) null else idx to data
+                    }
+                    .sortedBy { it.first }
+                    .map { it.second }
+
+                if ((expectedCount <= 0L && ordered.isNotEmpty()) ||
+                    (expectedCount > 0L && ordered.size >= expectedCount.toInt())
+                ) {
+                    return ordered
+                }
+                if (attempt < retryDelaysMs.size) {
+                    delay(retryDelaysMs[attempt])
+                }
+            }
+            return emptyList()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, chunksRef.path)
+            return emptyList()
+        }
+    }
+
     suspend fun deletePost(postId: String): Result<Unit> = runCatching {
         requireUserId()
         require(postId.isNotBlank()) { "Post ID must not be blank" }
         val docRef = postsCol().document(postId)
         try {
+            runCatching {
+                val chunksSnap = docRef.collection("videoChunks").get().await()
+                if (!chunksSnap.isEmpty) {
+                    chunksSnap.documents.chunked(20).forEach { group ->
+                        val batch = db.batch()
+                        group.forEach { chunkDoc -> batch.delete(chunkDoc.reference) }
+                        batch.commit().await()
+                    }
+                }
+            }
             docRef.delete().await()
         } catch (e: CancellationException) {
             throw e

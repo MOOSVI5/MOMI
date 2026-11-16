@@ -65,6 +65,7 @@ service cloud.firestore {
              (!('mediaType' in data) || data.mediaType == null || (data.mediaType is string && data.mediaType in ['IMAGE', 'VIDEO'])) &&
              (!('localVideoPath' in data) || data.localVideoPath == null || (data.localVideoPath is string && data.localVideoPath.size() <= 500)) &&
              (!('videoData' in data) || data.videoData == null || (data.videoData is string && data.videoData.size() <= 700000)) &&
+             (!('videoChunksCount' in data) || data.videoChunksCount == null || (data.videoChunksCount is int && data.videoChunksCount >= 0 && data.videoChunksCount <= 25)) &&
              (!('videoDurationMs' in data) || data.videoDurationMs == null || (data.videoDurationMs is int && data.videoDurationMs >= 0 && data.videoDurationMs <= 3600000)) &&
              data.filterTag is string && data.filterTag in ['NONE', 'BLUE', 'MAROON', 'MONO'] &&
              data.caption is string && data.caption.size() <= 1000 &&
@@ -98,12 +99,24 @@ service cloud.firestore {
              (!('mediaType' in data) || data.mediaType == null || (data.mediaType is string && data.mediaType in ['IMAGE', 'VIDEO'])) &&
              (!('localVideoPath' in data) || data.localVideoPath == null || (data.localVideoPath is string && data.localVideoPath.size() <= 500)) &&
              (!('videoData' in data) || data.videoData == null || (data.videoData is string && data.videoData.size() <= 700000)) &&
+             (!('videoChunksCount' in data) || data.videoChunksCount == null || (data.videoChunksCount is int && data.videoChunksCount >= 0 && data.videoChunksCount <= 25)) &&
              (!('videoDurationMs' in data) || data.videoDurationMs == null || (data.videoDurationMs is int && data.videoDurationMs >= 0 && data.videoDurationMs <= 3600000)) &&
              (!('audioTitle' in data) || data.audioTitle == null || (data.audioTitle is string && data.audioTitle.size() <= 120)) &&
              (!('localAudioPath' in data) || data.localAudioPath == null || (data.localAudioPath is string && data.localAudioPath.size() <= 500)) &&
              data.caption is string && data.caption.size() <= 300 &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
+    }
+
+    function isValidVideoChunk(data) {
+      return data.index is int &&
+             data.index >= 0 &&
+             data.index < 25 &&
+             data.data is string &&
+             data.data.size() >= 1 &&
+             data.data.size() <= 700000 &&
+             data.createdAt is timestamp &&
+             data.createdAt <= request.time;
     }
 
     function isValidFollow(data, followId) {
@@ -280,7 +293,7 @@ service cloud.firestore {
                        isValidId(postId) &&
                        incoming().userId == request.auth.uid &&
                        incoming().keys().hasAll(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'imageKey', 'filterTag', 'caption', 'likesCount', 'commentsCount', 'category', 'isReel', 'createdAt']) &&
-                       incoming().keys().hasOnly(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'location', 'imageKey', 'localImagePath', 'imageData', 'mediaType', 'localVideoPath', 'videoData', 'videoDurationMs', 'localAudioPath', 'filterTag', 'caption', 'likesCount', 'commentsCount', 'category', 'isReel', 'audioTitle', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'location', 'imageKey', 'localImagePath', 'imageData', 'mediaType', 'localVideoPath', 'videoData', 'videoChunksCount', 'videoDurationMs', 'localAudioPath', 'filterTag', 'caption', 'likesCount', 'commentsCount', 'category', 'isReel', 'audioTitle', 'createdAt', 'updatedAt']) &&
                        isValidPost(incoming());
 
       allow update: if isSignedIn() &&
@@ -325,6 +338,25 @@ service cloud.firestore {
                          isValidId(commentId) &&
                          (existing().userId == request.auth.uid || get(/databases/$(database)/documents/posts/$(postId)).data.userId == request.auth.uid);
       }
+
+      match /videoChunks/{chunkId} {
+        allow get: if isSignedIn() && isValidId(postId) && isValidId(chunkId);
+        allow list: if isSignedIn() && isValidId(postId);
+        allow create: if isSignedIn() &&
+                         isValidId(postId) &&
+                         isValidId(chunkId) &&
+                         incoming().keys().hasAll(['index', 'data', 'createdAt']) &&
+                         incoming().keys().hasOnly(['index', 'data', 'createdAt']) &&
+                         isValidVideoChunk(incoming()) &&
+                         exists(/databases/$(database)/documents/posts/$(postId)) &&
+                         get(/databases/$(database)/documents/posts/$(postId)).data.userId == request.auth.uid;
+        allow update: if false;
+        allow delete: if isSignedIn() &&
+                         isValidId(postId) &&
+                         isValidId(chunkId) &&
+                         exists(/databases/$(database)/documents/posts/$(postId)) &&
+                         get(/databases/$(database)/documents/posts/$(postId)).data.userId == request.auth.uid;
+      }
     }
 
     // Global Shared Stories
@@ -336,11 +368,30 @@ service cloud.firestore {
                        isValidId(storyId) &&
                        incoming().userId == request.auth.uid &&
                        incoming().keys().hasAll(['userId', 'username', 'avatarKey', 'imageKey', 'caption', 'createdAt']) &&
-                       incoming().keys().hasOnly(['userId', 'username', 'avatarKey', 'imageKey', 'localImagePath', 'imageData', 'mediaType', 'localVideoPath', 'videoData', 'videoDurationMs', 'audioTitle', 'localAudioPath', 'caption', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'username', 'avatarKey', 'imageKey', 'localImagePath', 'imageData', 'mediaType', 'localVideoPath', 'videoData', 'videoChunksCount', 'videoDurationMs', 'audioTitle', 'localAudioPath', 'caption', 'createdAt', 'updatedAt']) &&
                        isValidStory(incoming());
 
       allow update: if false;
       allow delete: if isSignedIn() && isValidId(storyId) && existing().userId == request.auth.uid;
+
+      match /videoChunks/{chunkId} {
+        allow get: if isSignedIn() && isValidId(storyId) && isValidId(chunkId);
+        allow list: if isSignedIn() && isValidId(storyId);
+        allow create: if isSignedIn() &&
+                         isValidId(storyId) &&
+                         isValidId(chunkId) &&
+                         incoming().keys().hasAll(['index', 'data', 'createdAt']) &&
+                         incoming().keys().hasOnly(['index', 'data', 'createdAt']) &&
+                         isValidVideoChunk(incoming()) &&
+                         exists(/databases/$(database)/documents/stories/$(storyId)) &&
+                         get(/databases/$(database)/documents/stories/$(storyId)).data.userId == request.auth.uid;
+        allow update: if false;
+        allow delete: if isSignedIn() &&
+                         isValidId(storyId) &&
+                         isValidId(chunkId) &&
+                         exists(/databases/$(database)/documents/stories/$(storyId)) &&
+                         get(/databases/$(database)/documents/stories/$(storyId)).data.userId == request.auth.uid;
+      }
     }
 
     // Shared Follow Graph

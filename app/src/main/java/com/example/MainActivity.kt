@@ -39,6 +39,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -69,6 +70,7 @@ import com.example.auth.signOut
 import com.example.data.model.Post
 import com.example.data.repository.MomiFirestoreRepository
 import com.example.ui.components.CommentsBottomSheet
+import com.example.ui.components.LocalRemoteVideoResolver
 import com.example.ui.components.LumaAvatar
 import android.net.Uri
 import com.example.ui.screens.CreatePostScreen
@@ -301,6 +303,13 @@ private fun LumaApp(
         }
     }
 
+    val remoteVideoResolver: suspend (String, String, Long) -> Uri? = remember(viewModel, context) {
+        { collectionName, mediaId, expectedChunksCount ->
+            viewModel.resolveRemoteVideoUri(context, collectionName, mediaId, expectedChunksCount)
+        }
+    }
+
+    CompositionLocalProvider(LocalRemoteVideoResolver provides remoteVideoResolver) {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val useRail = maxWidth >= 600.dp
 
@@ -474,7 +483,7 @@ private fun LumaApp(
                             CreatePostScreen(
                                 initialModeStory = startAsStory,
                                 onClose = { navController.popBackStack() },
-                                onPublishPost = { imageKey, localPath, mediaType, localVideoPath, videoDurationMs, audioTitle, localAudioPath, filter, caption, location, category, isReel ->
+                                onPublishPost = { imageKey, localPath, mediaType, localVideoPath, videoDurationMs, audioTitle, localAudioPath, filter, caption, location, category, isReel, onFinished ->
                                     viewModel.createPost(
                                         context = context,
                                         imageKey = imageKey,
@@ -489,12 +498,15 @@ private fun LumaApp(
                                         location = location,
                                         category = category,
                                         isReel = isReel
-                                    ) {
-                                        navController.popBackStack()
-                                        navigatePrimaryTab(LumaRoutes.HOME)
+                                    ) { succeeded ->
+                                        onFinished(succeeded)
+                                        if (succeeded) {
+                                            navController.popBackStack()
+                                            navigatePrimaryTab(LumaRoutes.HOME)
+                                        }
                                     }
                                 },
-                                onPublishStory = { imageKey, localPath, mediaType, localVideoPath, videoDurationMs, audioTitle, localAudioPath, caption ->
+                                onPublishStory = { imageKey, localPath, mediaType, localVideoPath, videoDurationMs, audioTitle, localAudioPath, caption, onFinished ->
                                     viewModel.createStory(
                                         context = context,
                                         imageKey = imageKey,
@@ -505,9 +517,12 @@ private fun LumaApp(
                                         audioTitle = audioTitle,
                                         localAudioPath = localAudioPath,
                                         caption = caption
-                                    ) {
-                                        navController.popBackStack()
-                                        navigatePrimaryTab(LumaRoutes.HOME)
+                                    ) { succeeded ->
+                                        onFinished(succeeded)
+                                        if (succeeded) {
+                                            navController.popBackStack()
+                                            navigatePrimaryTab(LumaRoutes.HOME)
+                                        }
                                     }
                                 }
                             )
@@ -735,6 +750,7 @@ private fun LumaApp(
                 }
             }
         }
+    }
     }
 
     if (activeCommentPostId != null) {
