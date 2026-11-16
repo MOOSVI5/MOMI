@@ -68,9 +68,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.FollowEdge
 import com.example.data.model.Post
 import com.example.data.model.UserProfile
 import com.example.ui.components.EditProfileDialog
+import com.example.ui.components.FollowListBottomSheet
 import com.example.ui.components.LumaAvatar
 import com.example.ui.components.PostMediaImage
 import com.example.ui.theme.AppColorScheme
@@ -94,6 +96,7 @@ private val DefaultHighlights = listOf(
 fun ProfileScreen(
     profile: UserProfile?,
     allCreators: List<UserProfile>,
+    follows: List<FollowEdge> = emptyList(),
     followingUids: Set<String>,
     allPosts: List<Post>,
     themePreference: ThemePreference,
@@ -116,6 +119,7 @@ fun ProfileScreen(
     onToggleFollowCreator: (UserProfile, Boolean) -> Unit,
     onToggleUserVerified: (UserProfile, Boolean) -> Unit = { _, _ -> },
     onMessageCreator: (UserProfile) -> Unit,
+    onOpenUserProfile: (String) -> Unit = {},
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -124,6 +128,7 @@ fun ProfileScreen(
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showCreatorsSheet by remember { mutableStateOf(false) }
     var showAdminVerifySheet by remember { mutableStateOf(false) }
+    var followSheetTab by remember { mutableStateOf<Int?>(null) }
 
     val ownPosts = remember(allPosts, profile?.userId) {
         val uid = profile?.userId.orEmpty()
@@ -143,6 +148,20 @@ fun ProfileScreen(
             profile = profile,
             onDismiss = { showEditDialog = false },
             onSave = onUpdateProfile
+        )
+    }
+
+    if (followSheetTab != null && profile != null) {
+        FollowListBottomSheet(
+            targetProfile = profile,
+            initialTab = followSheetTab ?: 0,
+            follows = follows,
+            allProfiles = allCreators,
+            currentUserId = profile.userId,
+            followingUids = followingUids,
+            onFollowToggle = onToggleFollowCreator,
+            onUserClick = onOpenUserProfile,
+            onDismiss = { followSheetTab = null }
         )
     }
 
@@ -188,7 +207,14 @@ fun ProfileScreen(
                         items(otherCreators, key = { it.userId }) { creator ->
                             val isFollowing = followingUids.contains(creator.userId)
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable {
+                                        showCreatorsSheet = false
+                                        onOpenUserProfile(creator.userId)
+                                    }
+                                    .padding(vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 LumaAvatar(
@@ -682,14 +708,22 @@ fun ProfileScreen(
                             modifier = Modifier.weight(1f),
                             horizontalArrangement = Arrangement.SpaceEvenly
                         ) {
-                            ProfileStatColumn(count = ownPosts.size.toString(), label = "posts")
+                            ProfileStatColumn(
+                                count = ownPosts.size.toString(),
+                                label = "posts",
+                                onClick = { selectedTab = 0 }
+                            )
                             ProfileStatColumn(
                                 count = MediaAssets.formatCompactCount(profile?.followersCount ?: 0L),
-                                label = "followers"
+                                label = "followers",
+                                testTag = "profile_followers_stat",
+                                onClick = { followSheetTab = 0 }
                             )
                             ProfileStatColumn(
                                 count = MediaAssets.formatCompactCount(profile?.followingCount ?: 0L),
-                                label = "following"
+                                label = "following",
+                                testTag = "profile_following_stat",
+                                onClick = { followSheetTab = 1 }
                             )
                         }
                     }
@@ -989,8 +1023,20 @@ fun ProfileScreen(
 }
 
 @Composable
-private fun ProfileStatColumn(count: String, label: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+private fun ProfileStatColumn(
+    count: String,
+    label: String,
+    testTag: String? = null,
+    onClick: (() -> Unit)? = null
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .let { base -> if (testTag != null) base.testTag(testTag) else base }
+            .let { base -> if (onClick != null) base.clickable(onClick = onClick) else base }
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+    ) {
         Text(
             text = count,
             style = MaterialTheme.typography.titleMedium,

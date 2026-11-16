@@ -362,73 +362,80 @@ object MediaAssets {
             if (b64 != null) return b64 to true
         }
 
-        val compressedFile = File(context.cacheDir, "momi_tx_${UUID.randomUUID()}.mp4")
-        val exported = withTimeoutOrNull(25_000L) {
-            withContext(Dispatchers.Main.immediate) {
-                suspendCancellableCoroutine { cont ->
-                    val encoderFactory = DefaultEncoderFactory.Builder(context)
-                        .setRequestedVideoEncoderSettings(
-                            VideoEncoderSettings.Builder()
-                                .setBitrate(280_000)
-                                .build()
-                        )
-                        .build()
+        val compressionPasses = listOf(
+            360 to 260_000,
+            240 to 140_000
+        )
 
-                    val editedMediaItem = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(sourceFile)))
-                        .setEffects(
-                            Effects(
-                                emptyList(),
-                                listOf(Presentation.createForHeight(360))
+        for ((targetHeight, bitrate) in compressionPasses) {
+            val compressedFile = File(context.cacheDir, "momi_tx_${UUID.randomUUID()}.mp4")
+            val exported = withTimeoutOrNull(25_000L) {
+                withContext(Dispatchers.Main.immediate) {
+                    suspendCancellableCoroutine { cont ->
+                        val encoderFactory = DefaultEncoderFactory.Builder(context)
+                            .setRequestedVideoEncoderSettings(
+                                VideoEncoderSettings.Builder()
+                                    .setBitrate(bitrate)
+                                    .build()
                             )
-                        )
-                        .build()
+                            .build()
 
-                    val transformer = Transformer.Builder(context)
-                        .setEncoderFactory(encoderFactory)
-                        .setVideoMimeType(MimeTypes.VIDEO_H264)
-                        .addListener(object : Transformer.Listener {
-                            override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                                if (cont.isActive) cont.resume(true)
-                            }
+                        val editedMediaItem = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(sourceFile)))
+                            .setEffects(
+                                Effects(
+                                    emptyList(),
+                                    listOf(Presentation.createForHeight(targetHeight))
+                                )
+                            )
+                            .build()
 
-                            override fun onError(
-                                composition: Composition,
-                                exportResult: ExportResult,
-                                exportException: ExportException
-                            ) {
-                                if (cont.isActive) cont.resume(false)
-                            }
-                        })
-                        .build()
+                        val transformer = Transformer.Builder(context)
+                            .setEncoderFactory(encoderFactory)
+                            .setVideoMimeType(MimeTypes.VIDEO_H264)
+                            .addListener(object : Transformer.Listener {
+                                override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                                    if (cont.isActive) cont.resume(true)
+                                }
 
-                    cont.invokeOnCancellation {
-                        runCatching { transformer.cancel() }
+                                override fun onError(
+                                    composition: Composition,
+                                    exportResult: ExportResult,
+                                    exportException: ExportException
+                                ) {
+                                    if (cont.isActive) cont.resume(false)
+                                }
+                            })
+                            .build()
+
+                        cont.invokeOnCancellation {
+                            runCatching { transformer.cancel() }
+                        }
+                        runCatching {
+                            transformer.start(editedMediaItem, compressedFile.absolutePath)
+                        }.onFailure {
+                            if (cont.isActive) cont.resume(false)
+                        }
                     }
-                    runCatching {
-                        transformer.start(editedMediaItem, compressedFile.absolutePath)
-                    }.onFailure {
-                        if (cont.isActive) cont.resume(false)
+                }
+            } ?: false
+
+            val encodedResult = withContext(Dispatchers.IO) {
+                try {
+                    if (exported && compressedFile.exists() && compressedFile.length() in 1..maxRawBytes) {
+                        val encoded = Base64.encodeToString(compressedFile.readBytes(), Base64.NO_WRAP)
+                        if (encoded.length <= 680_000) encoded else null
+                    } else {
+                        null
                     }
+                } finally {
+                    runCatching { compressedFile.delete() }
                 }
             }
-        } ?: false
-
-        return withContext(Dispatchers.IO) {
-            try {
-                if (exported && compressedFile.exists() && compressedFile.length() in 1..maxRawBytes) {
-                    val encoded = Base64.encodeToString(compressedFile.readBytes(), Base64.NO_WRAP)
-                    if (encoded.length <= 680_000) {
-                        encoded to true
-                    } else {
-                        null to false
-                    }
-                } else {
-                    null to false
-                }
-            } finally {
-                runCatching { compressedFile.delete() }
+            if (encodedResult != null) {
+                return encodedResult to true
             }
         }
+        return null to false
     }
 
     fun resolvePlayableVideoUri(

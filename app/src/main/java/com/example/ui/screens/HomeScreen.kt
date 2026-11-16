@@ -83,11 +83,12 @@ fun HomeScreen(
     onFollowToggle: (Post) -> Unit,
     onFollowCreator: (UserProfile, Boolean) -> Unit = { _, _ -> },
     onDeletePost: (Post) -> Unit,
-    onAuthorClick: (String) -> Unit,
+    onAuthorClick: (userId: String, username: String, isShowcase: Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var feedFilter by remember { mutableStateOf("For You") }
     var filterMenuOpen by remember { mutableStateOf(false) }
+    var feedMuted by remember { mutableStateOf(true) }
     val listState = rememberLazyListState()
     val nativeAdState = rememberStartIoNativeAds(count = 3)
 
@@ -103,11 +104,38 @@ fun HomeScreen(
         creators.filter { it.userId.isNotBlank() && it.userId != profile?.userId }
     }
 
-    val activeVideoPostId by remember(displayedPosts) {
+    val videoPostIds = remember(displayedPosts) {
+        displayedPosts.asSequence().filter { it.isVideoPost }.map { it.id }.toSet()
+    }
+
+    // Instagram/TikTok-style viewport-centered video autoplay:
+    // plays whichever video post has the most visible overlap & sits closest to screen center.
+    val activeVideoPostId by remember(videoPostIds) {
         derivedStateOf {
-            val visibleKeys = listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet()
-            displayedPosts.firstOrNull { it.isVideoPost && visibleKeys.contains(it.id) }?.id
-                ?: displayedPosts.firstOrNull { it.isVideoPost }?.id
+            val layoutInfo = listState.layoutInfo
+            val viewportStart = layoutInfo.viewportStartOffset
+            val viewportEnd = layoutInfo.viewportEndOffset
+            val viewportCenter = (viewportStart + viewportEnd) / 2f
+
+            layoutInfo.visibleItemsInfo
+                .asSequence()
+                .mapNotNull { item ->
+                    val key = item.key as? String ?: return@mapNotNull null
+                    if (!videoPostIds.contains(key)) return@mapNotNull null
+                    val visibleTop = maxOf(item.offset, viewportStart)
+                    val visibleBottom = minOf(item.offset + item.size, viewportEnd)
+                    val visibleHeight = (visibleBottom - visibleTop).coerceAtLeast(0)
+                    val ratio = if (item.size > 0) visibleHeight.toFloat() / item.size.toFloat() else 0f
+                    if (ratio < 0.32f && visibleHeight < 220) return@mapNotNull null
+                    val itemCenter = item.offset + item.size / 2f
+                    val distanceFromCenter = kotlin.math.abs(itemCenter - viewportCenter)
+                    Triple(key, ratio, distanceFromCenter)
+                }
+                .minWithOrNull(
+                    compareBy<Triple<String, Float, Float>> { it.third }
+                        .thenByDescending { it.second }
+                )
+                ?.first
         }
     }
 
@@ -359,6 +387,8 @@ fun HomeScreen(
                         post = post,
                         isOwnPost = post.userId == profile?.userId && !post.id.startsWith("showcase_"),
                         isPlaybackActive = post.isVideoPost && post.id == activeVideoPostId,
+                        externalMuted = feedMuted,
+                        onMuteChange = { feedMuted = it },
                         onLikeToggle = { onLikeToggle(post) },
                         onDoubleTapLike = { onDoubleTapLike(post) },
                         onCommentClick = { onCommentClick(post) },
@@ -366,13 +396,21 @@ fun HomeScreen(
                         onBookmarkToggle = { onBookmarkToggle(post) },
                         onFollowToggle = { onFollowToggle(post) },
                         onDeletePost = { onDeletePost(post) },
-                        onAuthorClick = { onAuthorClick(post.authorUsername) }
+                        onAuthorClick = {
+                            onAuthorClick(
+                                post.userId,
+                                post.authorUsername,
+                                post.id.startsWith("showcase_")
+                            )
+                        }
                     )
                     if (index == 0 && suggestedCreators.isNotEmpty()) {
                         SuggestedCreatorsSection(
                             creators = suggestedCreators,
                             followingUids = followingUids,
-                            onCreatorClick = { onAuthorClick(it.username) },
+                            onCreatorClick = { creator ->
+                                onAuthorClick(creator.userId, creator.username, false)
+                            },
                             onFollowClick = { creator ->
                                 onFollowCreator(creator, followingUids.contains(creator.userId))
                             },

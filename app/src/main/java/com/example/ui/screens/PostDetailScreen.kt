@@ -40,6 +40,7 @@ fun PostDetailScreen(
     onBookmarkToggle: (Post) -> Unit,
     onFollowToggle: (Post) -> Unit,
     onDeletePost: (Post) -> Unit,
+    onAuthorClick: (Post) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     BackHandler(onBack = onBack)
@@ -91,6 +92,7 @@ fun PostDetailScreen(
                     onShareClick = { onShareClick(post) },
                     onBookmarkToggle = { onBookmarkToggle(post) },
                     onFollowToggle = { onFollowToggle(post) },
+                    onAuthorClick = { onAuthorClick(post) },
                     onDeletePost = {
                         onDeletePost(post)
                         onBack()

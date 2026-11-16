@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
@@ -30,6 +32,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -41,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.example.data.model.Comment
 import com.example.data.model.UserProfile
@@ -53,10 +57,19 @@ fun CommentsBottomSheet(
     currentUser: UserProfile?,
     onDismiss: () -> Unit,
     onSubmitComment: (String) -> Unit,
-    onToggleCommentLike: (Comment) -> Unit
+    onToggleCommentLike: (Comment) -> Unit,
+    onAuthorClick: (userId: String, username: String) -> Unit = { _, _ -> }
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var commentText by remember { mutableStateOf("") }
+
+    fun submitCurrent() {
+        val text = commentText.trim()
+        if (text.isNotEmpty()) {
+            onSubmitComment(text)
+            commentText = ""
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -121,10 +134,23 @@ fun CommentsBottomSheet(
                                 username = comment.authorUsername,
                                 avatarKey = comment.authorAvatarKey,
                                 avatarData = comment.authorAvatarData,
-                                size = 34.dp
+                                size = 36.dp,
+                                onClick = {
+                                    if (comment.userId.isNotBlank()) {
+                                        onDismiss()
+                                        onAuthorClick(comment.userId, comment.authorUsername)
+                                    }
+                                }
                             )
                             Spacer(modifier = Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable(enabled = comment.userId.isNotBlank()) {
+                                        onDismiss()
+                                        onAuthorClick(comment.userId, comment.authorUsername)
+                                    }
+                            ) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -151,13 +177,13 @@ fun CommentsBottomSheet(
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 IconButton(
                                     onClick = { onToggleCommentLike(comment) },
-                                    modifier = Modifier.size(36.dp)
+                                    modifier = Modifier.minimumInteractiveComponentSize()
                                 ) {
                                     Icon(
                                         imageVector = if (comment.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
                                         contentDescription = "Like comment",
                                         tint = if (comment.isLiked) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(16.dp)
+                                        modifier = Modifier.size(18.dp)
                                     )
                                 }
                                 if (comment.likesCount > 0) {
@@ -182,7 +208,7 @@ fun CommentsBottomSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 LumaAvatar(
-                    username = currentUser?.username ?: "aria.studio",
+                    username = currentUser?.username ?: "momi",
                     avatarKey = currentUser?.avatarKey ?: "avatar_aria",
                     avatarData = currentUser?.avatarData,
                     size = 34.dp
@@ -193,11 +219,13 @@ fun CommentsBottomSheet(
                     onValueChange = { commentText = it },
                     placeholder = {
                         Text(
-                            text = "Add a comment for ${currentUser?.username ?: "this post"}...",
+                            text = "Add a comment...",
                             style = MaterialTheme.typography.bodyMedium
                         )
                     },
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { submitCurrent() }),
                     shape = RoundedCornerShape(24.dp),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = MaterialTheme.colorScheme.primary,
@@ -211,21 +239,20 @@ fun CommentsBottomSheet(
                 val canPost = commentText.isNotBlank()
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
+                        .heightIn(min = 48.dp)
+                        .clip(RoundedCornerShape(22.dp))
                         .background(
                             if (canPost) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.surfaceVariant
                         )
-                        .clickable(enabled = canPost) {
-                            onSubmitComment(commentText)
-                            commentText = ""
-                        }
-                        .padding(horizontal = 14.dp, vertical = 10.dp)
-                        .testTag("post_comment_button")
+                        .clickable(enabled = canPost) { submitCurrent() }
+                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                        .testTag("post_comment_button"),
+                    contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = "Post",
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Bold,
                         color = if (canPost) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
                     )

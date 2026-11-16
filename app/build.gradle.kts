@@ -17,8 +17,8 @@ android {
     applicationId = "com.aistudio.luma.xkpqrm"
     minSdk = 24
     targetSdk = 36
-    versionCode = 5
-    versionName = "1.4"
+    versionCode = 6
+    versionName = "1.5"
 
     val startIoAppId = System.getenv("STARTIO_APP_ID")?.takeIf { it.isNotBlank() }
         ?: "210719378"

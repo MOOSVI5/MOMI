@@ -67,21 +67,23 @@ fun ExploreScreen(
     onSearchQueryChange: (String) -> Unit,
     onCategorySelected: (String) -> Unit,
     onPostClick: (Post) -> Unit,
+    onCreatorClick: (UserProfile) -> Unit = {},
     onFollowCreator: (UserProfile, Boolean) -> Unit = { _, _ -> },
     onMessageCreator: (UserProfile) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val matchingCreators = remember(creators, searchQuery, currentUserId) {
+    val discoverCreators = remember(creators, currentUserId) {
+        creators.filter { it.userId.isNotBlank() && it.userId != currentUserId }
+    }
+    val matchingCreators = remember(discoverCreators, searchQuery) {
         val q = searchQuery.trim()
         if (q.isEmpty()) {
             emptyList()
         } else {
-            creators.filter { creator ->
-                creator.userId != currentUserId && (
-                    creator.username.contains(q, ignoreCase = true) ||
-                        creator.displayName.contains(q, ignoreCase = true) ||
-                        creator.category.contains(q, ignoreCase = true)
-                    )
+            discoverCreators.filter { creator ->
+                creator.username.contains(q, ignoreCase = true) ||
+                    creator.displayName.contains(q, ignoreCase = true) ||
+                    creator.category.contains(q, ignoreCase = true)
             }
         }
     }
@@ -220,6 +222,68 @@ fun ExploreScreen(
                 verticalArrangement = Arrangement.spacedBy(2.dp),
                 contentPadding = PaddingValues(bottom = 16.dp)
             ) {
+                if (searchQuery.trim().isEmpty() && discoverCreators.isNotEmpty()) {
+                    item(key = "discover_creators_row") {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 4.dp, bottom = 8.dp)
+                        ) {
+                            Text(
+                                text = "Creators",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onBackground,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                            )
+                            LazyRow(
+                                contentPadding = PaddingValues(horizontal = 14.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                items(discoverCreators.take(15), key = { "explore_creator_${it.userId}" }) { creator ->
+                                    Column(
+                                        modifier = Modifier
+                                            .width(76.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .clickable { onCreatorClick(creator) }
+                                            .padding(vertical = 4.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    ) {
+                                        LumaAvatar(
+                                            username = creator.username,
+                                            avatarKey = creator.avatarKey,
+                                            avatarData = creator.avatarData,
+                                            size = 56.dp,
+                                            hasActiveStory = true
+                                        )
+                                        Spacer(modifier = Modifier.height(5.dp))
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = creator.username,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = MaterialTheme.colorScheme.onBackground,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false)
+                                            )
+                                            if (creator.isVerified) {
+                                                Spacer(modifier = Modifier.width(2.dp))
+                                                Icon(
+                                                    imageVector = Icons.Filled.Verified,
+                                                    contentDescription = "Verified",
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(12.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if (matchingCreators.isNotEmpty()) {
                     item(key = "matching_creators_header") {
                         Text(
@@ -235,15 +299,15 @@ fun ExploreScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { onSearchQueryChange(creator.username) }
-                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                                .clickable { onCreatorClick(creator) }
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             LumaAvatar(
                                 username = creator.username,
                                 avatarKey = creator.avatarKey,
                                 avatarData = creator.avatarData,
-                                size = 44.dp,
+                                size = 46.dp,
                                 hasActiveStory = true
                             )
                             Spacer(modifier = Modifier.width(12.dp))
@@ -255,7 +319,8 @@ fun ExploreScreen(
                                         fontWeight = FontWeight.Bold,
                                         color = MaterialTheme.colorScheme.onBackground,
                                         maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
                                     )
                                     if (creator.isVerified) {
                                         Spacer(modifier = Modifier.width(4.dp))
@@ -275,12 +340,15 @@ fun ExploreScreen(
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
+                            Spacer(modifier = Modifier.width(8.dp))
                             Box(
                                 modifier = Modifier
+                                    .heightIn(min = 38.dp)
                                     .clip(RoundedCornerShape(10.dp))
                                     .background(MaterialTheme.colorScheme.surfaceVariant)
                                     .clickable { onMessageCreator(creator) }
-                                    .padding(horizontal = 12.dp, vertical = 7.dp)
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                contentAlignment = Alignment.Center
                             ) {
                                 Text(
                                     text = "Message",
@@ -292,13 +360,15 @@ fun ExploreScreen(
                             Spacer(modifier = Modifier.width(6.dp))
                             Box(
                                 modifier = Modifier
+                                    .heightIn(min = 38.dp)
                                     .clip(RoundedCornerShape(10.dp))
                                     .background(
                                         if (isFollowing) MaterialTheme.colorScheme.surfaceVariant
                                         else MaterialTheme.colorScheme.primary
                                     )
                                     .clickable { onFollowCreator(creator, isFollowing) }
-                                    .padding(horizontal = 12.dp, vertical = 7.dp)
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                contentAlignment = Alignment.Center
                             ) {
                                 Text(
                                     text = if (isFollowing) "Following" else "Follow",

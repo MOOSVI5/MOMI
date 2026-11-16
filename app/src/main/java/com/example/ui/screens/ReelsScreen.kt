@@ -87,6 +87,7 @@ fun ReelsScreen(
     onShareClick: (Post) -> Unit,
     onBookmarkToggle: (Post) -> Unit,
     onFollowToggle: (Post) -> Unit,
+    onAuthorClick: (Post) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     if (reels.isEmpty()) {
@@ -127,7 +128,8 @@ fun ReelsScreen(
                 onCommentClick = { onCommentClick(reel) },
                 onShareClick = { onShareClick(reel) },
                 onBookmarkToggle = { onBookmarkToggle(reel) },
-                onFollowToggle = { onFollowToggle(reel) }
+                onFollowToggle = { onFollowToggle(reel) },
+                onAuthorClick = { onAuthorClick(reel) }
             )
         }
 
@@ -174,7 +176,8 @@ private fun ReelPageItem(
     onCommentClick: () -> Unit,
     onShareClick: () -> Unit,
     onBookmarkToggle: () -> Unit,
-    onFollowToggle: () -> Unit
+    onFollowToggle: () -> Unit,
+    onAuthorClick: () -> Unit
 ) {
     var showHeartBurst by remember { mutableStateOf(false) }
 
@@ -301,28 +304,36 @@ private fun ReelPageItem(
                     .padding(end = 12.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    LumaAvatar(
-                        username = reel.authorUsername,
-                        avatarKey = reel.authorAvatarKey,
-                        avatarData = reel.authorAvatarData,
-                        size = 36.dp,
-                        hasActiveStory = true
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text(
-                        text = reel.authorUsername,
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp
-                    )
-                    if (reel.authorVerified) {
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Icon(
-                            imageVector = Icons.Filled.Verified,
-                            contentDescription = null,
-                            tint = SilkBlueLight,
-                            modifier = Modifier.size(15.dp)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable(onClick = onAuthorClick)
+                            .padding(vertical = 4.dp, horizontal = 2.dp)
+                    ) {
+                        LumaAvatar(
+                            username = reel.authorUsername,
+                            avatarKey = reel.authorAvatarKey,
+                            avatarData = reel.authorAvatarData,
+                            size = 38.dp,
+                            hasActiveStory = true
                         )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = reel.authorUsername,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                        if (reel.authorVerified) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.Filled.Verified,
+                                contentDescription = null,
+                                tint = SilkBlueLight,
+                                modifier = Modifier.size(15.dp)
+                            )
+                        }
                     }
                     if (!isOwnReel) {
                         Spacer(modifier = Modifier.width(10.dp))
@@ -335,7 +346,7 @@ private fun ReelPageItem(
                                     RoundedCornerShape(8.dp)
                                 )
                                 .clickable(onClick = onFollowToggle)
-                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                                .padding(horizontal = 12.dp, vertical = 7.dp)
                         ) {
                             Text(
                                 text = if (reel.isFollowingAuthor) "Following" else "Follow",

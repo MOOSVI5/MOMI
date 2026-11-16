@@ -49,6 +49,7 @@ fun NotificationsScreen(
     allCreators: List<UserProfile> = emptyList(),
     onToggleFollowBack: (NotificationItem) -> Unit,
     onMarkAllRead: () -> Unit,
+    onUserClick: (userId: String, username: String) -> Unit = { _, _ -> },
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -138,6 +139,9 @@ fun NotificationsScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .clickable(enabled = notification.actorUid.isNotBlank()) {
+                                    onUserClick(notification.actorUid, notification.actorUsername)
+                                }
                                 .padding(horizontal = 16.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {

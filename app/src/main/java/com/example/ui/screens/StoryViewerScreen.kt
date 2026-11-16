@@ -7,6 +7,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -68,6 +69,7 @@ fun StoryViewerScreen(
     stories: List<Story>,
     initialStoryId: String,
     onMarkSeen: (String) -> Unit,
+    onAuthorClick: (userId: String, username: String) -> Unit = { _, _ -> },
     onClose: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -227,7 +229,13 @@ fun StoryViewerScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { onAuthorClick(currentStory.userId, currentStory.username) }
+                        .padding(vertical = 4.dp, horizontal = 4.dp)
+                ) {
                     LumaAvatar(
                         username = currentStory.username,
                         avatarKey = currentStory.avatarKey,

@@ -72,6 +72,8 @@ fun PostCard(
     post: Post,
     isOwnPost: Boolean,
     isPlaybackActive: Boolean = false,
+    externalMuted: Boolean? = null,
+    onMuteChange: ((Boolean) -> Unit)? = null,
     onLikeToggle: () -> Unit,
     onDoubleTapLike: () -> Unit,
     onCommentClick: () -> Unit,
@@ -94,7 +96,7 @@ fun PostCard(
     }
 
     val likeIconScale by animateFloatAsState(
-        targetValue = if (post.isLiked) 1.15f else 1.0f,
+        targetValue = if (post.isLiked) 1.18f else 1.0f,
         animationSpec = spring(
             dampingRatio = Spring.DampingRatioMediumBouncy,
             stiffness = Spring.StiffnessMedium
@@ -111,77 +113,82 @@ fun PostCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            LumaAvatar(
-                username = post.authorUsername,
-                avatarKey = post.authorAvatarKey,
-                avatarData = post.authorAvatarData,
-                size = 38.dp,
-                hasActiveStory = true,
-                isSeenStory = false,
-                onClick = onAuthorClick
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Column(
+            Row(
                 modifier = Modifier
                     .weight(1f)
+                    .clip(RoundedCornerShape(10.dp))
                     .clickable(onClick = onAuthorClick)
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = post.authorUsername,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onBackground,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    if (post.authorVerified) {
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Icon(
-                            imageVector = Icons.Filled.Verified,
-                            contentDescription = "Verified creator",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
-                }
-                val subtitleText = when {
-                    post.audioTitle.isNotBlank() -> post.audioTitle
-                    post.location.isNotBlank() -> post.location
-                    else -> ""
-                }
-                if (subtitleText.isNotBlank()) {
+                LumaAvatar(
+                    username = post.authorUsername,
+                    avatarKey = post.authorAvatarKey,
+                    avatarData = post.authorAvatarData,
+                    size = 40.dp,
+                    hasActiveStory = true,
+                    isSeenStory = false
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (post.audioTitle.isNotBlank()) {
-                            Icon(
-                                imageVector = Icons.Filled.MusicNote,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(13.dp)
-                            )
-                            Spacer(modifier = Modifier.width(3.dp))
-                        }
                         Text(
-                            text = subtitleText,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            text = post.authorUsername,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onBackground,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
+                        if (post.authorVerified) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.Filled.Verified,
+                                contentDescription = "Verified creator",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+                    val subtitleText = when {
+                        post.audioTitle.isNotBlank() -> post.audioTitle
+                        post.location.isNotBlank() -> post.location
+                        else -> ""
+                    }
+                    if (subtitleText.isNotBlank()) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (post.audioTitle.isNotBlank()) {
+                                Icon(
+                                    imageVector = Icons.Filled.MusicNote,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Spacer(modifier = Modifier.width(3.dp))
+                            }
+                            Text(
+                                text = subtitleText,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 }
             }
 
             if (!isOwnPost && !post.isFollowingAuthor) {
+                Spacer(modifier = Modifier.width(6.dp))
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
+                        .clip(RoundedCornerShape(10.dp))
                         .background(MaterialTheme.colorScheme.surfaceVariant)
                         .clickable(onClick = onFollowToggle)
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .padding(horizontal = 14.dp, vertical = 9.dp)
                 ) {
                     Text(
                         text = "Follow",
@@ -282,6 +289,8 @@ fun PostCard(
                     localAudioPath = post.localAudioPath,
                     audioTitle = post.audioTitle,
                     initialMuted = true,
+                    externalMuted = externalMuted,
+                    onMuteChange = onMuteChange,
                     showMuteButton = true,
                     showDurationBadge = true,
                     contentScale = ContentScale.Fit,
@@ -449,14 +458,28 @@ fun PostCard(
             )
 
             if (post.commentsCount > 0) {
-                Spacer(modifier = Modifier.height(5.dp))
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = "View all ${post.commentsCount} comments",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
                         .clickable(onClick = onCommentClick)
-                        .padding(vertical = 2.dp)
+                        .padding(vertical = 8.dp)
+                )
+            } else {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "Add a comment...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onCommentClick)
+                        .padding(vertical = 8.dp)
                 )
             }
 

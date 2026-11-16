@@ -443,8 +443,11 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         val becameLiked = try {
             db.runTransaction { transaction ->
                 val postSnap = transaction.get(postRef)
+                if (!postSnap.exists()) {
+                    throw IllegalStateException("Post is no longer available")
+                }
                 val markerSnap = transaction.get(markerRef)
-                val currentLikes = postSnap.getLong("likesCount") ?: 0L
+                val currentLikes = (postSnap.getLong("likesCount") ?: 0L).coerceAtLeast(0L)
                 if (!markerSnap.exists()) {
                     transaction.set(
                         markerRef,
@@ -463,13 +466,16 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                     true
                 } else {
                     transaction.delete(markerRef)
-                    transaction.update(
-                        postRef,
-                        mapOf(
-                            "likesCount" to (currentLikes - 1L).coerceAtLeast(0L),
-                            "updatedAt" to FieldValue.serverTimestamp()
+                    val nextLikes = if (currentLikes > 0L) currentLikes - 1L else 0L
+                    if (nextLikes != currentLikes) {
+                        transaction.update(
+                            postRef,
+                            mapOf(
+                                "likesCount" to nextLikes,
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
                         )
-                    )
+                    }
                     false
                 }
             }.await()
@@ -501,9 +507,10 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         val becameLiked = try {
             db.runTransaction { transaction ->
                 val postSnap = transaction.get(postRef)
+                if (!postSnap.exists()) return@runTransaction false
                 val markerSnap = transaction.get(markerRef)
                 if (markerSnap.exists()) return@runTransaction false
-                val currentLikes = postSnap.getLong("likesCount") ?: 0L
+                val currentLikes = (postSnap.getLong("likesCount") ?: 0L).coerceAtLeast(0L)
                 transaction.set(
                     markerRef,
                     mapOf(
@@ -579,7 +586,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                     mapOf(
                         "followerUid" to uid,
                         "targetUid" to targetUid,
-                        "followerUsername" to actorProfile.username.take(50),
+                        "followerUsername" to actorProfile.username.ifBlank { "creator" }.take(50),
                         "targetUsername" to targetUsername.ifBlank { "creator" }.take(50),
                         "createdAt" to FieldValue.serverTimestamp()
                     )
@@ -610,8 +617,8 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         val commentRef = postRef.collection("comments").document()
         val payload = mapOf(
             "userId" to uid,
-            "authorUsername" to actorProfile.username,
-            "authorAvatarKey" to actorProfile.avatarKey,
+            "authorUsername" to actorProfile.username.ifBlank { "creator" }.take(50),
+            "authorAvatarKey" to actorProfile.avatarKey.ifBlank { "avatar_aria" }.take(64),
             "text" to trimmed.take(500),
             "likesCount" to 0L,
             "createdAt" to FieldValue.serverTimestamp(),
@@ -655,8 +662,9 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         try {
             db.runTransaction { transaction ->
                 val commentSnap = transaction.get(commentRef)
+                if (!commentSnap.exists()) return@runTransaction
                 val markerSnap = transaction.get(markerRef)
-                val currentLikes = commentSnap.getLong("likesCount") ?: 0L
+                val currentLikes = (commentSnap.getLong("likesCount") ?: 0L).coerceAtLeast(0L)
                 if (!markerSnap.exists()) {
                     transaction.set(
                         markerRef,
@@ -674,13 +682,16 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                     )
                 } else {
                     transaction.delete(markerRef)
-                    transaction.update(
-                        commentRef,
-                        mapOf(
-                            "likesCount" to (currentLikes - 1L).coerceAtLeast(0L),
-                            "updatedAt" to FieldValue.serverTimestamp()
+                    val nextLikes = if (currentLikes > 0L) currentLikes - 1L else 0L
+                    if (nextLikes != currentLikes) {
+                        transaction.update(
+                            commentRef,
+                            mapOf(
+                                "likesCount" to nextLikes,
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
                         )
-                    )
+                    }
                 }
             }.await()
         } catch (e: CancellationException) {

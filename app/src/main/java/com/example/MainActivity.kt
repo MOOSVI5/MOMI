@@ -70,6 +70,7 @@ import com.example.data.model.Post
 import com.example.data.repository.MomiFirestoreRepository
 import com.example.ui.components.CommentsBottomSheet
 import com.example.ui.components.LumaAvatar
+import android.net.Uri
 import com.example.ui.screens.CreatePostScreen
 import com.example.ui.screens.ExploreScreen
 import com.example.ui.screens.HomeScreen
@@ -80,6 +81,7 @@ import com.example.ui.screens.ProfileScreen
 import com.example.ui.screens.ReelsScreen
 import com.example.ui.screens.SignInScreen
 import com.example.ui.screens.StoryViewerScreen
+import com.example.ui.screens.UserProfileScreen
 import com.example.ui.theme.AppColorScheme
 import com.example.ui.theme.AppearancePrefs
 import com.example.ui.theme.LumaTheme
@@ -98,12 +100,18 @@ private object LumaRoutes {
     const val CREATE = "create?story={story}"
     const val CLIPS = "clips"
     const val PROFILE = "profile"
+    const val USER_PROFILE = "user/{userId}?username={username}&showcase={showcase}"
     const val NOTIFICATIONS = "notifications"
     const val MESSAGES = "messages?threadId={threadId}"
     const val STORY_VIEWER = "story/{storyId}"
     const val POST_DETAIL = "post/{postId}"
 
     fun createRoute(isStory: Boolean = false) = "create?story=$isStory"
+    fun userProfileRoute(userId: String, username: String = "", isShowcase: Boolean = false): String {
+        val safeUid = Uri.encode(userId.ifBlank { "creator" })
+        val safeUsername = Uri.encode(username)
+        return "user/$safeUid?username=$safeUsername&showcase=$isShowcase"
+    }
     fun messagesRoute(threadId: String? = null) =
         if (threadId.isNullOrBlank()) "messages" else "messages?threadId=$threadId"
     fun storyRoute(storyId: String) = "story/$storyId"
@@ -231,6 +239,7 @@ private fun LumaApp(
 
     val profile by viewModel.profile.collectAsStateWithLifecycle()
     val allCreators by viewModel.allProfiles.collectAsStateWithLifecycle()
+    val follows by viewModel.follows.collectAsStateWithLifecycle()
     val followingUids by viewModel.followingUids.collectAsStateWithLifecycle()
     val allPosts by viewModel.allPosts.collectAsStateWithLifecycle()
     val explorePosts by viewModel.explorePosts.collectAsStateWithLifecycle()
@@ -246,7 +255,7 @@ private fun LumaApp(
     val selectedCategory by viewModel.selectedExploreCategory.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
 
-    val activePostForComments by viewModel.activePostForComments.collectAsStateWithLifecycle()
+    val activeCommentPostId by viewModel.activeCommentPostId.collectAsStateWithLifecycle()
     val activeComments by viewModel.activeComments.collectAsStateWithLifecycle()
 
     LaunchedEffect(errorMessage) {
@@ -281,6 +290,14 @@ private fun LumaApp(
                 launchSingleTop = true
                 restoreState = true
             }
+        }
+    }
+
+    fun openUserProfile(userId: String, username: String = "", isShowcase: Boolean = false) {
+        if (!isShowcase && userId == viewModel.currentUserId) {
+            navigatePrimaryTab(LumaRoutes.PROFILE)
+        } else if (userId.isNotBlank() || username.isNotBlank()) {
+            navController.navigate(LumaRoutes.userProfileRoute(userId, username, isShowcase))
         }
     }
 
@@ -407,13 +424,8 @@ private fun LumaApp(
                                     )
                                 },
                                 onDeletePost = { viewModel.deletePost(it.id) },
-                                onAuthorClick = { username ->
-                                    if (username == profile?.username) {
-                                        navigatePrimaryTab(LumaRoutes.PROFILE)
-                                    } else {
-                                        viewModel.setSearchQuery(username)
-                                        navigatePrimaryTab(LumaRoutes.EXPLORE)
-                                    }
+                                onAuthorClick = { userId, username, isShowcase ->
+                                    openUserProfile(userId, username, isShowcase)
                                 }
                             )
                         }
@@ -430,6 +442,9 @@ private fun LumaApp(
                                 onCategorySelected = viewModel::setExploreCategory,
                                 onPostClick = { post ->
                                     navController.navigate(LumaRoutes.postDetailRoute(post.id))
+                                },
+                                onCreatorClick = { creator ->
+                                    openUserProfile(creator.userId, creator.username, false)
                                 },
                                 onFollowCreator = { creator, isFollowing ->
                                     viewModel.toggleFollow(
@@ -513,6 +528,13 @@ private fun LumaApp(
                                         targetUsername = it.authorUsername,
                                         currentlyFollowing = it.isFollowingAuthor
                                     )
+                                },
+                                onAuthorClick = { reel ->
+                                    openUserProfile(
+                                        reel.userId,
+                                        reel.authorUsername,
+                                        reel.id.startsWith("showcase_")
+                                    )
                                 }
                             )
                         }
@@ -521,6 +543,7 @@ private fun LumaApp(
                             ProfileScreen(
                                 profile = profile,
                                 allCreators = allCreators,
+                                follows = follows,
                                 followingUids = followingUids,
                                 allPosts = allPosts,
                                 themePreference = themePreference,
@@ -556,7 +579,66 @@ private fun LumaApp(
                                         navController.navigate(LumaRoutes.messagesRoute(thread.id))
                                     }
                                 },
+                                onOpenUserProfile = { targetUid ->
+                                    openUserProfile(targetUid)
+                                },
                                 onSignOut = onSignOut
+                            )
+                        }
+
+                        composable(
+                            route = LumaRoutes.USER_PROFILE,
+                            arguments = listOf(
+                                navArgument("userId") { type = NavType.StringType },
+                                navArgument("username") {
+                                    type = NavType.StringType
+                                    defaultValue = ""
+                                },
+                                navArgument("showcase") {
+                                    type = NavType.BoolType
+                                    defaultValue = false
+                                }
+                            )
+                        ) { backStackEntry ->
+                            val targetUserId = Uri.decode(backStackEntry.arguments?.getString("userId").orEmpty())
+                            val targetUsername = Uri.decode(backStackEntry.arguments?.getString("username").orEmpty())
+                            val isShowcase = backStackEntry.arguments?.getBoolean("showcase") ?: false
+
+                            UserProfileScreen(
+                                targetUserId = targetUserId,
+                                targetUsernameHint = targetUsername,
+                                isShowcaseCreator = isShowcase,
+                                allProfiles = allCreators,
+                                allPosts = allPosts,
+                                follows = follows,
+                                currentUserId = viewModel.currentUserId,
+                                followingUids = followingUids,
+                                onBack = { navController.popBackStack() },
+                                onPostClick = { post ->
+                                    navController.navigate(LumaRoutes.postDetailRoute(post.id))
+                                },
+                                onFollowToggle = { creator, isFollowing ->
+                                    viewModel.toggleFollow(
+                                        targetUid = creator.userId,
+                                        targetUsername = creator.username,
+                                        currentlyFollowing = isFollowing
+                                    )
+                                },
+                                onMessageClick = { creator ->
+                                    viewModel.startDirectChat(creator) { thread ->
+                                        navController.navigate(LumaRoutes.messagesRoute(thread.id))
+                                    }
+                                },
+                                onShareProfile = { targetProfile ->
+                                    shareText(
+                                        context = context,
+                                        subject = "Follow @${targetProfile.username} on Momi",
+                                        text = "Check out @${targetProfile.username} on Momi: https://momi.photo/${targetProfile.username}"
+                                    )
+                                },
+                                onOpenUserProfile = { nextUid ->
+                                    openUserProfile(nextUid)
+                                }
                             )
                         }
 
@@ -566,6 +648,9 @@ private fun LumaApp(
                                 allCreators = allCreators,
                                 onToggleFollowBack = viewModel::toggleNotificationFollow,
                                 onMarkAllRead = viewModel::markNotificationsRead,
+                                onUserClick = { userId, username ->
+                                    openUserProfile(userId, username, false)
+                                },
                                 onBack = { navController.popBackStack() }
                             )
                         }
@@ -604,6 +689,9 @@ private fun LumaApp(
                                 stories = stories,
                                 initialStoryId = storyId,
                                 onMarkSeen = viewModel::markStorySeen,
+                                onAuthorClick = { userId, username ->
+                                    openUserProfile(userId, username, false)
+                                },
                                 onClose = { navController.popBackStack() }
                             )
                         }
@@ -633,6 +721,13 @@ private fun LumaApp(
                                         currentlyFollowing = it.isFollowingAuthor
                                     )
                                 },
+                                onAuthorClick = { clickedPost ->
+                                    openUserProfile(
+                                        clickedPost.userId,
+                                        clickedPost.authorUsername,
+                                        clickedPost.id.startsWith("showcase_")
+                                    )
+                                },
                                 onDeletePost = { viewModel.deletePost(it.id) }
                             )
                         }
@@ -642,13 +737,16 @@ private fun LumaApp(
         }
     }
 
-    if (activePostForComments != null) {
+    if (activeCommentPostId != null) {
         CommentsBottomSheet(
             comments = activeComments,
             currentUser = profile,
             onDismiss = viewModel::closeComments,
             onSubmitComment = viewModel::submitComment,
-            onToggleCommentLike = viewModel::toggleCommentLike
+            onToggleCommentLike = viewModel::toggleCommentLike,
+            onAuthorClick = { userId, username ->
+                openUserProfile(userId, username, false)
+            }
         )
     }
 }

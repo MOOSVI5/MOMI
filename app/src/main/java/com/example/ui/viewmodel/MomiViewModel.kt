@@ -32,8 +32,10 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.UUID
 
 sealed interface StreamUiState<out T> {
     data object Loading : StreamUiState<Nothing>
@@ -45,14 +47,21 @@ sealed interface StreamUiState<out T> {
 class MomiViewModel(
     private val repository: MomiFirestoreRepository,
     val currentUserId: String,
-    initialDisplayName: String?,
-    initialEmail: String?
+    private val initialDisplayName: String?,
+    private val initialEmail: String?
 ) : ViewModel() {
 
     val isAdminUser: Boolean = initialEmail?.trim().equals("syali6511@gmail.com", ignoreCase = true)
 
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
+
+    // Optimistic UI overlays so likes, bookmarks, follows, and comments respond in 0ms
+    private val optimisticPostLikes = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    private val optimisticBookmarks = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    private val optimisticFollows = MutableStateFlow<Map<String, Pair<Boolean, String>>>(emptyMap())
+    private val optimisticCommentLikes = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    private val optimisticCommentsByPost = MutableStateFlow<Map<String, List<Comment>>>(emptyMap())
 
     init {
         viewModelScope.launch {
@@ -65,15 +74,7 @@ class MomiViewModel(
         }
     }
 
-    val allProfiles: StateFlow<List<UserProfile>> = repository.observeAllProfiles(currentUserId)
-        .catch { error ->
-            val root = unwrapOrRethrowCancellation(error)
-            Log.w(TAG, "Error observing creators", root)
-            emit(emptyList())
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
-
-    val follows: StateFlow<List<FollowEdge>> = repository.observeFollows(currentUserId)
+    private val rawFollows: StateFlow<List<FollowEdge>> = repository.observeFollows(currentUserId)
         .catch { error ->
             val root = unwrapOrRethrowCancellation(error)
             Log.w(TAG, "Error observing follows", root)
@@ -81,11 +82,59 @@ class MomiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
+    val follows: StateFlow<List<FollowEdge>> = combine(
+        rawFollows,
+        optimisticFollows
+    ) { remoteFollows, overrides ->
+        if (overrides.isEmpty()) {
+            remoteFollows
+        } else {
+            val baseList = remoteFollows.filterNot { edge ->
+                edge.followerUid == currentUserId && overrides[edge.targetUid]?.first == false
+            }.toMutableList()
+            val myUsername = fallbackProfile().username
+            overrides.forEach { (targetUid, pair) ->
+                val (desiredFollowing, targetUsername) = pair
+                if (desiredFollowing && baseList.none { it.followerUid == currentUserId && it.targetUid == targetUid }) {
+                    baseList.add(
+                        FollowEdge(
+                            id = "${currentUserId}_$targetUid",
+                            followerUid = currentUserId,
+                            targetUid = targetUid,
+                            followerUsername = myUsername,
+                            targetUsername = targetUsername,
+                            createdAt = Timestamp.now()
+                        )
+                    )
+                }
+            }
+            baseList
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
+
     val followingUids: StateFlow<Set<String>> = follows
         .map { edges ->
             edges.filter { it.followerUid == currentUserId }.map { it.targetUid }.toSet()
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
+
+    val allProfiles: StateFlow<List<UserProfile>> = combine(
+        repository.observeAllProfiles(currentUserId),
+        follows
+    ) { profiles, allFollows ->
+        profiles.map { p ->
+            p.copy(
+                followersCount = allFollows.count { it.targetUid == p.userId }.toLong(),
+                followingCount = allFollows.count { it.followerUid == p.userId }.toLong()
+            )
+        }
+    }
+        .catch { error ->
+            val root = unwrapOrRethrowCancellation(error)
+            Log.w(TAG, "Error observing creators", root)
+            emit(emptyList())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val profileState: StateFlow<StreamUiState<UserProfile?>> = combine(
         repository.observeProfile(currentUserId),
@@ -138,23 +187,51 @@ class MomiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
 
-    val allPostsState: StateFlow<StreamUiState<List<Post>>> = combine(
+    private val postBaseStreams = combine(
         repository.observeAllPosts(currentUserId),
         allProfiles,
         likedPostIds,
         bookmarkedPostIds,
         followingUids
     ) { posts, profiles, liked, bookmarked, following ->
-        val profilesByUid = profiles.associateBy { it.userId }
-        val enriched = posts.map { post ->
+        PostHydrationInputs(posts, profiles, liked, bookmarked, following)
+    }
+
+    private val optimisticPostInputs = combine(
+        optimisticPostLikes,
+        optimisticBookmarks,
+        optimisticCommentsByPost
+    ) { likeOverrides, bookmarkOverrides, pendingComments ->
+        Triple(likeOverrides, bookmarkOverrides, pendingComments)
+    }
+
+    val allPostsState: StateFlow<StreamUiState<List<Post>>> = combine(
+        postBaseStreams,
+        optimisticPostInputs
+    ) { base, (likeOverrides, bookmarkOverrides, pendingComments) ->
+        val profilesByUid = base.profiles.associateBy { it.userId }
+        val enriched = base.posts.map { post ->
             val authorProfile = profilesByUid[post.userId]
             val isShowcase = post.id.startsWith("showcase_")
+            val serverLiked = base.liked.contains(post.id)
+            val desiredLiked = likeOverrides[post.id] ?: serverLiked
+            val likeDelta = when {
+                desiredLiked && !serverLiked -> 1L
+                !desiredLiked && serverLiked -> -1L
+                else -> 0L
+            }
+            val serverBookmarked = base.bookmarked.contains(post.id)
+            val desiredBookmarked = bookmarkOverrides[post.id] ?: serverBookmarked
+            val pendingCount = pendingComments[post.id]?.size?.toLong() ?: 0L
+
             post.copy(
                 authorAvatarData = if (isShowcase) null else authorProfile?.avatarData,
                 authorVerified = if (isShowcase) post.authorVerified else (authorProfile?.isVerified ?: post.authorVerified),
-                isLiked = liked.contains(post.id),
-                isBookmarked = bookmarked.contains(post.id),
-                isFollowingAuthor = post.userId == currentUserId || following.contains(post.userId)
+                isLiked = desiredLiked,
+                likesCount = (post.likesCount + likeDelta).coerceAtLeast(0L),
+                commentsCount = (post.commentsCount + pendingCount).coerceAtLeast(0L),
+                isBookmarked = desiredBookmarked,
+                isFollowingAuthor = post.userId == currentUserId || base.following.contains(post.userId)
             )
         }
         StreamUiState.Success(enriched) as StreamUiState<List<Post>>
@@ -277,11 +354,12 @@ class MomiViewModel(
     private val _activeCommentPostId = MutableStateFlow<String?>(null)
     val activeCommentPostId: StateFlow<String?> = _activeCommentPostId.asStateFlow()
 
-    val activePostForComments: StateFlow<Post?> = _activeCommentPostId
-        .flatMapLatest { postId ->
-            if (postId == null) flowOf(null) else observePost(postId)
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), null)
+    val activePostForComments: StateFlow<Post?> = combine(
+        _activeCommentPostId,
+        allPosts
+    ) { postId, posts ->
+        if (postId == null) null else posts.firstOrNull { it.id == postId }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), null)
 
     val activeComments: StateFlow<List<Comment>> = _activeCommentPostId
         .flatMapLatest { postId ->
@@ -291,13 +369,29 @@ class MomiViewModel(
                 combine(
                     repository.observeComments(currentUserId, postId),
                     allProfiles,
-                    likedCommentIds
-                ) { comments, profiles, liked ->
+                    likedCommentIds,
+                    optimisticCommentLikes,
+                    optimisticCommentsByPost
+                ) { comments, profiles, liked, likeOverrides, pendingMap ->
                     val profilesByUid = profiles.associateBy { it.userId }
-                    comments.map {
-                        it.copy(
-                            authorAvatarData = profilesByUid[it.userId]?.avatarData,
-                            isLiked = liked.contains(it.id)
+                    val pending = pendingMap[postId].orEmpty()
+                    val filteredPending = pending.filter { opt ->
+                        comments.none { remote ->
+                            remote.userId == opt.userId && remote.text == opt.text
+                        }
+                    }
+                    (comments + filteredPending).map { comment ->
+                        val serverLiked = liked.contains(comment.id)
+                        val desiredLiked = likeOverrides[comment.id] ?: serverLiked
+                        val likeDelta = when {
+                            desiredLiked && !serverLiked -> 1L
+                            !desiredLiked && serverLiked -> -1L
+                            else -> 0L
+                        }
+                        comment.copy(
+                            authorAvatarData = profilesByUid[comment.userId]?.avatarData,
+                            isLiked = desiredLiked,
+                            likesCount = (comment.likesCount + likeDelta).coerceAtLeast(0L)
                         )
                     }
                 }.catch { error ->
@@ -314,16 +408,42 @@ class MomiViewModel(
         allProfiles,
         likedPostIds,
         bookmarkedPostIds,
-        followingUids
-    ) { rawPost, profiles, liked, bookmarked, following ->
+        followingUids,
+        optimisticPostInputs
+    ) { values ->
+        val rawPost = values[0] as Post?
+        @Suppress("UNCHECKED_CAST")
+        val profiles = values[1] as List<UserProfile>
+        @Suppress("UNCHECKED_CAST")
+        val liked = values[2] as Set<String>
+        @Suppress("UNCHECKED_CAST")
+        val bookmarked = values[3] as Set<String>
+        @Suppress("UNCHECKED_CAST")
+        val following = values[4] as Set<String>
+        @Suppress("UNCHECKED_CAST")
+        val overrides = values[5] as Triple<Map<String, Boolean>, Map<String, Boolean>, Map<String, List<Comment>>>
+
         rawPost?.let { post ->
             val authorProfile = profiles.firstOrNull { it.userId == post.userId }
             val isShowcase = post.id.startsWith("showcase_")
+            val serverLiked = liked.contains(post.id)
+            val desiredLiked = overrides.first[post.id] ?: serverLiked
+            val likeDelta = when {
+                desiredLiked && !serverLiked -> 1L
+                !desiredLiked && serverLiked -> -1L
+                else -> 0L
+            }
+            val serverBookmarked = bookmarked.contains(post.id)
+            val desiredBookmarked = overrides.second[post.id] ?: serverBookmarked
+            val pendingCount = overrides.third[post.id]?.size?.toLong() ?: 0L
+
             post.copy(
                 authorAvatarData = if (isShowcase) null else authorProfile?.avatarData,
                 authorVerified = if (isShowcase) post.authorVerified else (authorProfile?.isVerified ?: post.authorVerified),
-                isLiked = liked.contains(post.id),
-                isBookmarked = bookmarked.contains(post.id),
+                isLiked = desiredLiked,
+                likesCount = (post.likesCount + likeDelta).coerceAtLeast(0L),
+                commentsCount = (post.commentsCount + pendingCount).coerceAtLeast(0L),
+                isBookmarked = desiredBookmarked,
                 isFollowingAuthor = post.userId == currentUserId || following.contains(post.userId)
             )
         }
@@ -368,38 +488,65 @@ class MomiViewModel(
     }
 
     fun toggleLike(post: Post) {
-        val currentProfile = profile.value
+        val currentProfile = fallbackProfile()
+        val nextLiked = !post.isLiked
+        optimisticPostLikes.update { it + (post.id to nextLiked) }
         viewModelScope.launch {
-            repository.toggleLike(post, currentProfile).onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not update like")
-            }
+            repository.toggleLike(post, currentProfile)
+                .onSuccess {
+                    optimisticPostLikes.update { it - post.id }
+                }
+                .onFailure { error ->
+                    optimisticPostLikes.update { it - post.id }
+                    _errorMessage.value = unwrapErrorMessage(error, "Could not update like")
+                }
         }
     }
 
     fun doubleTapLike(post: Post) {
-        val currentProfile = profile.value
+        if (post.isLiked) return
+        val currentProfile = fallbackProfile()
+        optimisticPostLikes.update { it + (post.id to true) }
         viewModelScope.launch {
-            repository.setLiked(post, currentProfile).onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not like post")
-            }
+            repository.setLiked(post, currentProfile)
+                .onSuccess {
+                    optimisticPostLikes.update { it - post.id }
+                }
+                .onFailure { error ->
+                    optimisticPostLikes.update { it - post.id }
+                    _errorMessage.value = unwrapErrorMessage(error, "Could not like post")
+                }
         }
     }
 
     fun toggleBookmark(post: Post) {
+        val nextBookmarked = !post.isBookmarked
+        optimisticBookmarks.update { it + (post.id to nextBookmarked) }
         viewModelScope.launch {
-            repository.toggleBookmark(post).onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not update bookmark")
-            }
+            repository.toggleBookmark(post)
+                .onSuccess {
+                    optimisticBookmarks.update { it - post.id }
+                }
+                .onFailure { error ->
+                    optimisticBookmarks.update { it - post.id }
+                    _errorMessage.value = unwrapErrorMessage(error, "Could not update bookmark")
+                }
         }
     }
 
     fun toggleFollow(targetUid: String, targetUsername: String, currentlyFollowing: Boolean) {
-        val currentProfile = profile.value ?: return
         if (targetUid.isBlank() || targetUid == currentUserId) return
+        val currentProfile = fallbackProfile()
+        val nextFollowing = !currentlyFollowing
+        optimisticFollows.update { it + (targetUid to (nextFollowing to targetUsername)) }
         viewModelScope.launch {
             repository.toggleFollow(currentProfile, targetUid, targetUsername, currentlyFollowing)
-                .onFailure {
-                    _errorMessage.value = unwrapErrorMessage(it, "Could not update follow state")
+                .onSuccess {
+                    optimisticFollows.update { it - targetUid }
+                }
+                .onFailure { error ->
+                    optimisticFollows.update { it - targetUid }
+                    _errorMessage.value = unwrapErrorMessage(error, "Could not update follow state")
                 }
         }
     }
@@ -413,22 +560,61 @@ class MomiViewModel(
     }
 
     fun submitComment(text: String) {
-        val post = activePostForComments.value ?: return
-        val currentProfile = profile.value ?: return
+        val postId = _activeCommentPostId.value ?: return
+        val post = allPosts.value.firstOrNull { it.id == postId }
+            ?: activePostForComments.value
+            ?: Post(id = postId)
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+        val currentProfile = fallbackProfile()
+
+        val tempComment = Comment(
+            id = "pending_${UUID.randomUUID()}",
+            userId = currentUserId,
+            authorUsername = currentProfile.username,
+            authorAvatarKey = currentProfile.avatarKey,
+            authorAvatarData = currentProfile.avatarData,
+            text = trimmed.take(500),
+            likesCount = 0L,
+            isLiked = false,
+            createdAt = Timestamp.now()
+        )
+        optimisticCommentsByPost.update { map ->
+            map + (postId to (map[postId].orEmpty() + tempComment))
+        }
+
         viewModelScope.launch {
-            repository.addComment(post, currentProfile, text)
-                .onFailure {
-                    _errorMessage.value = unwrapErrorMessage(it, "Could not post comment")
+            repository.addComment(post, currentProfile, trimmed)
+                .onSuccess {
+                    optimisticCommentsByPost.update { map ->
+                        val remaining = map[postId].orEmpty().filterNot { it.id == tempComment.id }
+                        if (remaining.isEmpty()) map - postId else map + (postId to remaining)
+                    }
+                }
+                .onFailure { error ->
+                    optimisticCommentsByPost.update { map ->
+                        val remaining = map[postId].orEmpty().filterNot { it.id == tempComment.id }
+                        if (remaining.isEmpty()) map - postId else map + (postId to remaining)
+                    }
+                    _errorMessage.value = unwrapErrorMessage(error, "Could not post comment")
                 }
         }
     }
 
     fun toggleCommentLike(comment: Comment) {
         val postId = _activeCommentPostId.value ?: return
+        if (comment.id.startsWith("pending_")) return
+        val nextLiked = !comment.isLiked
+        optimisticCommentLikes.update { it + (comment.id to nextLiked) }
         viewModelScope.launch {
-            repository.toggleCommentLike(postId, comment).onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not update comment like")
-            }
+            repository.toggleCommentLike(postId, comment)
+                .onSuccess {
+                    optimisticCommentLikes.update { it - comment.id }
+                }
+                .onFailure { error ->
+                    optimisticCommentLikes.update { it - comment.id }
+                    _errorMessage.value = unwrapErrorMessage(error, "Could not update comment like")
+                }
         }
     }
 
@@ -448,7 +634,7 @@ class MomiViewModel(
         isReel: Boolean,
         onComplete: () -> Unit
     ) {
-        val currentProfile = profile.value ?: return
+        val currentProfile = fallbackProfile()
         viewModelScope.launch {
             val encodedImage = withContext(Dispatchers.IO) {
                 MediaAssets.encodeImageFileToBase64(localImagePath)
@@ -497,7 +683,7 @@ class MomiViewModel(
         caption: String,
         onComplete: () -> Unit
     ) {
-        val currentProfile = profile.value ?: return
+        val currentProfile = fallbackProfile()
         viewModelScope.launch {
             val encodedImage = withContext(Dispatchers.IO) {
                 MediaAssets.encodeImageFileToBase64(localImagePath)
@@ -586,7 +772,7 @@ class MomiViewModel(
     }
 
     fun toggleNotificationFollow(notification: NotificationItem) {
-        val currentProfile = profile.value ?: return
+        val currentProfile = fallbackProfile()
         viewModelScope.launch {
             repository.toggleNotificationFollow(currentProfile, notification).onFailure {
                 _errorMessage.value = unwrapErrorMessage(it, "Could not update follow state")
@@ -601,7 +787,7 @@ class MomiViewModel(
     }
 
     fun startDirectChat(peerProfile: UserProfile, onOpened: (MessageThread) -> Unit) {
-        val currentProfile = profile.value ?: return
+        val currentProfile = fallbackProfile()
         viewModelScope.launch {
             repository.openOrCreateThread(currentProfile, peerProfile)
                 .onSuccess(onOpened)
@@ -612,7 +798,7 @@ class MomiViewModel(
     }
 
     fun sendMessage(thread: MessageThread, text: String) {
-        val currentProfile = profile.value ?: return
+        val currentProfile = fallbackProfile()
         viewModelScope.launch {
             repository.sendMessage(thread, currentProfile, text).onFailure {
                 _errorMessage.value = unwrapErrorMessage(it, "Could not send message")
@@ -624,6 +810,23 @@ class MomiViewModel(
         viewModelScope.launch {
             repository.clearThreadUnread(thread)
         }
+    }
+
+    private fun fallbackProfile(): UserProfile {
+        profile.value?.let { return it }
+        val fallbackName = initialDisplayName?.trim()?.takeIf { it.isNotBlank() } ?: "Momi Creator"
+        val fallbackUsername = initialEmail?.substringBefore("@")
+            ?.lowercase()
+            ?.replace(Regex("[^a-z0-9._]"), "")
+            ?.takeIf { it.isNotBlank() }
+            ?: "momi.creator"
+        return UserProfile(
+            id = currentUserId,
+            userId = currentUserId,
+            username = fallbackUsername.take(50),
+            displayName = fallbackName.take(80),
+            avatarKey = MediaAssets.avatarKeyForUid(currentUserId)
+        )
     }
 
     private fun unwrapOrRethrowCancellation(error: Throwable): Throwable {
@@ -640,6 +843,14 @@ class MomiViewModel(
             .firstOrNull()
         return firestoreError?.localizedMessage ?: error.localizedMessage ?: fallback
     }
+
+    private data class PostHydrationInputs(
+        val posts: List<Post>,
+        val profiles: List<UserProfile>,
+        val liked: Set<String>,
+        val bookmarked: Set<String>,
+        val following: Set<String>
+    )
 
     private companion object {
         const val TAG = "MomiVM"
