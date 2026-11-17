@@ -47,7 +47,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -63,7 +62,6 @@ import com.example.data.model.Post
 import com.example.data.model.Story
 import com.example.data.model.UserProfile
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collectLatest
 import com.example.ui.components.LumaAvatar
 import com.example.ui.components.MomiInlineFeedAdCard
 import com.example.ui.components.PostCard
@@ -167,20 +165,8 @@ fun HomeScreen(
 
     LaunchedEffect(activePlayablePostId, displayedPosts) {
         val targetId = activePlayablePostId ?: return@LaunchedEffect
-        delay(600L)
+        delay(900L)
         displayedPosts.firstOrNull { it.id == targetId }?.let(onPostViewed)
-    }
-
-    LaunchedEffect(displayedPosts, listState) {
-        val postById = displayedPosts.associateBy { it.id }
-        snapshotFlow {
-            listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }
-        }.collectLatest { visibleKeys ->
-            delay(900L)
-            visibleKeys.forEach { key ->
-                postById[key]?.let(onPostViewed)
-            }
-        }
     }
 
     Column(

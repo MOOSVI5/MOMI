@@ -90,6 +90,7 @@ import com.example.ui.components.FloatingMomiAssistantButton
 import com.example.ui.components.LocalRemoteVideoResolver
 import com.example.ui.components.LumaAvatar
 import com.example.ui.components.MomiAiAssistantBottomSheet
+import com.example.ui.components.MomiInterstitialController
 import com.example.ui.screens.CreatePostScreen
 import com.example.ui.screens.ExploreScreen
 import com.example.ui.screens.GoLiveScreen
@@ -111,9 +112,12 @@ import com.example.ui.theme.AppearancePrefs
 import com.example.ui.theme.LumaTheme
 import com.example.ui.theme.ThemePreference
 import com.example.ui.viewmodel.MomiViewModel
+import com.example.util.AppUpdateChecker
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.PersistentCacheSettings
+import com.google.firebase.firestore.firestoreSettings
 import com.startapp.sdk.adsbase.StartAppAd
 import com.startapp.sdk.adsbase.StartAppSDK
 import kotlinx.coroutines.launch
@@ -219,7 +223,9 @@ private fun AppNavigation(
                 factory = viewModelFactory {
                     initializer {
                         val app = checkNotNull(this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY])
-                        val db = FirebaseFirestore.getInstance(app.getString(R.string.firestore_database_id))
+                        val db = FirebaseFirestore.getInstance(app.getString(R.string.firestore_database_id)).also { firestore ->
+                            configureFirestoreCacheOnce(firestore)
+                        }
                         MomiViewModel(
                             repository = MomiFirestoreRepository(db),
                             marketplaceRepository = MarketplaceRepository(db),
@@ -232,6 +238,11 @@ private fun AppNavigation(
             )
             LaunchedEffect(viewModel) {
                 viewModel.loadAppearance(context)
+                MomiInterstitialController.preload(context)
+                viewModel.checkForUpdates(
+                    manual = false,
+                    isPlayStoreInstall = AppUpdateChecker.isInstalledFromGooglePlay(context)
+                )
             }
             val vmThemePreference by viewModel.themePreference.collectAsStateWithLifecycle()
             val vmColorScheme by viewModel.colorScheme.collectAsStateWithLifecycle()
@@ -596,6 +607,7 @@ private fun LumaApp(
                                         if (succeeded) {
                                             navController.popBackStack()
                                             navigatePrimaryTab(LumaRoutes.HOME)
+                                            MomiInterstitialController.maybeShowOnMilestone(context)
                                         }
                                     }
                                 },
@@ -615,6 +627,7 @@ private fun LumaApp(
                                         if (succeeded) {
                                             navController.popBackStack()
                                             navigatePrimaryTab(LumaRoutes.HOME)
+                                            MomiInterstitialController.maybeShowOnMilestone(context)
                                         }
                                     }
                                 },
@@ -717,7 +730,12 @@ private fun LumaApp(
                                     openUserProfile(targetUid)
                                 },
                                 appVersionName = BuildConfig.VERSION_NAME,
-                                onCheckForUpdates = { viewModel.checkForUpdates(manual = true) },
+                                onCheckForUpdates = {
+                                    viewModel.checkForUpdates(
+                                        manual = true,
+                                        isPlayStoreInstall = AppUpdateChecker.isInstalledFromGooglePlay(context)
+                                    )
+                                },
                                 onSignOut = onSignOut
                             )
                         }
@@ -1128,4 +1146,24 @@ private fun shareText(context: Context, subject: String, text: String) {
         putExtra(Intent.EXTRA_TEXT, text)
     }
     context.startActivity(Intent.createChooser(intent, "Share via"))
+}
+
+@Volatile
+private var firestorePersistenceConfigured = false
+
+private fun configureFirestoreCacheOnce(db: FirebaseFirestore) {
+    if (firestorePersistenceConfigured) return
+    synchronized(MainActivity::class.java) {
+        if (firestorePersistenceConfigured) return
+        runCatching {
+            db.firestoreSettings = firestoreSettings {
+                setLocalCacheSettings(
+                    PersistentCacheSettings.newBuilder()
+                        .setSizeBytes(100L * 1024L * 1024L)
+                        .build()
+                )
+            }
+        }
+        firestorePersistenceConfigured = true
+    }
 }

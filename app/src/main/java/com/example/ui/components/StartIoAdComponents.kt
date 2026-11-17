@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -43,6 +44,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -59,9 +61,76 @@ import com.startapp.sdk.ads.nativead.NativeAdDetails
 import com.startapp.sdk.ads.nativead.NativeAdPreferences
 import com.startapp.sdk.ads.nativead.StartAppNativeAd
 import com.startapp.sdk.adsbase.Ad
+import com.startapp.sdk.adsbase.StartAppAd
+import com.startapp.sdk.adsbase.adlisteners.AdDisplayListener
 import com.startapp.sdk.adsbase.adlisteners.AdEventListener
 
 private const val TAG = "MomiStartIo"
+
+object MomiInterstitialController {
+    private const val MIN_COOLDOWN_MS = 4 * 60_000L
+
+    @Volatile private var lastShownAtMs = 0L
+    @Volatile private var isAdReady = false
+    @Volatile private var isLoading = false
+    private var cachedAd: StartAppAd? = null
+
+    fun preload(context: Context) {
+        if (isLoading || isAdReady) return
+        val appContext = context.applicationContext
+        isLoading = true
+        runCatching {
+            val ad = cachedAd ?: StartAppAd(appContext).also { cachedAd = it }
+            ad.loadAd(StartAppAd.AdMode.AUTOMATIC, object : AdEventListener {
+                override fun onReceiveAd(ad: Ad) {
+                    isLoading = false
+                    isAdReady = true
+                    Log.d(TAG, "Interstitial preloaded")
+                }
+
+                override fun onFailedToReceiveAd(ad: Ad?) {
+                    isLoading = false
+                    isAdReady = false
+                    Log.w(TAG, "Interstitial preload skipped: ${ad?.errorMessage ?: "no fill"}")
+                }
+            })
+        }.onFailure {
+            isLoading = false
+            isAdReady = false
+        }
+    }
+
+    fun maybeShowOnMilestone(context: Context): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - lastShownAtMs < MIN_COOLDOWN_MS) return false
+        val ad = cachedAd
+        if (!isAdReady || ad == null) {
+            preload(context)
+            return false
+        }
+        return runCatching {
+            lastShownAtMs = now
+            isAdReady = false
+            ad.showAd(object : AdDisplayListener {
+                override fun adHidden(ad: Ad?) {
+                    preload(context)
+                }
+
+                override fun adDisplayed(ad: Ad?) = Unit
+
+                override fun adClicked(ad: Ad?) = Unit
+
+                override fun adNotDisplayed(ad: Ad?) {
+                    preload(context)
+                }
+            })
+        }.getOrElse {
+            isAdReady = false
+            preload(context)
+            false
+        }
+    }
+}
 
 data class StartIoNativeAdState(
     val ads: List<NativeAdDetails> = emptyList(),
@@ -329,11 +398,20 @@ private fun StartIoNativeSponsoredPostCard(
 private fun StartIoMrecSponsoredCard(
     modifier: Modifier = Modifier
 ) {
-    var adFailed by remember { mutableStateOf(false) }
+    var mrecFailed by remember { mutableStateOf(false) }
+    var bannerFallbackFailed by remember { mutableStateOf(false) }
     var mrecRef by remember { mutableStateOf<Mrec?>(null) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
-    if (adFailed) return
+    if (mrecFailed && bannerFallbackFailed) return
+
+    if (mrecFailed) {
+        StartIoStandardFeedBannerCard(
+            onFailed = { bannerFallbackFailed = true },
+            modifier = modifier
+        )
+        return
+    }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -415,12 +493,12 @@ private fun StartIoMrecSponsoredCard(
                                 val mrec = Mrec(ctx, object : BannerListener {
                                     override fun onReceiveAd(banner: View) {
                                         Log.d(TAG, "MREC ad received")
-                                        mainHandler.post { adFailed = false }
+                                        mainHandler.post { mrecFailed = false }
                                     }
 
                                     override fun onFailedToReceiveAd(banner: View?) {
-                                        Log.w(TAG, "MREC ad failed to receive")
-                                        mainHandler.post { adFailed = true }
+                                        Log.w(TAG, "MREC ad failed; falling back to 320x50 banner")
+                                        mainHandler.post { mrecFailed = true }
                                     }
 
                                     override fun onImpression(banner: View?) = Unit
@@ -534,3 +612,203 @@ fun MomiAnchoredExploreBanner(
         }
     }
 }
+
+@Composable
+private fun StartIoStandardFeedBannerCard(
+    onFailed: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var bannerRef by remember { mutableStateOf<Banner?>(null) }
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            runCatching { bannerRef?.hideBanner() }
+        }
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.background)
+            .testTag("home_feed_ad_card")
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+                .border(
+                    width = 0.75.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f),
+                    shape = RoundedCornerShape(14.dp)
+                ),
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "Sponsored",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Icon(
+                        imageVector = Icons.Outlined.Campaign,
+                        contentDescription = "Sponsored banner",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Box(
+                    modifier = Modifier
+                        .width(320.dp)
+                        .height(50.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    AndroidView(
+                        factory = { ctx ->
+                            FrameLayout(ctx).apply {
+                                val banner = Banner(ctx, object : BannerListener {
+                                    override fun onReceiveAd(banner: View) {
+                                        Log.d(TAG, "Feed fallback banner received")
+                                    }
+
+                                    override fun onFailedToReceiveAd(banner: View?) {
+                                        mainHandler.post(onFailed)
+                                    }
+
+                                    override fun onImpression(banner: View?) = Unit
+
+                                    override fun onClick(banner: View?) = Unit
+                                })
+                                bannerRef = banner
+                                addView(
+                                    banner,
+                                    FrameLayout.LayoutParams(
+                                        FrameLayout.LayoutParams.MATCH_PARENT,
+                                        FrameLayout.LayoutParams.MATCH_PARENT,
+                                        Gravity.CENTER
+                                    )
+                                )
+                                post {
+                                    runCatching {
+                                        banner.loadAd(320, 50)
+                                        banner.showBanner()
+                                    }
+                                }
+                            }
+                        },
+                        modifier = Modifier
+                            .width(320.dp)
+                            .height(50.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MomiMarketplaceBanner(
+    modifier: Modifier = Modifier
+) {
+    var adFailed by remember { mutableStateOf(false) }
+    var bannerRef by remember { mutableStateOf<Banner?>(null) }
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+
+    if (adFailed) return
+
+    DisposableEffect(Unit) {
+        onDispose {
+            runCatching { bannerRef?.hideBanner() }
+        }
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFFF5F5F5))
+            .border(0.75.dp, Color(0xFFE0E0E0), RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .testTag("marketplace_ad_banner"),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "Sponsored Deal",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF6B6B6B)
+            )
+            Icon(
+                imageVector = Icons.Outlined.Campaign,
+                contentDescription = "Sponsored partner deal",
+                tint = Color(0xFF3665F3),
+                modifier = Modifier.size(15.dp)
+            )
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Box(
+            modifier = Modifier
+                .width(320.dp)
+                .height(50.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            AndroidView(
+                factory = { ctx ->
+                    FrameLayout(ctx).apply {
+                        val banner = Banner(ctx, object : BannerListener {
+                            override fun onReceiveAd(banner: View) {
+                                mainHandler.post { adFailed = false }
+                            }
+
+                            override fun onFailedToReceiveAd(banner: View?) {
+                                mainHandler.post { adFailed = true }
+                            }
+
+                            override fun onImpression(banner: View?) = Unit
+
+                            override fun onClick(banner: View?) = Unit
+                        })
+                        bannerRef = banner
+                        addView(
+                            banner,
+                            FrameLayout.LayoutParams(
+                                FrameLayout.LayoutParams.MATCH_PARENT,
+                                FrameLayout.LayoutParams.MATCH_PARENT,
+                                Gravity.CENTER
+                            )
+                        )
+                        post {
+                            runCatching {
+                                banner.loadAd(320, 50)
+                                banner.showBanner()
+                            }
+                        }
+                    }
+                },
+                modifier = Modifier
+                    .width(320.dp)
+                    .height(50.dp)
+            )
+        }
+    }
+}
+

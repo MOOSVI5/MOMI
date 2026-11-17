@@ -63,6 +63,7 @@ import com.example.data.model.MarketOrder
 import com.example.data.model.MarketProduct
 import com.example.data.model.MerchantAccount
 import com.example.data.model.UserProfile
+import com.example.ui.components.MomiMarketplaceBanner
 import com.example.ui.components.PostMediaImage
 import com.example.util.MediaAssets
 import java.util.Locale
@@ -621,6 +622,10 @@ fun MarketplaceScreen(
                         }
                     }
                 }
+            }
+
+            item(key = "market_sponsored_banner") {
+                MomiMarketplaceBanner()
             }
 
             // Section Header: "Featured Deals"

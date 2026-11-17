@@ -79,7 +79,9 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     fun observeAllProfiles(currentUid: String): Flow<List<UserProfile>> {
         val colRef = db.collection("users")
         val path = colRef.path
-        return colRef.snapshots(MetadataChanges.EXCLUDE)
+        return colRef
+            .limit(PROFILES_LIMIT)
+            .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(UserProfile::class.java, ServerTimestampBehavior.ESTIMATE)
                     .sortedWith(
@@ -98,6 +100,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         val path = colRef.path
         return colRef
             .orderBy("createdAt", Query.Direction.DESCENDING)
+            .limit(POSTS_LIMIT)
             .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(Post::class.java, ServerTimestampBehavior.ESTIMATE)
@@ -134,6 +137,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         val path = colRef.path
         return colRef
             .orderBy("createdAt", Query.Direction.ASCENDING)
+            .limitToLast(COMMENTS_LIMIT)
             .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(Comment::class.java, ServerTimestampBehavior.ESTIMATE)
@@ -153,6 +157,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         val path = colRef.path
         return colRef
             .orderBy("createdAt", Query.Direction.DESCENDING)
+            .limit(STORIES_LIMIT)
             .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(Story::class.java, ServerTimestampBehavior.ESTIMATE)
@@ -170,7 +175,9 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     fun observeFollows(currentUid: String): Flow<List<FollowEdge>> {
         val colRef = followsCol()
         val path = colRef.path
-        return colRef.snapshots(MetadataChanges.EXCLUDE)
+        return colRef
+            .limit(FOLLOWS_LIMIT)
+            .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(FollowEdge::class.java, ServerTimestampBehavior.ESTIMATE)
             }
@@ -195,7 +202,9 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     private fun observeMarkerIds(userId: String, subcollection: String): Flow<Set<String>> {
         val colRef = userDoc(userId).collection(subcollection)
         val path = colRef.path
-        return colRef.snapshots(MetadataChanges.EXCLUDE)
+        return colRef
+            .limit(MARKERS_LIMIT)
+            .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(InteractionMarker::class.java, ServerTimestampBehavior.ESTIMATE)
                     .map { it.targetId.ifBlank { it.id } }
@@ -212,6 +221,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         val path = colRef.path
         return colRef
             .orderBy("createdAt", Query.Direction.DESCENDING)
+            .limit(NOTIFICATIONS_LIMIT)
             .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(NotificationItem::class.java, ServerTimestampBehavior.ESTIMATE)
@@ -232,6 +242,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         val path = colRef.path
         return colRef
             .whereArrayContains("participantUids", userId)
+            .limit(THREADS_LIMIT)
             .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(MessageThread::class.java, ServerTimestampBehavior.ESTIMATE)
@@ -252,6 +263,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         val path = colRef.path
         return colRef
             .whereArrayContains("participantUids", userId)
+            .limit(MESSAGES_LIMIT)
             .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(ChatMessage::class.java, ServerTimestampBehavior.ESTIMATE)
@@ -1055,6 +1067,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         val path = colRef.path
         return colRef
             .orderBy("createdAt", Query.Direction.DESCENDING)
+            .limit(REPORTS_LIMIT)
             .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(ContentReport::class.java, ServerTimestampBehavior.ESTIMATE)
@@ -1402,7 +1415,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
 
     suspend fun incrementPostView(postId: String): Result<Unit> = runCatching {
         requireUserId()
-        if (postId.isBlank()) return@runCatching
+        if (postId.isBlank() || postId.startsWith("showcase_")) return@runCatching
         val postRef = postsCol().document(postId)
         try {
             db.runTransaction { transaction ->
@@ -1430,6 +1443,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         val path = colRef.path
         return colRef
             .whereEqualTo("isLive", true)
+            .limit(LIVE_STREAMS_LIMIT)
             .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(LiveStream::class.java, ServerTimestampBehavior.ESTIMATE)
@@ -1467,6 +1481,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         val path = colRef.path
         return colRef
             .orderBy("createdAt", Query.Direction.ASCENDING)
+            .limitToLast(LIVE_COMMENTS_LIMIT)
             .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(LiveComment::class.java, ServerTimestampBehavior.ESTIMATE)
@@ -1696,5 +1711,20 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             .trim('.')
             .takeIf { it.isNotBlank() }
         return (fromName ?: "momi.creator").take(50)
+    }
+
+    companion object {
+        const val POSTS_LIMIT = 40L
+        const val STORIES_LIMIT = 30L
+        const val PROFILES_LIMIT = 80L
+        const val FOLLOWS_LIMIT = 250L
+        const val MARKERS_LIMIT = 200L
+        const val NOTIFICATIONS_LIMIT = 40L
+        const val THREADS_LIMIT = 30L
+        const val MESSAGES_LIMIT = 100L
+        const val REPORTS_LIMIT = 50L
+        const val COMMENTS_LIMIT = 80L
+        const val LIVE_STREAMS_LIMIT = 20L
+        const val LIVE_COMMENTS_LIMIT = 80L
     }
 }

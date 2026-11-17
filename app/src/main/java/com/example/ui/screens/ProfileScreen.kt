@@ -28,10 +28,13 @@ import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.filled.AddBox
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.Campaign
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
@@ -70,11 +73,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.BuildConfig
 import com.example.data.model.ContentReport
 import com.example.data.model.FollowEdge
 import com.example.data.model.ModerationScopes
@@ -150,6 +155,7 @@ fun ProfileScreen(
     var showAdminVerifySheet by remember { mutableStateOf(false) }
     var showTeamRolesSheet by remember { mutableStateOf(false) }
     var showModerationQueueSheet by remember { mutableStateOf(false) }
+    var showPlayReadinessSheet by remember { mutableStateOf(false) }
     var followSheetTab by remember { mutableStateOf<Int?>(null) }
 
     val canAccessSafetyQueue = isAdminViewActive || (
@@ -537,6 +543,26 @@ fun ProfileScreen(
                             Text("Verify Users", fontWeight = FontWeight.Bold, maxLines = 1)
                         }
                     }
+                    OutlinedButton(
+                        onClick = {
+                            showSettingsSheet = false
+                            showPlayReadinessSheet = true
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("admin_play_monetization_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Campaign,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Play Store & Monetization Status", fontWeight = FontWeight.Bold)
+                    }
                 }
 
                 if (canAccessSafetyQueue) {
@@ -649,6 +675,12 @@ fun ProfileScreen(
             reports = contentReports,
             onResolveReport = onResolveReport,
             onDismiss = { showModerationQueueSheet = false }
+        )
+    }
+
+    if (showPlayReadinessSheet && isOwnerAccount && isAdminViewActive) {
+        OwnerMonetizationAndPlaySheet(
+            onDismiss = { showPlayReadinessSheet = false }
         )
     }
 
@@ -1095,6 +1127,23 @@ fun ProfileScreen(
                                             fontWeight = FontWeight.Bold
                                         )
                                     }
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1.0f)
+                                            .height(38.dp)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(MaterialTheme.colorScheme.surface)
+                                            .clickable { showPlayReadinessSheet = true }
+                                            .testTag("profile_play_ads_chip"),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "Play & Ads",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1396,5 +1445,223 @@ private fun ProfileStatColumn(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun OwnerMonetizationAndPlaySheet(
+    onDismiss: () -> Unit
+) {
+    val uriHandler = LocalUriHandler.current
+    val isDebugAds = BuildConfig.DEBUG
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp),
+            contentPadding = PaddingValues(top = 6.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Filled.Campaign,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Monetization & Play Readiness",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Real build & SDK status for your Google Play Store release and Firebase quota.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            item {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Start.io Live Configuration",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        PlayInfoLine("Start.io App ID", BuildConfig.STARTIO_APP_ID)
+                        PlayInfoLine(
+                            "Ad Serving Mode",
+                            if (isDebugAds) "Debug Test Ads ($0 — switch to signed Release build for payouts)" else "Release Paid Live Ads"
+                        )
+                        PlayInfoLine(
+                            "Active Placements",
+                            "Home Feed Native + MREC/Banner, Explore Banner, Market Deal Banner, Capped Publish Interstitial (4 min)"
+                        )
+                        PlayInfoLine(
+                            "App Identity",
+                            "${BuildConfig.APPLICATION_ID} (v${BuildConfig.VERSION_NAME} / code ${BuildConfig.VERSION_CODE})"
+                        )
+                    }
+                }
+            }
+
+            item {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Google Play Policy & Quota Hardening",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        PlayChecklistRow("Zero broad storage permissions (Photo Picker only)")
+                        PlayChecklistRow("Play-installed builds never prompt external .apk sideloads")
+                        PlayChecklistRow("ProGuard keep rules configured for Release .aab")
+                        PlayChecklistRow("100 MB offline Firestore cache + sticky post feed during Spark quota limits")
+                    }
+                }
+            }
+
+            item {
+                Text(
+                    text = "Open Management Portals",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PortalLinkButton(
+                        title = "Start.io Publisher Portal",
+                        subtitle = "Link Play Store listing & view impressions / eCPM",
+                        onClick = {
+                            runCatching { uriHandler.openUri("https://portal.start.io") }
+                        }
+                    )
+                    PortalLinkButton(
+                        title = "Firebase Quota & Blaze Upgrade",
+                        subtitle = "Project gen-lang-client-0132255277 daily reads/writes",
+                        onClick = {
+                            runCatching {
+                                uriHandler.openUri("https://console.firebase.google.com/project/gen-lang-client-0132255277/usage/details")
+                            }
+                        }
+                    )
+                    PortalLinkButton(
+                        title = "Google Play Console",
+                        subtitle = "Upload signed .aab, complete Data Safety & publish",
+                        onClick = {
+                            runCatching { uriHandler.openUri("https://play.google.com/console") }
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayInfoLine(label: String, value: String) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+    }
+}
+
+@Composable
+private fun PlayChecklistRow(text: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Filled.CheckCircle,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(16.dp)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+    }
+}
+
+@Composable
+private fun PortalLinkButton(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit
+) {
+    OutlinedButton(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Icon(
+                imageVector = Icons.Filled.OpenInNew,
+                contentDescription = "Open external portal",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp)
+            )
+        }
     }
 }

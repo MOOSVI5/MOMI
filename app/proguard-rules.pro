@@ -19,3 +19,18 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Firestore & Kotlin Serialization data models (keep no-arg constructors & getters/setters for Release AAB)
+-keepattributes Signature,InnerClasses,*Annotation*
+-keep class com.example.data.model.** { *; }
+-keepclassmembers class com.example.data.model.** { *; }
+
+# Start.io SDK Release AAB keep rules
+-keep class com.startapp.** { *; }
+-dontwarn com.startapp.**
+-keepattributes Exceptions,InnerClasses,Signature,Deprecated,SourceFile,LineNumberTable,*Annotation*,EnclosingMethod
+-keep class android.webkit.JavascriptInterface { *; }
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
+
