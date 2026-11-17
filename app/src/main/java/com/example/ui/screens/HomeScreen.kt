@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.PhotoCamera
+import androidx.compose.material.icons.outlined.Storefront
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -80,6 +81,7 @@ fun HomeScreen(
     unreadNotificationCount: Int,
     unreadMessageCount: Int,
     onOpenSearch: () -> Unit = {},
+    onOpenMarketplace: () -> Unit = {},
     onOpenNotifications: () -> Unit,
     onOpenMessages: () -> Unit,
     onOpenStory: (Story) -> Unit,
@@ -116,13 +118,21 @@ fun HomeScreen(
         creators.filter { it.userId.isNotBlank() && it.userId != profile?.userId }
     }
 
-    val videoPostIds = remember(displayedPosts) {
-        displayedPosts.asSequence().filter { it.isVideoPost }.map { it.id }.toSet()
+    val playablePostIds = remember(displayedPosts) {
+        displayedPosts.asSequence()
+            .filter {
+                it.isVideoPost ||
+                    it.audioTitle.isNotBlank() ||
+                    !it.localAudioPath.isNullOrBlank() ||
+                    !it.audioData.isNullOrBlank()
+            }
+            .map { it.id }
+            .toSet()
     }
 
-    // Instagram/TikTok-style viewport-centered video autoplay:
-    // plays whichever video post has the most visible overlap & sits closest to screen center.
-    val activeVideoPostId by remember(videoPostIds) {
+    // Instagram/TikTok-style viewport-centered playback:
+    // activates whichever video or music post sits closest to screen center.
+    val activePlayablePostId by remember(playablePostIds) {
         derivedStateOf {
             val layoutInfo = listState.layoutInfo
             val viewportStart = layoutInfo.viewportStartOffset
@@ -133,7 +143,7 @@ fun HomeScreen(
                 .asSequence()
                 .mapNotNull { item ->
                     val key = item.key as? String ?: return@mapNotNull null
-                    if (!videoPostIds.contains(key)) return@mapNotNull null
+                    if (!playablePostIds.contains(key)) return@mapNotNull null
                     val visibleTop = maxOf(item.offset, viewportStart)
                     val visibleBottom = minOf(item.offset + item.size, viewportEnd)
                     val visibleHeight = (visibleBottom - visibleTop).coerceAtLeast(0)
@@ -154,8 +164,8 @@ fun HomeScreen(
     val ownStory = remember(stories) { stories.firstOrNull { it.isOwnStory } }
     val friendStories = remember(stories) { stories.filter { !it.isOwnStory } }
 
-    LaunchedEffect(activeVideoPostId, displayedPosts) {
-        val targetId = activeVideoPostId ?: return@LaunchedEffect
+    LaunchedEffect(activePlayablePostId, displayedPosts) {
+        val targetId = activePlayablePostId ?: return@LaunchedEffect
         delay(600L)
         displayedPosts.firstOrNull { it.id == targetId }?.let(onPostViewed)
     }
@@ -231,6 +241,20 @@ fun HomeScreen(
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onOpenMarketplace,
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("home_marketplace_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Storefront,
+                        contentDescription = "Open Momi Marketplace",
+                        tint = MaterialTheme.colorScheme.onBackground,
+                        modifier = Modifier.size(25.dp)
+                    )
+                }
+
                 IconButton(
                     onClick = onOpenSearch,
                     modifier = Modifier
@@ -506,7 +530,7 @@ fun HomeScreen(
                     PostCard(
                         post = post,
                         isOwnPost = post.userId == profile?.userId && !post.id.startsWith("showcase_"),
-                        isPlaybackActive = post.isVideoPost && post.id == activeVideoPostId,
+                        isPlaybackActive = post.id == activePlayablePostId,
                         externalMuted = feedMuted,
                         onMuteChange = { feedMuted = it },
                         onLikeToggle = { onLikeToggle(post) },

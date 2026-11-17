@@ -1,26 +1,37 @@
 package com.example.ui.viewmodel
 
+import android.content.Context
+import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.ai.MomiAiAssistantRepository
 import com.example.data.model.ChatMessage
 import com.example.data.model.Comment
 import com.example.data.model.FollowEdge
 import com.example.data.model.LiveComment
 import com.example.data.model.LiveStream
+import com.example.data.model.MarketOrder
+import com.example.data.model.MarketProduct
+import com.example.data.model.MerchantAccount
 import com.example.data.model.MessageThread
 import com.example.data.model.NotificationItem
 import com.example.data.model.Post
 import com.example.data.model.Story
 import com.example.data.model.UserProfile
+import com.example.data.repository.MarketplaceRepository
 import com.example.data.repository.MomiFirestoreRepository
+import com.example.ui.components.AiAssistantTurn
+import com.example.ui.components.AiAssistantUiState
 import com.example.ui.theme.AppColorScheme
 import com.example.ui.theme.AppearancePrefs
 import com.example.ui.theme.ThemePreference
+import com.example.util.AppUpdateChecker
+import com.example.util.AvailableAppUpdate
 import com.example.util.MediaAssets
+import com.example.util.StudioMusicCatalog
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FirebaseFirestoreException
-import android.net.Uri
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +53,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.UUID
 
 sealed interface StreamUiState<out T> {
@@ -53,15 +65,40 @@ sealed interface StreamUiState<out T> {
 @OptIn(ExperimentalCoroutinesApi::class)
 class MomiViewModel(
     private val repository: MomiFirestoreRepository,
+    private val marketplaceRepository: MarketplaceRepository,
     val currentUserId: String,
     private val initialDisplayName: String?,
-    private val initialEmail: String?
+    private val initialEmail: String?,
+    private val aiAssistantRepository: MomiAiAssistantRepository = MomiAiAssistantRepository()
 ) : ViewModel() {
 
     val isAdminUser: Boolean = initialEmail?.trim().equals("syali6511@gmail.com", ignoreCase = true)
 
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
+
+    private val _statusNotice = MutableStateFlow<String?>(null)
+    val statusNotice: StateFlow<String?> = _statusNotice.asStateFlow()
+
+    private val _isSendingChatMedia = MutableStateFlow(false)
+    val isSendingChatMedia: StateFlow<Boolean> = _isSendingChatMedia.asStateFlow()
+
+    private val _availableUpdate = MutableStateFlow<AvailableAppUpdate?>(null)
+    val availableUpdate: StateFlow<AvailableAppUpdate?> = _availableUpdate.asStateFlow()
+
+    private val _aiMessages = MutableStateFlow(
+        listOf(
+            AiAssistantTurn(
+                id = "welcome_ai",
+                isUser = false,
+                text = "Hi! I'm Momi Assistant. Ask me to write captions, explain Marketplace verification, troubleshoot clips, or guide you through Momi features."
+            )
+        )
+    )
+    val aiMessages: StateFlow<List<AiAssistantTurn>> = _aiMessages.asStateFlow()
+
+    private val _aiUiState = MutableStateFlow<AiAssistantUiState>(AiAssistantUiState.Idle)
+    val aiUiState: StateFlow<AiAssistantUiState> = _aiUiState.asStateFlow()
 
     // Optimistic UI overlays so likes, bookmarks, follows, and comments respond in 0ms
     private val optimisticPostLikes = MutableStateFlow<Map<String, Boolean>>(emptyMap())
@@ -82,6 +119,7 @@ class MomiViewModel(
                 _errorMessage.value = unwrapErrorMessage(error, "Failed to initialize Momi profile")
             }
         }
+        checkForUpdates(manual = false)
     }
 
     private val rawFollows: StateFlow<List<FollowEdge>> = repository.observeFollows(currentUserId)
@@ -347,6 +385,39 @@ class MomiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), 0)
 
+    val merchants: StateFlow<List<MerchantAccount>> = marketplaceRepository.observeMerchants(currentUserId)
+        .catch { error ->
+            val root = unwrapOrRethrowCancellation(error)
+            Log.w(TAG, "Error observing merchants", root)
+            emit(emptyList())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
+
+    val marketProducts: StateFlow<List<MarketProduct>> = combine(
+        marketplaceRepository.observeProducts(currentUserId),
+        merchants
+    ) { products, merchantList ->
+        val merchantByUid = merchantList.associateBy { it.userId }
+        products.map { product ->
+            val seller = merchantByUid[product.sellerUid]
+            product.copy(sellerVerified = seller?.isVerified ?: false)
+        }
+    }
+        .catch { error ->
+            val root = unwrapOrRethrowCancellation(error)
+            Log.w(TAG, "Error observing marketplace products", root)
+            emit(emptyList())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
+
+    val marketOrders: StateFlow<List<MarketOrder>> = marketplaceRepository.observeOrdersForUser(currentUserId)
+        .catch { error ->
+            val root = unwrapOrRethrowCancellation(error)
+            Log.w(TAG, "Error observing marketplace orders", root)
+            emit(emptyList())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
+
     private val _themePreference = MutableStateFlow(ThemePreference.SYSTEM)
     val themePreference: StateFlow<ThemePreference> = _themePreference.asStateFlow()
 
@@ -516,6 +587,72 @@ class MomiViewModel(
 
     fun clearError() {
         _errorMessage.value = null
+    }
+
+    fun clearStatusNotice() {
+        _statusNotice.value = null
+    }
+
+    fun dismissAvailableUpdate() {
+        _availableUpdate.value = null
+    }
+
+    fun checkForUpdates(manual: Boolean = false) {
+        viewModelScope.launch {
+            AppUpdateChecker.checkForUpdate()
+                .onSuccess { result ->
+                    if (result.availableUpdate != null) {
+                        _availableUpdate.value = result.availableUpdate
+                    } else if (manual) {
+                        _statusNotice.value = "You are on the latest Momi version (v${result.currentVersionName})."
+                    }
+                }
+                .onFailure { error ->
+                    if (manual) {
+                        _errorMessage.value = error.localizedMessage ?: "Could not check GitHub releases."
+                    }
+                }
+        }
+    }
+
+    fun sendAiPrompt(prompt: String) {
+        val clean = prompt.trim()
+        if (clean.isEmpty() || _aiUiState.value is AiAssistantUiState.Generating) return
+
+        val userTurnId = "user_${UUID.randomUUID()}"
+        val botTurnId = "ai_${UUID.randomUUID()}"
+        _aiMessages.update {
+            it + AiAssistantTurn(id = userTurnId, isUser = true, text = clean) +
+                AiAssistantTurn(id = botTurnId, isUser = false, text = "")
+        }
+        _aiUiState.value = AiAssistantUiState.Generating
+
+        viewModelScope.launch {
+            aiAssistantRepository.streamReply(clean).collect { chunkResult ->
+                chunkResult.onSuccess { partialText ->
+                    _aiMessages.update { turns ->
+                        turns.map { turn ->
+                            if (turn.id == botTurnId) turn.copy(text = partialText, isError = false) else turn
+                        }
+                    }
+                }.onFailure { err ->
+                    val msg = err.localizedMessage ?: "Assistant is temporarily unavailable."
+                    _aiMessages.update { turns ->
+                        turns.map { turn ->
+                            if (turn.id == botTurnId && turn.text.isBlank()) {
+                                turn.copy(text = msg, isError = true)
+                            } else {
+                                turn
+                            }
+                        }
+                    }
+                    _aiUiState.value = AiAssistantUiState.Error(msg)
+                }
+            }
+            if (_aiUiState.value is AiAssistantUiState.Generating) {
+                _aiUiState.value = AiAssistantUiState.Idle
+            }
+        }
     }
 
     fun loadAppearance(context: android.content.Context) {
@@ -709,9 +846,10 @@ class MomiViewModel(
     }
 
     fun createPost(
-        context: android.content.Context,
+        context: Context,
         imageKey: String,
         localImagePath: String?,
+        localExtraImagePaths: List<String> = emptyList(),
         mediaType: String,
         localVideoPath: String?,
         videoDurationMs: Long,
@@ -725,9 +863,22 @@ class MomiViewModel(
         onComplete: (Boolean) -> Unit
     ) {
         val currentProfile = fallbackProfile()
+        val extraPaths = localExtraImagePaths.filter { it.isNotBlank() }.take(4)
         viewModelScope.launch {
             val encodedImage = withContext(Dispatchers.IO) {
-                MediaAssets.encodeImageFileToBase64(localImagePath)
+                MediaAssets.encodePrimaryPostImage(localImagePath, hasExtraSlides = extraPaths.isNotEmpty())
+            }
+            val encodedExtras = if (mediaType == "IMAGE" && extraPaths.isNotEmpty()) {
+                withContext(Dispatchers.IO) {
+                    extraPaths.mapNotNull { MediaAssets.encodeCarouselImageToBase64(it) }
+                }
+            } else {
+                emptyList()
+            }
+            val encodedAudio = if (!localAudioPath.isNullOrBlank()) {
+                StudioMusicCatalog.encodeAudioForFirestore(context.applicationContext, localAudioPath)
+            } else {
+                null
             }
             val videoPayload = if (mediaType == "VIDEO" && !localVideoPath.isNullOrBlank()) {
                 MediaAssets.prepareVideoPayloadForFirestore(context.applicationContext, localVideoPath)
@@ -745,6 +896,8 @@ class MomiViewModel(
                 imageKey = imageKey,
                 localImagePath = localImagePath,
                 imageData = encodedImage,
+                localExtraImagePaths = extraPaths,
+                extraImageDatas = encodedExtras,
                 mediaType = mediaType,
                 localVideoPath = localVideoPath,
                 videoData = videoPayload?.inlineVideoData,
@@ -752,6 +905,7 @@ class MomiViewModel(
                 videoDurationMs = videoDurationMs,
                 audioTitle = audioTitle,
                 localAudioPath = localAudioPath,
+                audioData = encodedAudio,
                 filterTag = filterTag,
                 caption = caption,
                 location = location,
@@ -767,7 +921,7 @@ class MomiViewModel(
     }
 
     fun createStory(
-        context: android.content.Context,
+        context: Context,
         imageKey: String,
         localImagePath: String?,
         mediaType: String,
@@ -782,6 +936,11 @@ class MomiViewModel(
         viewModelScope.launch {
             val encodedImage = withContext(Dispatchers.IO) {
                 MediaAssets.encodeImageFileToBase64(localImagePath)
+            }
+            val encodedAudio = if (!localAudioPath.isNullOrBlank()) {
+                StudioMusicCatalog.encodeAudioForFirestore(context.applicationContext, localAudioPath)
+            } else {
+                null
             }
             val videoPayload = if (mediaType == "VIDEO" && !localVideoPath.isNullOrBlank()) {
                 MediaAssets.prepareVideoPayloadForFirestore(context.applicationContext, localVideoPath)
@@ -806,6 +965,7 @@ class MomiViewModel(
                 videoDurationMs = videoDurationMs,
                 audioTitle = audioTitle,
                 localAudioPath = localAudioPath,
+                audioData = encodedAudio,
                 caption = caption
             ).onSuccess {
                 onComplete(true)
@@ -900,11 +1060,244 @@ class MomiViewModel(
         }
     }
 
+    fun startDirectChatWithUid(targetUid: String, onOpened: (MessageThread) -> Unit) {
+        if (targetUid.isBlank() || targetUid == currentUserId) return
+        val existingProfile = allProfiles.value.firstOrNull { it.userId == targetUid }
+            ?: merchants.value.firstOrNull { it.userId == targetUid }?.let { m ->
+                UserProfile(
+                    id = m.userId,
+                    userId = m.userId,
+                    username = m.ownerUsername.ifBlank { "merchant" },
+                    displayName = m.storeName.ifBlank { m.ownerUsername },
+                    avatarKey = m.avatarKey,
+                    avatarData = m.avatarData,
+                    isVerified = m.isVerified
+                )
+            }
+            ?: UserProfile(
+                id = targetUid,
+                userId = targetUid,
+                username = "seller",
+                displayName = "Momi Seller",
+                avatarKey = MediaAssets.avatarKeyForUid(targetUid)
+            )
+        startDirectChat(existingProfile, onOpened)
+    }
+
     fun sendMessage(thread: MessageThread, text: String) {
         val currentProfile = fallbackProfile()
         viewModelScope.launch {
             repository.sendMessage(thread, currentProfile, text).onFailure {
                 _errorMessage.value = unwrapErrorMessage(it, "Could not send message")
+            }
+        }
+    }
+
+    fun sendPhotoMessage(thread: MessageThread, localImagePath: String) {
+        val currentProfile = fallbackProfile()
+        _isSendingChatMedia.value = true
+        viewModelScope.launch {
+            val encoded = withContext(Dispatchers.IO) {
+                MediaAssets.encodeImageFileToBase64(localImagePath)
+            }
+            if (encoded.isNullOrBlank()) {
+                _isSendingChatMedia.value = false
+                _errorMessage.value = "Could not compress photo for chat."
+                return@launch
+            }
+            repository.sendMediaMessage(
+                thread = thread,
+                senderProfile = currentProfile,
+                messageType = "IMAGE",
+                caption = "Photo",
+                imageData = encoded
+            ).onFailure {
+                _errorMessage.value = unwrapErrorMessage(it, "Could not send photo")
+            }
+            _isSendingChatMedia.value = false
+        }
+    }
+
+    fun sendVideoMessage(context: Context, thread: MessageThread, localVideoPath: String, durationMs: Long) {
+        val currentProfile = fallbackProfile()
+        _isSendingChatMedia.value = true
+        viewModelScope.launch {
+            val videoResult = MediaAssets.prepareCompactVideoForChat(context.applicationContext, localVideoPath)
+            val encoded = videoResult.getOrNull()
+            if (encoded.isNullOrBlank()) {
+                _isSendingChatMedia.value = false
+                _errorMessage.value = videoResult.exceptionOrNull()?.localizedMessage
+                    ?: "Video clip is too large for chat."
+                return@launch
+            }
+            repository.sendMediaMessage(
+                thread = thread,
+                senderProfile = currentProfile,
+                messageType = "VIDEO",
+                caption = "Video clip",
+                videoData = encoded,
+                videoDurationMs = durationMs
+            ).onFailure {
+                _errorMessage.value = unwrapErrorMessage(it, "Could not send video")
+            }
+            _isSendingChatMedia.value = false
+        }
+    }
+
+    fun sendVoiceMessage(context: Context, thread: MessageThread, localAudioPath: String, durationMs: Long) {
+        val currentProfile = fallbackProfile()
+        _isSendingChatMedia.value = true
+        viewModelScope.launch {
+            val encoded = StudioMusicCatalog.encodeAudioForFirestore(context.applicationContext, localAudioPath)
+            runCatching { File(localAudioPath).delete() }
+            if (encoded.isNullOrBlank()) {
+                _isSendingChatMedia.value = false
+                _errorMessage.value = "Voice clip could not be encoded."
+                return@launch
+            }
+            repository.sendMediaMessage(
+                thread = thread,
+                senderProfile = currentProfile,
+                messageType = "AUDIO",
+                caption = "Voice message",
+                audioData = encoded,
+                audioDurationMs = durationMs
+            ).onFailure {
+                _errorMessage.value = unwrapErrorMessage(it, "Could not send voice note")
+            }
+            _isSendingChatMedia.value = false
+        }
+    }
+
+    fun createOrUpdateMerchant(
+        storeName: String,
+        tagline: String,
+        category: String,
+        location: String,
+        onComplete: (Boolean) -> Unit
+    ) {
+        val currentProfile = fallbackProfile()
+        viewModelScope.launch {
+            marketplaceRepository.createOrUpdateMerchant(
+                profile = currentProfile,
+                storeName = storeName,
+                tagline = tagline,
+                category = category,
+                location = location
+            ).onSuccess {
+                _statusNotice.value = "Merchant storefront saved!"
+                onComplete(true)
+            }.onFailure {
+                _errorMessage.value = unwrapErrorMessage(it, "Could not save merchant account")
+                onComplete(false)
+            }
+        }
+    }
+
+    fun setMerchantVerified(merchantUid: String, verified: Boolean) {
+        if (!isAdminUser) {
+            _errorMessage.value = "Only the Momi owner can verify merchant storefronts."
+            return
+        }
+        viewModelScope.launch {
+            marketplaceRepository.setMerchantVerified(
+                targetMerchantUid = merchantUid,
+                verified = verified,
+                adminEmail = initialEmail ?: "syali6511@gmail.com"
+            ).onFailure {
+                _errorMessage.value = unwrapErrorMessage(it, "Could not update merchant verification")
+            }
+        }
+    }
+
+    fun publishMarketProduct(
+        context: Context,
+        merchant: MerchantAccount,
+        title: String,
+        description: String,
+        category: String,
+        priceUsd: Double,
+        originalPriceUsd: Double,
+        freeShipping: Boolean,
+        imagePaths: List<String>,
+        localVideoPath: String?,
+        videoDurationMs: Long,
+        stockCount: Long,
+        onComplete: (Boolean) -> Unit
+    ) {
+        val currentProfile = fallbackProfile()
+        val cleanPaths = imagePaths.filter { it.isNotBlank() }.take(5)
+        viewModelScope.launch {
+            val primaryImageData = withContext(Dispatchers.IO) {
+                MediaAssets.encodePrimaryPostImage(cleanPaths.firstOrNull(), hasExtraSlides = cleanPaths.size > 1)
+            }
+            val extraImageDatas = withContext(Dispatchers.IO) {
+                cleanPaths.drop(1).mapNotNull { MediaAssets.encodeCarouselImageToBase64(it) }
+            }
+            val videoPayload = if (!localVideoPath.isNullOrBlank()) {
+                MediaAssets.prepareVideoPayloadForFirestore(context.applicationContext, localVideoPath)
+            } else {
+                null
+            }
+            if (!localVideoPath.isNullOrBlank() && (videoPayload == null || !videoPayload.isReady)) {
+                _errorMessage.value = videoPayload?.failureReason ?: "Could not prepare product video."
+                onComplete(false)
+                return@launch
+            }
+            marketplaceRepository.publishProduct(
+                profile = currentProfile,
+                merchant = merchant,
+                title = title,
+                description = description,
+                category = category,
+                priceUsd = priceUsd,
+                originalPriceUsd = originalPriceUsd,
+                freeShipping = freeShipping,
+                imageData = primaryImageData,
+                extraImageDatas = extraImageDatas,
+                videoData = videoPayload?.inlineVideoData,
+                videoChunks = videoPayload?.videoChunks.orEmpty(),
+                videoDurationMs = videoDurationMs,
+                stockCount = stockCount
+            ).onSuccess {
+                _statusNotice.value = "Listing published to Momi Marketplace!"
+                onComplete(true)
+            }.onFailure {
+                _errorMessage.value = unwrapErrorMessage(it, "Could not publish product listing")
+                onComplete(false)
+            }
+        }
+    }
+
+    fun deleteMarketProduct(productId: String) {
+        viewModelScope.launch {
+            marketplaceRepository.deleteProduct(productId).onFailure {
+                _errorMessage.value = unwrapErrorMessage(it, "Could not delete listing")
+            }
+        }
+    }
+
+    fun placeMarketOrder(product: MarketProduct, shippingAddress: String, onComplete: (Boolean) -> Unit) {
+        val currentProfile = fallbackProfile()
+        viewModelScope.launch {
+            marketplaceRepository.placeOrder(
+                buyerProfile = currentProfile,
+                product = product,
+                shippingAddress = shippingAddress
+            ).onSuccess {
+                _statusNotice.value = "Order placed with ${product.storeName}!"
+                onComplete(true)
+            }.onFailure {
+                _errorMessage.value = unwrapErrorMessage(it, "Could not place order")
+                onComplete(false)
+            }
+        }
+    }
+
+    fun updateMarketOrderStatus(orderId: String, nextStatus: String) {
+        viewModelScope.launch {
+            marketplaceRepository.updateOrderStatus(orderId, nextStatus).onFailure {
+                _errorMessage.value = unwrapErrorMessage(it, "Could not update order status")
             }
         }
     }

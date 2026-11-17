@@ -62,6 +62,8 @@ service cloud.firestore {
              data.imageKey is string && data.imageKey.size() >= 1 && data.imageKey.size() <= 64 &&
              (!('localImagePath' in data) || data.localImagePath == null || (data.localImagePath is string && data.localImagePath.size() <= 500)) &&
              (!('imageData' in data) || data.imageData == null || (data.imageData is string && data.imageData.size() <= 700000)) &&
+             (!('localExtraImagePaths' in data) || data.localExtraImagePaths == null || (data.localExtraImagePaths is list && data.localExtraImagePaths.size() <= 4)) &&
+             (!('extraImageDatas' in data) || data.extraImageDatas == null || (data.extraImageDatas is list && data.extraImageDatas.size() <= 4)) &&
              (!('mediaType' in data) || data.mediaType == null || (data.mediaType is string && data.mediaType in ['IMAGE', 'VIDEO'])) &&
              (!('localVideoPath' in data) || data.localVideoPath == null || (data.localVideoPath is string && data.localVideoPath.size() <= 500)) &&
              (!('videoData' in data) || data.videoData == null || (data.videoData is string && data.videoData.size() <= 700000)) &&
@@ -76,6 +78,7 @@ service cloud.firestore {
              data.isReel is bool &&
              (!('audioTitle' in data) || (data.audioTitle is string && data.audioTitle.size() <= 120)) &&
              (!('localAudioPath' in data) || data.localAudioPath == null || (data.localAudioPath is string && data.localAudioPath.size() <= 500)) &&
+             (!('audioData' in data) || data.audioData == null || (data.audioData is string && data.audioData.size() <= 660000)) &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
     }
@@ -104,6 +107,7 @@ service cloud.firestore {
              (!('videoDurationMs' in data) || data.videoDurationMs == null || (data.videoDurationMs is int && data.videoDurationMs >= 0 && data.videoDurationMs <= 3600000)) &&
              (!('audioTitle' in data) || data.audioTitle == null || (data.audioTitle is string && data.audioTitle.size() <= 120)) &&
              (!('localAudioPath' in data) || data.localAudioPath == null || (data.localAudioPath is string && data.localAudioPath.size() <= 500)) &&
+             (!('audioData' in data) || data.audioData == null || (data.audioData is string && data.audioData.size() <= 660000)) &&
              data.caption is string && data.caption.size() <= 300 &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
@@ -185,6 +189,12 @@ service cloud.firestore {
              data.senderUid in data.participantUids &&
              data.senderUsername is string && data.senderUsername.size() >= 1 && data.senderUsername.size() <= 50 &&
              data.text is string && data.text.size() >= 1 && data.text.size() <= 1000 &&
+             (!('messageType' in data) || (data.messageType is string && data.messageType in ['TEXT', 'IMAGE', 'VIDEO', 'AUDIO'])) &&
+             (!('imageData' in data) || data.imageData == null || (data.imageData is string && data.imageData.size() <= 700000)) &&
+             (!('videoData' in data) || data.videoData == null || (data.videoData is string && data.videoData.size() <= 700000)) &&
+             (!('videoDurationMs' in data) || data.videoDurationMs == null || (data.videoDurationMs is int && data.videoDurationMs >= 0 && data.videoDurationMs <= 3600000)) &&
+             (!('audioData' in data) || data.audioData == null || (data.audioData is string && data.audioData.size() <= 660000)) &&
+             (!('audioDurationMs' in data) || data.audioDurationMs == null || (data.audioDurationMs is int && data.audioDurationMs >= 0 && data.audioDurationMs <= 600000)) &&
              data.createdAt is timestamp && data.createdAt <= request.time;
     }
 
@@ -209,6 +219,61 @@ service cloud.firestore {
              data.avatarKey is string && data.avatarKey.size() >= 1 && data.avatarKey.size() <= 64 &&
              data.text is string && data.text.size() >= 1 && data.text.size() <= 300 &&
              data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidMerchant(data, merchantId) {
+      return data.userId is string && data.userId == merchantId && isValidId(data.userId) &&
+             data.ownerUsername is string && data.ownerUsername.size() >= 1 && data.ownerUsername.size() <= 50 &&
+             data.storeName is string && data.storeName.size() >= 1 && data.storeName.size() <= 80 &&
+             data.tagline is string && data.tagline.size() <= 160 &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 40 &&
+             data.location is string && data.location.size() <= 120 &&
+             data.avatarKey is string && data.avatarKey.size() >= 1 && data.avatarKey.size() <= 64 &&
+             (!('avatarData' in data) || data.avatarData == null || (data.avatarData is string && data.avatarData.size() <= 200000)) &&
+             data.isVerified is bool &&
+             (!('verifiedByEmail' in data) || data.verifiedByEmail == null || (data.verifiedByEmail is string && data.verifiedByEmail.size() <= 120)) &&
+             data.totalSales is int && data.totalSales >= 0 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
+    }
+
+    function isValidMarketProduct(data) {
+      return data.sellerUid is string && isValidId(data.sellerUid) &&
+             data.sellerUsername is string && data.sellerUsername.size() >= 1 && data.sellerUsername.size() <= 50 &&
+             data.storeName is string && data.storeName.size() >= 1 && data.storeName.size() <= 80 &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+             data.description is string && data.description.size() <= 1000 &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 40 &&
+             (data.priceUsd is int || data.priceUsd is float) && data.priceUsd > 0 &&
+             (data.originalPriceUsd is int || data.originalPriceUsd is float) && data.originalPriceUsd >= 0 &&
+             data.discountPercent is int && data.discountPercent >= 0 && data.discountPercent <= 95 &&
+             data.freeShipping is bool &&
+             data.imageKey is string && data.imageKey.size() >= 1 && data.imageKey.size() <= 64 &&
+             (!('imageData' in data) || data.imageData == null || (data.imageData is string && data.imageData.size() <= 700000)) &&
+             (!('extraImageDatas' in data) || data.extraImageDatas == null || (data.extraImageDatas is list && data.extraImageDatas.size() <= 4)) &&
+             (!('videoData' in data) || data.videoData == null || (data.videoData is string && data.videoData.size() <= 700000)) &&
+             (!('videoChunksCount' in data) || data.videoChunksCount == null || (data.videoChunksCount is int && data.videoChunksCount >= 0 && data.videoChunksCount <= 25)) &&
+             data.videoDurationMs is int && data.videoDurationMs >= 0 && data.videoDurationMs <= 3600000 &&
+             data.stockCount is int && data.stockCount >= 0 && data.stockCount <= 99999 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
+    }
+
+    function isValidMarketOrder(data) {
+      return data.buyerUid is string && isValidId(data.buyerUid) &&
+             data.buyerUsername is string && data.buyerUsername.size() >= 1 && data.buyerUsername.size() <= 50 &&
+             data.sellerUid is string && isValidId(data.sellerUid) &&
+             data.buyerUid != data.sellerUid &&
+             data.sellerStoreName is string && data.sellerStoreName.size() >= 1 && data.sellerStoreName.size() <= 80 &&
+             data.productId is string && isValidId(data.productId) &&
+             data.productTitle is string && data.productTitle.size() >= 1 && data.productTitle.size() <= 120 &&
+             data.productImageKey is string && data.productImageKey.size() >= 1 && data.productImageKey.size() <= 64 &&
+             (!('productImageData' in data) || data.productImageData == null || (data.productImageData is string && data.productImageData.size() <= 700000)) &&
+             (data.priceUsd is int || data.priceUsd is float) && data.priceUsd > 0 &&
+             data.shippingAddress is string && data.shippingAddress.size() >= 1 && data.shippingAddress.size() <= 300 &&
+             data.status is string && data.status in ['PLACED', 'SHIPPED', 'DELIVERED'] &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
     }
 
     // Public creator profiles (strictly no PII) + owner-isolated private subcollections
@@ -317,7 +382,7 @@ service cloud.firestore {
                        isValidId(postId) &&
                        incoming().userId == request.auth.uid &&
                        incoming().keys().hasAll(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'imageKey', 'filterTag', 'caption', 'likesCount', 'commentsCount', 'category', 'isReel', 'createdAt']) &&
-                       incoming().keys().hasOnly(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'location', 'imageKey', 'localImagePath', 'imageData', 'mediaType', 'localVideoPath', 'videoData', 'videoChunksCount', 'videoDurationMs', 'localAudioPath', 'filterTag', 'caption', 'likesCount', 'viewsCount', 'commentsCount', 'category', 'isReel', 'audioTitle', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'location', 'imageKey', 'localImagePath', 'imageData', 'localExtraImagePaths', 'extraImageDatas', 'mediaType', 'localVideoPath', 'videoData', 'videoChunksCount', 'videoDurationMs', 'localAudioPath', 'audioData', 'filterTag', 'caption', 'likesCount', 'viewsCount', 'commentsCount', 'category', 'isReel', 'audioTitle', 'createdAt', 'updatedAt']) &&
                        isValidPost(incoming());
 
       allow update: if isSignedIn() &&
@@ -395,7 +460,7 @@ service cloud.firestore {
                        isValidId(storyId) &&
                        incoming().userId == request.auth.uid &&
                        incoming().keys().hasAll(['userId', 'username', 'avatarKey', 'imageKey', 'caption', 'createdAt']) &&
-                       incoming().keys().hasOnly(['userId', 'username', 'avatarKey', 'imageKey', 'localImagePath', 'imageData', 'mediaType', 'localVideoPath', 'videoData', 'videoChunksCount', 'videoDurationMs', 'audioTitle', 'localAudioPath', 'caption', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'username', 'avatarKey', 'imageKey', 'localImagePath', 'imageData', 'mediaType', 'localVideoPath', 'videoData', 'videoChunksCount', 'videoDurationMs', 'audioTitle', 'localAudioPath', 'audioData', 'caption', 'createdAt', 'updatedAt']) &&
                        isValidStory(incoming());
 
       allow update: if false;
@@ -481,7 +546,7 @@ service cloud.firestore {
                          incoming().senderUid == request.auth.uid &&
                          request.auth.uid in incoming().participantUids &&
                          incoming().keys().hasAll(['participantUids', 'senderUid', 'senderUsername', 'text', 'createdAt']) &&
-                         incoming().keys().hasOnly(['participantUids', 'senderUid', 'senderUsername', 'text', 'createdAt']) &&
+                         incoming().keys().hasOnly(['participantUids', 'senderUid', 'senderUsername', 'text', 'messageType', 'imageData', 'videoData', 'videoDurationMs', 'audioData', 'audioDurationMs', 'createdAt']) &&
                          isValidChatMessage(incoming()) &&
                          exists(/databases/$(database)/documents/threads/$(threadId)) &&
                          incoming().participantUids == get(/databases/$(database)/documents/threads/$(threadId)).data.participantUids;
@@ -540,6 +605,110 @@ service cloud.firestore {
                          isValidId(commentId) &&
                          (existing().userId == request.auth.uid || get(/databases/$(database)/documents/liveStreams/$(streamId)).data.userId == request.auth.uid);
       }
+    }
+
+    // Momi Marketplace Merchants (admin-only verification)
+    match /merchants/{merchantId} {
+      allow get: if isSignedIn() && isValidId(merchantId);
+      allow list: if isSignedIn();
+
+      allow create: if isOwner(merchantId) &&
+                       isValidId(merchantId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'ownerUsername', 'storeName', 'tagline', 'category', 'location', 'avatarKey', 'isVerified', 'totalSales', 'createdAt']) &&
+                       incoming().keys().hasOnly(['userId', 'ownerUsername', 'storeName', 'tagline', 'category', 'location', 'avatarKey', 'avatarData', 'isVerified', 'verifiedByEmail', 'totalSales', 'createdAt', 'updatedAt']) &&
+                       isValidMerchant(incoming(), merchantId) &&
+                       incoming().isVerified == false &&
+                       incoming().totalSales == 0;
+
+      allow update: if isSignedIn() &&
+                       isValidId(merchantId) &&
+                       isValidMerchant(incoming(), merchantId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         (isOwner(merchantId) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['storeName', 'tagline', 'category', 'location', 'avatarData', 'updatedAt'])) ||
+                         (isAdmin() &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['isVerified', 'verifiedByEmail', 'updatedAt']))
+                       );
+
+      allow delete: if isOwner(merchantId) && isValidId(merchantId);
+    }
+
+    // Momi Marketplace Products & Chunked Product Videos
+    match /marketProducts/{productId} {
+      allow get: if isSignedIn() && isValidId(productId);
+      allow list: if isSignedIn();
+
+      allow create: if isSignedIn() &&
+                       isValidId(productId) &&
+                       incoming().sellerUid == request.auth.uid &&
+                       incoming().keys().hasAll(['sellerUid', 'sellerUsername', 'storeName', 'title', 'description', 'category', 'priceUsd', 'originalPriceUsd', 'discountPercent', 'freeShipping', 'imageKey', 'videoDurationMs', 'stockCount', 'createdAt']) &&
+                       incoming().keys().hasOnly(['sellerUid', 'sellerUsername', 'storeName', 'title', 'description', 'category', 'priceUsd', 'originalPriceUsd', 'discountPercent', 'freeShipping', 'imageKey', 'imageData', 'extraImageDatas', 'videoData', 'videoChunksCount', 'videoDurationMs', 'stockCount', 'createdAt', 'updatedAt']) &&
+                       isValidMarketProduct(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(productId) &&
+                       existing().sellerUid == request.auth.uid &&
+                       isValidMarketProduct(incoming()) &&
+                       incoming().sellerUid == existing().sellerUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'category', 'priceUsd', 'originalPriceUsd', 'discountPercent', 'freeShipping', 'stockCount', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(productId) && existing().sellerUid == request.auth.uid;
+
+      match /videoChunks/{chunkId} {
+        allow get: if isSignedIn() && isValidId(productId) && isValidId(chunkId);
+        allow list: if isSignedIn() && isValidId(productId);
+        allow create: if isSignedIn() &&
+                         isValidId(productId) &&
+                         isValidId(chunkId) &&
+                         incoming().keys().hasAll(['index', 'data', 'createdAt']) &&
+                         incoming().keys().hasOnly(['index', 'data', 'createdAt']) &&
+                         isValidVideoChunk(incoming()) &&
+                         exists(/databases/$(database)/documents/marketProducts/$(productId)) &&
+                         get(/databases/$(database)/documents/marketProducts/$(productId)).data.sellerUid == request.auth.uid;
+        allow update: if false;
+        allow delete: if isSignedIn() &&
+                         isValidId(productId) &&
+                         isValidId(chunkId) &&
+                         exists(/databases/$(database)/documents/marketProducts/$(productId)) &&
+                         get(/databases/$(database)/documents/marketProducts/$(productId)).data.sellerUid == request.auth.uid;
+      }
+    }
+
+    // Private Marketplace Orders (visible strictly to buyerUid and sellerUid)
+    match /marketOrders/{orderId} {
+      allow get: if isSignedIn() && isValidId(orderId) && (
+        request.auth.uid == existing().buyerUid ||
+        request.auth.uid == existing().sellerUid
+      );
+      allow list: if isSignedIn() && (
+        request.auth.uid == existing().buyerUid ||
+        request.auth.uid == existing().sellerUid
+      );
+
+      allow create: if isSignedIn() &&
+                       isValidId(orderId) &&
+                       incoming().buyerUid == request.auth.uid &&
+                       incoming().sellerUid != request.auth.uid &&
+                       incoming().status == 'PLACED' &&
+                       incoming().keys().hasAll(['buyerUid', 'buyerUsername', 'sellerUid', 'sellerStoreName', 'productId', 'productTitle', 'productImageKey', 'priceUsd', 'shippingAddress', 'status', 'createdAt']) &&
+                       incoming().keys().hasOnly(['buyerUid', 'buyerUsername', 'sellerUid', 'sellerStoreName', 'productId', 'productTitle', 'productImageKey', 'productImageData', 'priceUsd', 'shippingAddress', 'status', 'createdAt', 'updatedAt']) &&
+                       isValidMarketOrder(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(orderId) &&
+                       request.auth.uid == existing().sellerUid &&
+                       isValidMarketOrder(incoming()) &&
+                       incoming().buyerUid == existing().buyerUid &&
+                       incoming().sellerUid == existing().sellerUid &&
+                       incoming().productId == existing().productId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+
+      allow delete: if false;
     }
   }
 }

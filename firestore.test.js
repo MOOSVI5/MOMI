@@ -656,3 +656,279 @@ test("LiveStreams & LiveComments: host broadcasts, viewers join/leave/heart/comm
     })
   );
 });
+
+// --- 8. Multi-Image Carousel Posts, AudioData, and Rich DM Messages ---
+
+test("Posts & Stories: support multi-image extraImageDatas/localExtraImagePaths and audioData within limits", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+
+  await assertSucceeds(
+    aliceDb.collection("posts").doc("post_carousel_audio").set({
+      ...validPostPayload(ALICE_UID),
+      imageData: "A".repeat(512),
+      localExtraImagePaths: ["/tmp/img2.jpg", "/tmp/img3.jpg"],
+      extraImageDatas: ["B".repeat(256), "C".repeat(256)],
+      audioTitle: "Midnight Lo-Fi · Momi Studio",
+      audioData: "D".repeat(1024),
+    })
+  );
+
+  // Reject > 4 extra images
+  await assertFails(
+    aliceDb.collection("posts").doc("post_carousel_too_many").set({
+      ...validPostPayload(ALICE_UID),
+      extraImageDatas: ["A", "B", "C", "D", "E"],
+    })
+  );
+
+  // Reject oversized audioData
+  await assertFails(
+    aliceDb.collection("stories").doc("story_audio_too_big").set({
+      ...validStoryPayload(ALICE_UID),
+      audioTitle: "Long Track",
+      audioData: "A".repeat(660001),
+    })
+  );
+
+  await assertSucceeds(
+    aliceDb.collection("stories").doc("story_audio_ok").set({
+      ...validStoryPayload(ALICE_UID),
+      audioTitle: "Sunset Acoustic",
+      audioData: "E".repeat(1024),
+    })
+  );
+});
+
+test("Threads & Messages: support IMAGE, VIDEO, and AUDIO chat messages; reject invalid messageType", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+
+  const participants = [ALICE_UID, BOB_UID];
+  const threadId = `${ALICE_UID}_${BOB_UID}`;
+  await assertSucceeds(aliceDb.collection("threads").doc(threadId).set(validThreadPayload(ALICE_UID, BOB_UID)));
+
+  await assertSucceeds(
+    aliceDb.collection("threads").doc(threadId).collection("messages").doc("m_img").set({
+      participantUids: participants,
+      senderUid: ALICE_UID,
+      senderUsername: "aria.studio",
+      text: "Photo",
+      messageType: "IMAGE",
+      imageData: "IMG_B64",
+      createdAt: serverTimestamp(),
+    })
+  );
+
+  await assertSucceeds(
+    bobDb.collection("threads").doc(threadId).collection("messages").doc("m_vid").set({
+      participantUids: participants,
+      senderUid: BOB_UID,
+      senderUsername: "bob.lens",
+      text: "Video clip",
+      messageType: "VIDEO",
+      videoData: "VID_B64",
+      videoDurationMs: 4200,
+      createdAt: serverTimestamp(),
+    })
+  );
+
+  await assertSucceeds(
+    aliceDb.collection("threads").doc(threadId).collection("messages").doc("m_aud").set({
+      participantUids: participants,
+      senderUid: ALICE_UID,
+      senderUsername: "aria.studio",
+      text: "Voice message",
+      messageType: "AUDIO",
+      audioData: "AUD_B64",
+      audioDurationMs: 3100,
+      createdAt: serverTimestamp(),
+    })
+  );
+
+  await assertFails(
+    aliceDb.collection("threads").doc(threadId).collection("messages").doc("m_bad").set({
+      participantUids: participants,
+      senderUid: ALICE_UID,
+      senderUsername: "aria.studio",
+      text: "Bad file",
+      messageType: "APK",
+      createdAt: serverTimestamp(),
+    })
+  );
+});
+
+// --- 9. Momi Marketplace: Merchants, Products, VideoChunks & Orders ---
+
+test("Marketplace: admin-only merchant verification, seller product ownership, and private buyer/seller orders", async () => {
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, { email: "alice@example.com", email_verified: true }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, { email: "bob@example.com", email_verified: true }).firestore();
+  const charlieDb = testEnv.authenticatedContext(CHARLIE_UID, { email: "charlie@example.com", email_verified: true }).firestore();
+  const adminDb = testEnv.authenticatedContext("admin_momi", {
+    email: "syali6511@gmail.com",
+    email_verified: true,
+  }).firestore();
+
+  await assertFails(unauthDb.collection("merchants").get());
+  await assertFails(unauthDb.collection("marketProducts").get());
+  await assertFails(unauthDb.collection("marketOrders").get());
+
+  const merchantBase = {
+    userId: ALICE_UID,
+    ownerUsername: "aria.studio",
+    storeName: "Aria Vintage",
+    tagline: "Curated analog cameras & collectibles",
+    category: "Collectibles",
+    location: "Karachi, PK",
+    avatarKey: "avatar_aria",
+    isVerified: false,
+    totalSales: 0,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+
+  // Alice cannot self-create as already verified
+  await assertFails(
+    aliceDb.collection("merchants").doc(ALICE_UID).set({ ...merchantBase, isVerified: true })
+  );
+
+  // Alice creates unverified storefront
+  await assertSucceeds(aliceDb.collection("merchants").doc(ALICE_UID).set(merchantBase));
+
+  // Alice can edit storefront tagline, cannot self-verify
+  await assertSucceeds(
+    aliceDb.collection("merchants").doc(ALICE_UID).update({
+      tagline: "Updated curated finds",
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    aliceDb.collection("merchants").doc(ALICE_UID).update({
+      isVerified: true,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Bob (non-admin) cannot verify Alice's merchant storefront
+  await assertFails(
+    bobDb.collection("merchants").doc(ALICE_UID).update({
+      isVerified: true,
+      verifiedByEmail: "bob@example.com",
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Admin verifies and can also unverify (verifiedByEmail = null)
+  await assertSucceeds(
+    adminDb.collection("merchants").doc(ALICE_UID).update({
+      isVerified: true,
+      verifiedByEmail: "syali6511@gmail.com",
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    adminDb.collection("merchants").doc(ALICE_UID).update({
+      isVerified: false,
+      verifiedByEmail: null,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Alice publishes a product with extra images & chunked product video
+  const productPayload = {
+    sellerUid: ALICE_UID,
+    sellerUsername: "aria.studio",
+    storeName: "Aria Vintage",
+    title: "Casio Vintage Watch F-91W",
+    description: "Classic retro watch with free worldwide shipping.",
+    category: "Fashion",
+    priceUsd: 26.29,
+    originalPriceUsd: 29.99,
+    discountPercent: 12,
+    freeShipping: true,
+    imageKey: "img_post_coastal",
+    imageData: "IMG1",
+    extraImageDatas: ["IMG2", "IMG3"],
+    videoChunksCount: 1,
+    videoDurationMs: 5200,
+    stockCount: 8,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+
+  // Bob cannot spoof Alice's sellerUid
+  await assertFails(bobDb.collection("marketProducts").doc("prod_1").set(productPayload));
+  await assertSucceeds(aliceDb.collection("marketProducts").doc("prod_1").set(productPayload));
+  await assertSucceeds(
+    aliceDb.collection("marketProducts").doc("prod_1").collection("videoChunks").doc("chunk_000").set({
+      index: 0,
+      data: "CHUNK_B64",
+      createdAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(bobDb.collection("marketProducts").get());
+  await assertSucceeds(bobDb.collection("marketProducts").doc("prod_1").collection("videoChunks").get());
+
+  // Bob cannot delete Alice's product or inject videoChunks
+  await assertFails(bobDb.collection("marketProducts").doc("prod_1").delete());
+  await assertFails(
+    bobDb.collection("marketProducts").doc("prod_1").collection("videoChunks").doc("chunk_001").set({
+      index: 1,
+      data: "INJECTED",
+      createdAt: serverTimestamp(),
+    })
+  );
+
+  // Orders: Bob buys from Alice
+  const orderPayload = {
+    buyerUid: BOB_UID,
+    buyerUsername: "bob.lens",
+    sellerUid: ALICE_UID,
+    sellerStoreName: "Aria Vintage",
+    productId: "prod_1",
+    productTitle: "Casio Vintage Watch F-91W",
+    productImageKey: "img_post_coastal",
+    priceUsd: 26.29,
+    shippingAddress: "44000 Islamabad, PK",
+    status: "PLACED",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+
+  // Cannot buy own product or create already SHIPPED
+  await assertFails(
+    aliceDb.collection("marketOrders").doc("ord_self").set({
+      ...orderPayload,
+      buyerUid: ALICE_UID,
+    })
+  );
+  await assertFails(
+    bobDb.collection("marketOrders").doc("ord_shipped").set({
+      ...orderPayload,
+      status: "SHIPPED",
+    })
+  );
+
+  await assertSucceeds(bobDb.collection("marketOrders").doc("ord_1").set(orderPayload));
+
+  // Buyer & seller queries work; Charlie cannot read or list orders
+  await assertSucceeds(bobDb.collection("marketOrders").where("buyerUid", "==", BOB_UID).get());
+  await assertSucceeds(aliceDb.collection("marketOrders").where("sellerUid", "==", ALICE_UID).get());
+  await assertFails(charlieDb.collection("marketOrders").doc("ord_1").get());
+  await assertFails(charlieDb.collection("marketOrders").where("buyerUid", "==", BOB_UID).get());
+
+  // Seller updates order status; buyer and Charlie cannot
+  await assertFails(
+    bobDb.collection("marketOrders").doc("ord_1").update({
+      status: "SHIPPED",
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    aliceDb.collection("marketOrders").doc("ord_1").update({
+      status: "SHIPPED",
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(aliceDb.collection("marketOrders").doc("ord_1").delete());
+});

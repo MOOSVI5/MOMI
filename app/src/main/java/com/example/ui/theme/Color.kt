@@ -71,3 +71,16 @@ val IndigoGradientColors = listOf(
     Color(0xFF4F46E5),
     Color(0xFFFB7185)
 )
+
+// Preset 4: White & Grey (Minimal Pure White & Slate Grey)
+val WhiteGreyPrimary = Color(0xFF1F2937)
+val WhiteGreyPrimaryBright = Color(0xFFE5E7EB)
+val WhiteGreySecondary = Color(0xFF6B7280)
+val WhiteGreySecondaryBright = Color(0xFF9CA3AF)
+
+val WhiteGreyGradientColors = listOf(
+    Color(0xFFFFFFFF),
+    Color(0xFFD1D5DB),
+    Color(0xFF4B5563)
+)
+

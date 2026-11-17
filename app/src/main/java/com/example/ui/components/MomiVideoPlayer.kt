@@ -9,6 +9,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -37,6 +39,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -77,6 +80,73 @@ val LocalRemoteVideoResolver = staticCompositionLocalOf<
     (suspend (collectionName: String, mediaId: String, expectedChunksCount: Long) -> Uri?)?
 > { null }
 
+/**
+ * Lightweight ExoPlayer music accompaniment for Photo Posts, Photo Stories, Photo Clips, and Post Composer preview.
+ * Only allocates an ExoPlayer instance when [isPlaying] is true and releases immediately when inactive.
+ */
+@OptIn(UnstableApi::class)
+@Composable
+fun MomiMusicAudioPlayer(
+    mediaId: String,
+    localAudioPath: String?,
+    audioData: String?,
+    audioTitle: String,
+    isPlaying: Boolean,
+    isMuted: Boolean
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    val playableMusicUri = remember(mediaId, localAudioPath, audioData, audioTitle) {
+        StudioMusicCatalog.resolvePlayableMusicUri(
+            context = context,
+            localAudioPath = localAudioPath,
+            audioTitle = audioTitle,
+            audioData = audioData,
+            cacheKey = mediaId
+        )
+    }
+
+    if (playableMusicUri != null && isPlaying) {
+        val audioPlayer = remember(playableMusicUri) {
+            ExoPlayer.Builder(context)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(C.USAGE_MEDIA)
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                        .build(),
+                    false
+                )
+                .build()
+                .apply {
+                    repeatMode = Player.REPEAT_MODE_ONE
+                    setMediaItem(MediaItem.fromUri(playableMusicUri))
+                    prepare()
+                    playWhenReady = true
+                }
+        }
+
+        LaunchedEffect(audioPlayer, isMuted) {
+            audioPlayer.volume = if (isMuted) 0f else 1f
+        }
+
+        DisposableEffect(lifecycleOwner, audioPlayer) {
+            val observer = LifecycleEventObserver { _, event ->
+                when (event) {
+                    Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> audioPlayer.pause()
+                    Lifecycle.Event.ON_RESUME -> audioPlayer.play()
+                    else -> Unit
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose {
+                lifecycleOwner.lifecycle.removeObserver(observer)
+                audioPlayer.release()
+            }
+        }
+    }
+}
+
 @OptIn(UnstableApi::class)
 @Composable
 fun MomiVideoPlayer(
@@ -93,6 +163,7 @@ fun MomiVideoPlayer(
     videoChunksCount: Long = 0L,
     remoteCollection: String = "posts",
     localAudioPath: String? = null,
+    audioData: String? = null,
     audioTitle: String = "",
     muteOriginalVideoWhenMusicAdded: Boolean = true,
     initialMuted: Boolean = true,
@@ -111,6 +182,7 @@ fun MomiVideoPlayer(
     val lifecycleOwner = LocalLifecycleOwner.current
     val remoteVideoResolver = LocalRemoteVideoResolver.current
 
+    var retryNonce by remember(mediaId) { mutableIntStateOf(0) }
     var playableUri by remember(overrideVideoUri, mediaId, localVideoPath, videoData) {
         mutableStateOf(
             overrideVideoUri ?: MediaAssets.resolvePlayableVideoUri(
@@ -122,6 +194,8 @@ fun MomiVideoPlayer(
         )
     }
     var isLoadingRemoteVideo by remember(mediaId) { mutableStateOf(false) }
+    var playbackFailed by remember(mediaId) { mutableStateOf(false) }
+    var isBuffering by remember(mediaId) { mutableStateOf(false) }
 
     LaunchedEffect(
         overrideVideoUri,
@@ -130,8 +204,10 @@ fun MomiVideoPlayer(
         videoData,
         videoChunksCount,
         remoteCollection,
-        remoteVideoResolver
+        remoteVideoResolver,
+        retryNonce
     ) {
+        playbackFailed = false
         if (overrideVideoUri != null) {
             playableUri = overrideVideoUri
             isLoadingRemoteVideo = false
@@ -160,11 +236,13 @@ fun MomiVideoPlayer(
         }
     }
 
-    val playableMusicUri = remember(mediaId, localAudioPath, audioTitle) {
+    val playableMusicUri = remember(mediaId, localAudioPath, audioData, audioTitle) {
         StudioMusicCatalog.resolvePlayableMusicUri(
             context = context,
             localAudioPath = localAudioPath,
-            audioTitle = audioTitle
+            audioTitle = audioTitle,
+            audioData = audioData,
+            cacheKey = mediaId
         )
     }
 
@@ -172,14 +250,13 @@ fun MomiVideoPlayer(
     val isMuted = externalMuted ?: internalMuted
     var userPaused by remember(mediaId) { mutableStateOf(false) }
     var showTapPlayIndicator by remember { mutableStateOf(false) }
-    var firstFrameRendered by remember(playableUri) { mutableStateOf(false) }
-    var playbackFailed by remember(playableUri) { mutableStateOf(false) }
+    var firstFrameRendered by remember(playableUri, isPlaying) { mutableStateOf(false) }
     var playbackProgress by remember(playableUri) { mutableFloatStateOf(0f) }
 
-    // Reset manual pause when scrolled away so returning autoplays like Instagram/TikTok
     LaunchedEffect(isPlaying) {
         if (!isPlaying) {
             userPaused = false
+            isBuffering = false
         }
     }
 
@@ -190,7 +267,6 @@ fun MomiVideoPlayer(
         }
     }
 
-    val currentIsPlaying by rememberUpdatedState(isPlaying)
     val currentUserPaused by rememberUpdatedState(userPaused)
     val currentOnDoubleTap by rememberUpdatedState(onDoubleTap)
 
@@ -199,7 +275,7 @@ fun MomiVideoPlayer(
             .clipToBounds()
             .background(Color.Black)
     ) {
-        // Poster / thumbnail layer shown while buffering or if video stream has no playable URI
+        // Poster / thumbnail layer shown while scrolled off-screen, buffering, or if video failed
         PostMediaImage(
             imageKey = fallbackImageKey,
             localImagePath = fallbackLocalImagePath,
@@ -209,9 +285,17 @@ fun MomiVideoPlayer(
             modifier = Modifier
                 .fillMaxSize()
                 .let { base ->
-                    if (playableUri == null || playbackFailed) {
+                    if (playableUri == null || playbackFailed || !isPlaying) {
                         base.pointerInput(mediaId) {
                             detectTapGestures(
+                                onTap = {
+                                    if (playbackFailed) {
+                                        MediaAssets.invalidateCachedVideo(context, mediaId)
+                                        playbackFailed = false
+                                        playableUri = null
+                                        retryNonce++
+                                    }
+                                },
                                 onDoubleTap = { currentOnDoubleTap?.invoke() }
                             )
                         }
@@ -221,26 +305,11 @@ fun MomiVideoPlayer(
                 }
         )
 
-        if (isLoadingRemoteVideo && playableUri == null) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(Color.Black.copy(alpha = 0.55f)),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator(
-                    color = Color.White,
-                    strokeWidth = 2.5.dp,
-                    modifier = Modifier.size(22.dp)
-                )
-            }
-        }
-
         val activeUri = playableUri
-        if (activeUri != null && !playbackFailed) {
-            val exoPlayer = remember(activeUri) {
+        // Only hold an active MediaCodec hardware video decoder when this slot is actually playing!
+        // Prevents hardware decoder exhaustion and "video getting stuck" across LazyColumn/Pager items.
+        if (activeUri != null && !playbackFailed && isPlaying) {
+            val exoPlayer = remember(activeUri, retryNonce) {
                 ExoPlayer.Builder(context)
                     .setAudioAttributes(
                         AudioAttributes.Builder()
@@ -252,13 +321,13 @@ fun MomiVideoPlayer(
                     .build()
                     .apply {
                         repeatMode = Player.REPEAT_MODE_ONE
-                        playWhenReady = currentIsPlaying && !currentUserPaused
+                        playWhenReady = !currentUserPaused
                         setMediaItem(MediaItem.fromUri(activeUri))
                         prepare()
                     }
             }
 
-            val musicPlayer = remember(playableMusicUri) {
+            val musicPlayer = remember(playableMusicUri, retryNonce) {
                 playableMusicUri?.let { uri ->
                     ExoPlayer.Builder(context)
                         .setAudioAttributes(
@@ -277,27 +346,20 @@ fun MomiVideoPlayer(
                 }
             }
 
-            LaunchedEffect(exoPlayer, musicPlayer, isPlaying, userPaused) {
-                val shouldPlay = isPlaying && !userPaused
+            LaunchedEffect(exoPlayer, musicPlayer, userPaused) {
+                val shouldPlay = !userPaused
                 if (shouldPlay && exoPlayer.playbackState == Player.STATE_IDLE) {
                     exoPlayer.prepare()
                 }
                 exoPlayer.playWhenReady = shouldPlay
-                if (shouldPlay) {
-                    exoPlayer.play()
-                } else {
-                    exoPlayer.pause()
-                }
+                if (shouldPlay) exoPlayer.play() else exoPlayer.pause()
+
                 musicPlayer?.let { mp ->
                     if (shouldPlay && mp.playbackState == Player.STATE_IDLE) {
                         mp.prepare()
                     }
                     mp.playWhenReady = shouldPlay
-                    if (shouldPlay) {
-                        mp.play()
-                    } else {
-                        mp.pause()
-                    }
+                    if (shouldPlay) mp.play() else mp.pause()
                 }
             }
 
@@ -312,8 +374,8 @@ fun MomiVideoPlayer(
                 musicPlayer?.volume = if (isMuted) 0f else 1f
             }
 
-            LaunchedEffect(exoPlayer, isPlaying, userPaused, showProgressBar) {
-                while (showProgressBar && isPlaying && !userPaused) {
+            LaunchedEffect(exoPlayer, userPaused, showProgressBar) {
+                while (showProgressBar && !userPaused) {
                     val dur = exoPlayer.duration
                     if (dur > 0L) {
                         playbackProgress = (exoPlayer.currentPosition.toFloat() / dur.toFloat()).coerceIn(0f, 1f)
@@ -322,23 +384,33 @@ fun MomiVideoPlayer(
                 }
             }
 
-            // CRITICAL: Do NOT put isPlaying/userPaused in DisposableEffect keys,
-            // otherwise scrolling or tapping permanently destroys ExoPlayer!
             DisposableEffect(lifecycleOwner, exoPlayer, musicPlayer) {
                 val playerListener = object : Player.Listener {
                     override fun onRenderedFirstFrame() {
                         firstFrameRendered = true
+                        isBuffering = false
                     }
 
                     override fun onPlaybackStateChanged(playbackState: Int) {
-                        if (playbackState == Player.STATE_READY) {
-                            playbackFailed = false
+                        when (playbackState) {
+                            Player.STATE_BUFFERING -> isBuffering = true
+                            Player.STATE_READY -> {
+                                playbackFailed = false
+                                isBuffering = false
+                            }
+                            Player.STATE_ENDED -> {
+                                isBuffering = false
+                                exoPlayer.seekTo(0L)
+                                if (!currentUserPaused) exoPlayer.play()
+                            }
+                            else -> isBuffering = false
                         }
                     }
 
                     override fun onPlayerError(error: PlaybackException) {
                         Log.w("MomiVideoPlayer", "Playback error for $mediaId: ${error.errorCodeName}", error)
                         MediaAssets.invalidateCachedVideo(context, mediaId)
+                        isBuffering = false
                         playbackFailed = true
                     }
                 }
@@ -351,7 +423,7 @@ fun MomiVideoPlayer(
                             musicPlayer?.pause()
                         }
                         Lifecycle.Event.ON_RESUME -> {
-                            val shouldPlay = currentIsPlaying && !currentUserPaused
+                            val shouldPlay = !currentUserPaused
                             exoPlayer.playWhenReady = shouldPlay
                             if (shouldPlay) exoPlayer.play()
                             musicPlayer?.let { mp ->
@@ -386,7 +458,6 @@ fun MomiVideoPlayer(
                 )
             }
 
-            // Gesture overlay: single-tap toggles play/pause, double-tap triggers like
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -441,6 +512,70 @@ fun MomiVideoPlayer(
                     )
                 }
             }
+        } else if (!isPlaying && activeUri != null && !playbackFailed) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.45f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.PlayArrow,
+                    contentDescription = "Video ready",
+                    tint = Color.White,
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+        }
+
+        if ((isLoadingRemoteVideo && playableUri == null) || (isBuffering && !userPaused && !playbackFailed)) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.55f)),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(
+                    color = Color.White,
+                    strokeWidth = 2.5.dp,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+        }
+
+        if (playbackFailed) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(Color.Black.copy(alpha = 0.72f))
+                    .clickable {
+                        MediaAssets.invalidateCachedVideo(context, mediaId)
+                        playbackFailed = false
+                        playableUri = null
+                        retryNonce++
+                    }
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Refresh,
+                    contentDescription = "Retry video",
+                    tint = Color.White,
+                    modifier = Modifier.size(16.dp)
+                )
+                Text(
+                    text = "Tap to retry video",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
         }
 
         if (showDurationBadge) {
@@ -471,7 +606,7 @@ fun MomiVideoPlayer(
             }
         }
 
-        if (showMuteButton && (playableUri != null && !playbackFailed || playableMusicUri != null)) {
+        if (showMuteButton && ((playableUri != null && !playbackFailed) || playableMusicUri != null)) {
             Box(
                 modifier = Modifier
                     .align(muteButtonAlignment)

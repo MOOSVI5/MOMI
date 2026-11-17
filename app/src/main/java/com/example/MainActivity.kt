@@ -2,6 +2,7 @@ package com.example
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -9,24 +10,34 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddBox
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SmartDisplay
+import androidx.compose.material.icons.filled.Storefront
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.outlined.AddBox
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.SmartDisplay
+import androidx.compose.material.icons.outlined.Storefront
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -38,6 +49,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -47,10 +59,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.credentials.CredentialManager
 import androidx.lifecycle.ViewModelProvider
@@ -66,18 +80,22 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.auth.authStateFlow
+import com.example.auth.configureAppCheck
 import com.example.auth.signOut
 import com.example.data.model.Post
+import com.example.data.repository.MarketplaceRepository
 import com.example.data.repository.MomiFirestoreRepository
 import com.example.ui.components.CommentsBottomSheet
+import com.example.ui.components.FloatingMomiAssistantButton
 import com.example.ui.components.LocalRemoteVideoResolver
 import com.example.ui.components.LumaAvatar
-import android.net.Uri
+import com.example.ui.components.MomiAiAssistantBottomSheet
 import com.example.ui.screens.CreatePostScreen
 import com.example.ui.screens.ExploreScreen
 import com.example.ui.screens.GoLiveScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.LiveViewerScreen
+import com.example.ui.screens.MarketplaceScreen
 import com.example.ui.screens.MessagesScreen
 import com.example.ui.screens.NotificationsScreen
 import com.example.ui.screens.PostDetailScreen
@@ -104,6 +122,7 @@ private object LumaRoutes {
     const val CREATE = "create?story={story}"
     const val CLIPS = "clips"
     const val PROFILE = "profile"
+    const val MARKETPLACE = "marketplace"
     const val USER_PROFILE = "user/{userId}?username={username}&showcase={showcase}"
     const val NOTIFICATIONS = "notifications"
     const val MESSAGES = "messages?threadId={threadId}"
@@ -145,8 +164,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        configureAppCheck(this, intent)
 
         runCatching {
+            StartAppSDK.setTestAdsEnabled(BuildConfig.DEBUG)
             StartAppSDK.init(this, BuildConfig.STARTIO_APP_ID, false)
             StartAppAd.disableSplash()
         }
@@ -199,6 +220,7 @@ private fun AppNavigation(
                         val db = FirebaseFirestore.getInstance(app.getString(R.string.firestore_database_id))
                         MomiViewModel(
                             repository = MomiFirestoreRepository(db),
+                            marketplaceRepository = MarketplaceRepository(db),
                             currentUserId = uid,
                             initialDisplayName = user.displayName,
                             initialEmail = user.email
@@ -262,6 +284,15 @@ private fun LumaApp(
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val selectedCategory by viewModel.selectedExploreCategory.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
+    val statusNotice by viewModel.statusNotice.collectAsStateWithLifecycle()
+    val isSendingChatMedia by viewModel.isSendingChatMedia.collectAsStateWithLifecycle()
+    val merchants by viewModel.merchants.collectAsStateWithLifecycle()
+    val marketProducts by viewModel.marketProducts.collectAsStateWithLifecycle()
+    val marketOrders by viewModel.marketOrders.collectAsStateWithLifecycle()
+    val availableUpdate by viewModel.availableUpdate.collectAsStateWithLifecycle()
+    val aiMessages by viewModel.aiMessages.collectAsStateWithLifecycle()
+    val aiUiState by viewModel.aiUiState.collectAsStateWithLifecycle()
+    var showAiAssistantSheet by remember { mutableStateOf(false) }
 
     val activeCommentPostId by viewModel.activeCommentPostId.collectAsStateWithLifecycle()
     val activeComments by viewModel.activeComments.collectAsStateWithLifecycle()
@@ -272,11 +303,24 @@ private fun LumaApp(
         viewModel.clearError()
     }
 
+    LaunchedEffect(statusNotice) {
+        val message = statusNotice ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(message)
+        viewModel.clearStatusNotice()
+    }
+
     val showBottomBar = currentRoute in listOf(
         LumaRoutes.HOME,
         LumaRoutes.EXPLORE,
         LumaRoutes.CLIPS,
         LumaRoutes.PROFILE
+    )
+
+    val showAssistantFab = currentRoute in listOf(
+        LumaRoutes.HOME,
+        LumaRoutes.EXPLORE,
+        LumaRoutes.PROFILE,
+        LumaRoutes.MARKETPLACE
     )
 
     fun sharePostExternally(post: Post) {
@@ -389,6 +433,18 @@ private fun LumaApp(
                                 modifier = Modifier.testTag(tab.testTag)
                             )
                         }
+                        NavigationRailItem(
+                            selected = currentRoute == LumaRoutes.MARKETPLACE,
+                            onClick = { navController.navigate(LumaRoutes.MARKETPLACE) },
+                            icon = {
+                                Icon(
+                                    imageVector = if (currentRoute == LumaRoutes.MARKETPLACE) Icons.Filled.Storefront else Icons.Outlined.Storefront,
+                                    contentDescription = "Market"
+                                )
+                            },
+                            label = { Text("Market") },
+                            modifier = Modifier.testTag("rail_marketplace")
+                        )
                     }
                 }
 
@@ -408,6 +464,7 @@ private fun LumaApp(
                                 unreadNotificationCount = unreadNotifications,
                                 unreadMessageCount = unreadMessages,
                                 onOpenSearch = { navigatePrimaryTab(LumaRoutes.EXPLORE) },
+                                onOpenMarketplace = { navController.navigate(LumaRoutes.MARKETPLACE) },
                                 onOpenNotifications = { navController.navigate(LumaRoutes.NOTIFICATIONS) },
                                 onOpenMessages = { navController.navigate(LumaRoutes.messagesRoute()) },
                                 onOpenStory = { story -> navController.navigate(LumaRoutes.storyRoute(story.id)) },
@@ -499,11 +556,12 @@ private fun LumaApp(
                             CreatePostScreen(
                                 initialModeStory = startAsStory,
                                 onClose = { navController.popBackStack() },
-                                onPublishPost = { imageKey, localPath, mediaType, localVideoPath, videoDurationMs, audioTitle, localAudioPath, filter, caption, location, category, isReel, onFinished ->
+                                onPublishPost = { imageKey, localPath, extraImagePaths, mediaType, localVideoPath, videoDurationMs, audioTitle, localAudioPath, filter, caption, location, category, isReel, onFinished ->
                                     viewModel.createPost(
                                         context = context,
                                         imageKey = imageKey,
                                         localImagePath = localPath,
+                                        localExtraImagePaths = extraImagePaths,
                                         mediaType = mediaType,
                                         localVideoPath = localVideoPath,
                                         videoDurationMs = videoDurationMs,
@@ -618,7 +676,63 @@ private fun LumaApp(
                                 onOpenUserProfile = { targetUid ->
                                     openUserProfile(targetUid)
                                 },
+                                appVersionName = BuildConfig.VERSION_NAME,
+                                onCheckForUpdates = { viewModel.checkForUpdates(manual = true) },
                                 onSignOut = onSignOut
+                            )
+                        }
+
+                        composable(LumaRoutes.MARKETPLACE) {
+                            MarketplaceScreen(
+                                profile = profile,
+                                currentUserId = viewModel.currentUserId,
+                                isAdminUser = viewModel.isAdminUser,
+                                merchants = merchants,
+                                products = marketProducts,
+                                orders = marketOrders,
+                                onBack = { navController.popBackStack() },
+                                onCreateOrUpdateMerchant = { storeName, tagline, category, location, onDone ->
+                                    viewModel.createOrUpdateMerchant(
+                                        storeName = storeName,
+                                        tagline = tagline,
+                                        category = category,
+                                        location = location,
+                                        onComplete = onDone
+                                    )
+                                },
+                                onSetMerchantVerified = { merchantUid, verified ->
+                                    viewModel.setMerchantVerified(merchantUid, verified)
+                                },
+                                onPublishProduct = { merchant, title, description, category, priceUsd, originalPriceUsd, freeShipping, imagePaths, localVideoPath, videoDurationMs, stockCount, onDone ->
+                                    viewModel.publishMarketProduct(
+                                        context = context,
+                                        merchant = merchant,
+                                        title = title,
+                                        description = description,
+                                        category = category,
+                                        priceUsd = priceUsd,
+                                        originalPriceUsd = originalPriceUsd,
+                                        freeShipping = freeShipping,
+                                        imagePaths = imagePaths,
+                                        localVideoPath = localVideoPath,
+                                        videoDurationMs = videoDurationMs,
+                                        stockCount = stockCount,
+                                        onComplete = onDone
+                                    )
+                                },
+                                onDeleteProduct = { productId -> viewModel.deleteMarketProduct(productId) },
+                                onPlaceOrder = { product, address, onDone ->
+                                    viewModel.placeMarketOrder(product, address, onDone)
+                                },
+                                onUpdateOrderStatus = { orderId, status ->
+                                    viewModel.updateMarketOrderStatus(orderId, status)
+                                },
+                                onMessageSeller = { sellerUid ->
+                                    viewModel.startDirectChatWithUid(sellerUid) { thread ->
+                                        navController.navigate(LumaRoutes.messagesRoute(thread.id))
+                                    }
+                                },
+                                modifier = Modifier.navigationBarsPadding()
                             )
                         }
 
@@ -708,10 +822,14 @@ private fun LumaApp(
                                 allCreators = allCreators,
                                 threads = messageThreads,
                                 initialThreadId = initialThreadId,
+                                isSendingMedia = isSendingChatMedia,
                                 observeChatMessages = viewModel::observeChatMessages,
                                 onStartChat = viewModel::startDirectChat,
                                 onClearUnread = viewModel::clearThreadUnread,
                                 onSendMessage = viewModel::sendMessage,
+                                onSendPhoto = { thread, path -> viewModel.sendPhotoMessage(thread, path) },
+                                onSendVideo = { thread, path, dur -> viewModel.sendVideoMessage(context, thread, path, dur) },
+                                onSendAudio = { thread, path, dur -> viewModel.sendVoiceMessage(context, thread, path, dur) },
                                 onBack = { navController.popBackStack() }
                             )
                         }
@@ -825,10 +943,88 @@ private fun LumaApp(
                             )
                         }
                     }
+
+                    if (showAssistantFab) {
+                        FloatingMomiAssistantButton(
+                            onClick = { showAiAssistantSheet = true },
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .then(if (currentRoute == LumaRoutes.MARKETPLACE) Modifier.navigationBarsPadding() else Modifier)
+                                .padding(end = 16.dp, bottom = 16.dp)
+                        )
+                    }
                 }
             }
         }
     }
+    }
+
+    if (showAiAssistantSheet) {
+        MomiAiAssistantBottomSheet(
+            messages = aiMessages,
+            uiState = aiUiState,
+            onSendPrompt = viewModel::sendAiPrompt,
+            onDismiss = { showAiAssistantSheet = false }
+        )
+    }
+
+    availableUpdate?.let { update ->
+        AlertDialog(
+            onDismissRequest = viewModel::dismissAvailableUpdate,
+            icon = {
+                Icon(
+                    imageVector = Icons.Filled.SystemUpdate,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            },
+            title = {
+                Text(
+                    text = "Update Available (v${update.latestVersionName})",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column {
+                    Text(
+                        text = update.releaseTitle,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = update.releaseNotes,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Installed: v${BuildConfig.VERSION_NAME}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.dismissAvailableUpdate()
+                        runCatching {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse(update.downloadUrl))
+                            )
+                        }
+                    }
+                ) {
+                    Text("Update Now")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::dismissAvailableUpdate) {
+                    Text("Later")
+                }
+            }
+        )
     }
 
     if (activeCommentPostId != null) {

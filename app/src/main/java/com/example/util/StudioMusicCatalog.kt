@@ -3,9 +3,24 @@ package com.example.util
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Base64
+import androidx.annotation.OptIn
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.transformer.Composition
+import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.ExportException
+import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.Transformer
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
+import kotlin.coroutines.resume
 import kotlin.math.PI
 import kotlin.math.sin
 
@@ -23,6 +38,8 @@ data class StudioTrack(
 }
 
 object StudioMusicCatalog {
+    private const val MAX_INLINE_AUDIO_BYTES = 450_000L
+    private const val MAX_INLINE_AUDIO_BASE64 = 640_000
 
     val tracks: List<StudioTrack> = listOf(
         StudioTrack(
@@ -109,7 +126,9 @@ object StudioMusicCatalog {
     fun resolvePlayableMusicUri(
         context: Context,
         localAudioPath: String?,
-        audioTitle: String
+        audioTitle: String,
+        audioData: String? = null,
+        cacheKey: String = ""
     ): Uri? {
         if (!localAudioPath.isNullOrBlank()) {
             val file = File(localAudioPath)
@@ -117,9 +136,108 @@ object StudioMusicCatalog {
                 return Uri.fromFile(file)
             }
         }
+        if (!audioData.isNullOrBlank()) {
+            decodeAudioBase64ToCacheUri(context, cacheKey.ifBlank { audioData.hashCode().toString() }, audioData)
+                ?.let { return it }
+        }
         val preset = findByAudioTitle(audioTitle) ?: return null
         val wavFile = ensurePresetWavFile(context, preset)
         return if (wavFile.exists() && wavFile.length() > 44L) Uri.fromFile(wavFile) else null
+    }
+
+    fun decodeAudioBase64ToCacheUri(context: Context, key: String, audioData: String?): Uri? {
+        if (audioData.isNullOrBlank()) return null
+        return runCatching {
+            val dir = File(context.cacheDir, "momi_audio_cache")
+            if (!dir.exists()) dir.mkdirs()
+            val safeKey = key.replace(Regex("[^a-zA-Z0-9_\\-]"), "_").ifBlank { "audio" }
+            val outFile = File(dir, "$safeKey.m4a")
+            if (!outFile.exists() || outFile.length() == 0L) {
+                val decoded = Base64.decode(audioData, Base64.DEFAULT)
+                if (decoded.isEmpty()) return null
+                val temp = File(dir, "$safeKey.${UUID.randomUUID()}.tmp")
+                temp.writeBytes(decoded)
+                if (!temp.renameTo(outFile)) {
+                    temp.copyTo(outFile, overwrite = true)
+                    temp.delete()
+                }
+            }
+            if (outFile.exists() && outFile.length() > 0L) Uri.fromFile(outFile) else null
+        }.getOrNull()
+    }
+
+    /**
+     * Prepares a picked song or recorded voice clip as compact Base64 (<= 640 KB chars) for Firestore sync.
+     * Automatically trims & AAC-compresses tracks > 450 KB to a 24-second highlight clip via Media3 Transformer.
+     */
+    @OptIn(UnstableApi::class)
+    suspend fun encodeAudioForFirestore(context: Context, localAudioPath: String?): String? {
+        if (localAudioPath.isNullOrBlank()) return null
+        val file = File(localAudioPath)
+        if (!file.exists() || file.length() == 0L) return null
+
+        if (file.length() <= MAX_INLINE_AUDIO_BYTES) {
+            return withContext(Dispatchers.IO) {
+                runCatching {
+                    val b64 = Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
+                    if (b64.length <= MAX_INLINE_AUDIO_BASE64) b64 else null
+                }.getOrNull()
+            }
+        }
+
+        val trimmedFile = File(context.cacheDir, "momi_aud_tx_${UUID.randomUUID()}.m4a")
+        val exported = withTimeoutOrNull(25_000L) {
+            withContext(Dispatchers.Main.immediate) {
+                suspendCancellableCoroutine { cont ->
+                    val clippingConfig = MediaItem.ClippingConfiguration.Builder()
+                        .setStartPositionMs(0L)
+                        .setEndPositionMs(24_000L)
+                        .build()
+                    val mediaItem = MediaItem.Builder()
+                        .setUri(Uri.fromFile(file))
+                        .setClippingConfiguration(clippingConfig)
+                        .build()
+                    val edited = EditedMediaItem.Builder(mediaItem)
+                        .setRemoveVideo(true)
+                        .build()
+                    val transformer = Transformer.Builder(context)
+                        .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                        .addListener(object : Transformer.Listener {
+                            override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                                if (cont.isActive) cont.resume(true)
+                            }
+
+                            override fun onError(
+                                composition: Composition,
+                                exportResult: ExportResult,
+                                exportException: ExportException
+                            ) {
+                                if (cont.isActive) cont.resume(false)
+                            }
+                        })
+                        .build()
+                    cont.invokeOnCancellation { runCatching { transformer.cancel() } }
+                    runCatching {
+                        transformer.start(edited, trimmedFile.absolutePath)
+                    }.onFailure {
+                        if (cont.isActive) cont.resume(false)
+                    }
+                }
+            }
+        } ?: false
+
+        return withContext(Dispatchers.IO) {
+            try {
+                if (exported && trimmedFile.exists() && trimmedFile.length() in 1L..MAX_INLINE_AUDIO_BYTES) {
+                    val b64 = Base64.encodeToString(trimmedFile.readBytes(), Base64.NO_WRAP)
+                    if (b64.length <= MAX_INLINE_AUDIO_BASE64) b64 else null
+                } else {
+                    null
+                }
+            } finally {
+                runCatching { trimmedFile.delete() }
+            }
+        }
     }
 
     fun copyPickedAudioToInternalStorage(context: Context, uri: Uri): Pair<String, String>? {
@@ -181,23 +299,20 @@ object StudioMusicCatalog {
                 val t = i.toDouble() / sampleRate.toDouble()
                 val chord = chords[chordIdx]
 
-                // Smooth pad + warm harmonic chord envelope per bar
                 val fadeIn = (chordProgress / 0.08).coerceIn(0.0, 1.0)
                 val fadeOut = ((1.0 - chordProgress) / 0.12).coerceIn(0.0, 1.0)
                 val env = fadeIn * fadeOut
 
                 var sample = 0.0
-                sample += 0.34 * sin(2.0 * PI * chord[0] * t) // bass root
-                sample += 0.24 * sin(2.0 * PI * chord[1] * t) // triad 1
-                sample += 0.20 * sin(2.0 * PI * chord[2] * t) // triad 3
+                sample += 0.34 * sin(2.0 * PI * chord[0] * t)
+                sample += 0.24 * sin(2.0 * PI * chord[1] * t)
+                sample += 0.20 * sin(2.0 * PI * chord[2] * t)
 
-                // Gentle plucked arpeggio shimmer
                 val arpStep = ((chordPos / (beatSamples / 2)) % 3) + 1
                 val arpPos = (chordPos % (beatSamples / 2)).toDouble() / (beatSamples / 2).toDouble()
                 val arpEnv = (1.0 - arpPos).coerceAtLeast(0.0) * (1.0 - arpPos)
                 sample += 0.18 * arpEnv * sin(2.0 * PI * chord[arpStep.coerceAtMost(chord.lastIndex)] * t)
 
-                // Soft warm sub-kick pulse on beats
                 if (track.rhythmPulse) {
                     val beatPos = (i % beatSamples).toDouble() / sampleRate.toDouble()
                     if (beatPos < 0.14) {
@@ -207,7 +322,6 @@ object StudioMusicCatalog {
                     }
                 }
 
-                // Loop crossfade on track edges so seamless repeat never clicks
                 val loopEdge = minOf(i, totalSamples - 1 - i)
                 val edgeFade = (loopEdge / (sampleRate * 0.06)).coerceIn(0.0, 1.0)
 
@@ -253,7 +367,7 @@ object StudioMusicCatalog {
         writeAscii("WAVE")
         writeAscii("fmt ")
         writeIntLE(16)
-        writeShortLE(1) // PCM
+        writeShortLE(1)
         writeShortLE(channels)
         writeIntLE(sampleRate)
         writeIntLE(byteRate)

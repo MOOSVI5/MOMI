@@ -17,13 +17,19 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Favorite
@@ -252,8 +258,30 @@ fun PostCard(
             }
         }
 
-        // Edge-to-Edge Media with Double-Tap Coral Heart (or Live ExoPlayer for Video Posts)
+        // Edge-to-Edge Media with Double-Tap Coral Heart (Carousel HorizontalPager for multi-image posts, ExoPlayer for Videos, Audio for Photo+Music)
         val mediaAspectRatio = if (post.isVideoPost) 0.85f else 1f
+        val imageFrames = remember(post.id, post.imageKey, post.localImagePath, post.imageData, post.localExtraImagePaths, post.extraImageDatas) {
+            post.allImageFrames
+        }
+        val hasPhotoMusic = !post.isVideoPost && (
+            post.audioTitle.isNotBlank() ||
+                !post.localAudioPath.isNullOrBlank() ||
+                !post.audioData.isNullOrBlank()
+            )
+        var localPhotoMuted by remember(post.id) { mutableStateOf(true) }
+        val isPhotoMuted = externalMuted ?: localPhotoMuted
+
+        if (hasPhotoMusic) {
+            MomiMusicAudioPlayer(
+                mediaId = post.id,
+                localAudioPath = post.localAudioPath,
+                audioData = post.audioData,
+                audioTitle = post.audioTitle,
+                isPlaying = isPlaybackActive,
+                isMuted = isPhotoMuted
+            )
+        }
+
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -262,8 +290,14 @@ fun PostCard(
                 .background(if (post.isVideoPost) Color.Black else MaterialTheme.colorScheme.surfaceVariant)
                 .let { base ->
                     if (!post.isVideoPost) {
-                        base.pointerInput(post.id) {
+                        base.pointerInput(post.id, hasPhotoMusic, isPhotoMuted) {
                             detectTapGestures(
+                                onTap = {
+                                    if (hasPhotoMusic) {
+                                        val nextMuted = !isPhotoMuted
+                                        if (onMuteChange != null) onMuteChange(nextMuted) else localPhotoMuted = nextMuted
+                                    }
+                                },
                                 onDoubleTap = {
                                     showDoubleTapHeart = true
                                     onDoubleTapLike()
@@ -289,6 +323,7 @@ fun PostCard(
                     filterTag = post.filterTag,
                     isPlaying = isPlaybackActive,
                     localAudioPath = post.localAudioPath,
+                    audioData = post.audioData,
                     audioTitle = post.audioTitle,
                     initialMuted = true,
                     externalMuted = externalMuted,
@@ -302,6 +337,61 @@ fun PostCard(
                     },
                     modifier = Modifier.fillMaxWidth().aspectRatio(mediaAspectRatio)
                 )
+            } else if (imageFrames.size > 1) {
+                val pagerState = rememberPagerState(pageCount = { imageFrames.size })
+                Box(modifier = Modifier.fillMaxSize()) {
+                    HorizontalPager(
+                        state = pagerState,
+                        modifier = Modifier.fillMaxSize()
+                    ) { page ->
+                        val frame = imageFrames[page]
+                        PostMediaImage(
+                            imageKey = frame.imageKey,
+                            localImagePath = frame.localImagePath,
+                            imageData = frame.imageData,
+                            filterTag = post.filterTag,
+                            contentDescription = "Post ${page + 1} by ${post.authorUsername}",
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(10.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.Black.copy(alpha = 0.6f))
+                            .padding(horizontal = 9.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = "${pagerState.currentPage + 1}/${imageFrames.size}",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 10.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.Black.copy(alpha = 0.42f))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        repeat(imageFrames.size) { dotIdx ->
+                            Box(
+                                modifier = Modifier
+                                    .size(if (pagerState.currentPage == dotIdx) 7.dp else 5.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (pagerState.currentPage == dotIdx) Color.White
+                                        else Color.White.copy(alpha = 0.45f)
+                                    )
+                            )
+                        }
+                    }
+                }
             } else {
                 PostMediaImage(
                     imageKey = post.imageKey,
@@ -311,6 +401,36 @@ fun PostCard(
                     contentDescription = "Post by ${post.authorUsername}",
                     modifier = Modifier.fillMaxWidth().aspectRatio(mediaAspectRatio)
                 )
+            }
+
+            if (hasPhotoMusic) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(12.dp)
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .clickable {
+                            val nextMuted = !isPhotoMuted
+                            if (onMuteChange != null) onMuteChange(nextMuted) else localPhotoMuted = nextMuted
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.62f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (isPhotoMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                            contentDescription = if (isPhotoMuted) "Unmute music" else "Mute music",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
             }
 
             if (post.filterTag != "NONE") {

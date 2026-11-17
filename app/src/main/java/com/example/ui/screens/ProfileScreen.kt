@@ -27,12 +27,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.filled.AddBox
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SmartDisplay
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.DarkMode
@@ -120,6 +122,8 @@ fun ProfileScreen(
     onToggleUserVerified: (UserProfile, Boolean) -> Unit = { _, _ -> },
     onMessageCreator: (UserProfile) -> Unit,
     onOpenUserProfile: (String) -> Unit = {},
+    appVersionName: String = "",
+    onCheckForUpdates: () -> Unit = {},
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -444,6 +448,34 @@ fun ProfileScreen(
                             fontWeight = FontWeight.Bold
                         )
                     }
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        showSettingsSheet = false
+                        onCheckForUpdates()
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("check_updates_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.SystemUpdate,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (appVersionName.isNotBlank()) {
+                            "Check for updates (v$appVersionName)"
+                        } else {
+                            "Check for updates"
+                        },
+                        fontWeight = FontWeight.Bold
+                    )
                 }
 
                 HorizontalDivider(
@@ -1008,6 +1040,22 @@ fun ProfileScreen(
                                                 fontWeight = FontWeight.SemiBold
                                             )
                                         }
+                                    }
+                                } else if (post.allImageFrames.size > 1) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .padding(6.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(Color.Black.copy(alpha = 0.6f))
+                                            .padding(horizontal = 5.dp, vertical = 4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.Collections,
+                                            contentDescription = "Multiple photos",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(13.dp)
+                                        )
                                     }
                                 }
                             }

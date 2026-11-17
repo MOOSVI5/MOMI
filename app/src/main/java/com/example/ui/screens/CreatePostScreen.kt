@@ -24,12 +24,19 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.outlined.LocationOn
@@ -67,6 +74,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.ui.components.MomiMusicAudioPlayer
 import com.example.ui.components.MomiVideoPlayer
 import com.example.ui.components.PostMediaImage
 import com.example.util.MediaAssets
@@ -91,6 +100,7 @@ fun CreatePostScreen(
     onPublishPost: (
         imageKey: String,
         localImagePath: String?,
+        localExtraImagePaths: List<String>,
         mediaType: String,
         localVideoPath: String?,
         videoDurationMs: Long,
@@ -123,11 +133,13 @@ fun CreatePostScreen(
     var isStoryMode by remember { mutableStateOf(initialModeStory) }
     var selectedImageKey by remember { mutableStateOf("img_post_coastal") }
     var localImagePath by remember { mutableStateOf<String?>(null) }
+    var localExtraImagePaths by remember { mutableStateOf<List<String>>(emptyList()) }
     var mediaType by remember { mutableStateOf("IMAGE") }
     var localVideoPath by remember { mutableStateOf<String?>(null) }
     var videoDurationMs by remember { mutableLongStateOf(0L) }
     var selectedAudioTitle by remember { mutableStateOf("") }
     var localAudioPath by remember { mutableStateOf<String?>(null) }
+    var previewMuted by remember { mutableStateOf(false) }
     var selectedFilter by remember { mutableStateOf("NONE") }
     var caption by remember { mutableStateOf("") }
     var location by remember { mutableStateOf("") }
@@ -136,7 +148,30 @@ fun CreatePostScreen(
     var isProcessingMedia by remember { mutableStateOf(false) }
     var isPublishing by remember { mutableStateOf(false) }
 
-    val photoPickerLauncher = rememberLauncherForActivityResult(
+    val multiPhotoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia(5)
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            isProcessingMedia = true
+            coroutineScope.launch {
+                val savedPaths = withContext(Dispatchers.IO) {
+                    uris.take(5).mapNotNull { uri ->
+                        MediaAssets.copyPickedImageToInternalStorage(context, uri)
+                    }
+                }
+                if (savedPaths.isNotEmpty()) {
+                    localImagePath = savedPaths.first()
+                    localExtraImagePaths = savedPaths.drop(1)
+                    localVideoPath = null
+                    videoDurationMs = 0L
+                    mediaType = "IMAGE"
+                }
+                isProcessingMedia = false
+            }
+        }
+    }
+
+    val singlePhotoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
@@ -147,6 +182,7 @@ fun CreatePostScreen(
                 }
                 if (savedPath != null) {
                     localImagePath = savedPath
+                    localExtraImagePaths = emptyList()
                     localVideoPath = null
                     videoDurationMs = 0L
                     mediaType = "IMAGE"
@@ -168,6 +204,7 @@ fun CreatePostScreen(
                 if (extracted != null) {
                     localVideoPath = extracted.localVideoPath
                     localImagePath = extracted.thumbnailPath
+                    localExtraImagePaths = emptyList()
                     videoDurationMs = extracted.durationMs
                     mediaType = "VIDEO"
                     shareAsClip = true
@@ -250,6 +287,7 @@ fun CreatePostScreen(
                         onPublishPost(
                             selectedImageKey,
                             localImagePath,
+                            localExtraImagePaths,
                             mediaType,
                             localVideoPath,
                             videoDurationMs,
@@ -358,6 +396,14 @@ fun CreatePostScreen(
                 .padding(bottom = 24.dp)
         ) {
             // Preview Canvas
+            val allSelectedPhotoPaths = remember(localImagePath, localExtraImagePaths, mediaType) {
+                if (mediaType == "IMAGE" && localImagePath != null) {
+                    listOfNotNull(localImagePath) + localExtraImagePaths
+                } else {
+                    emptyList()
+                }
+            }
+            val hasSelectedMusic = selectedAudioTitle.isNotBlank() || !localAudioPath.isNullOrBlank()
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -368,7 +414,7 @@ fun CreatePostScreen(
             ) {
                 if (mediaType == "VIDEO" && localVideoPath != null) {
                     MomiVideoPlayer(
-                        mediaId = "${localVideoPath}_${selectedAudioTitle}_${localAudioPath.orEmpty()}",
+                        mediaId = localVideoPath.orEmpty(),
                         localVideoPath = localVideoPath,
                         videoData = null,
                         videoDurationMs = videoDurationMs,
@@ -385,6 +431,63 @@ fun CreatePostScreen(
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize()
                     )
+                } else if (!isStoryMode && allSelectedPhotoPaths.size > 1) {
+                    val pagerState = rememberPagerState(pageCount = { allSelectedPhotoPaths.size })
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        HorizontalPager(
+                            state = pagerState,
+                            modifier = Modifier.fillMaxSize()
+                        ) { page ->
+                            PostMediaImage(
+                                imageKey = selectedImageKey,
+                                localImagePath = allSelectedPhotoPaths[page],
+                                filterTag = selectedFilter,
+                                contentDescription = "Selected photo ${page + 1}",
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(12.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color.Black.copy(alpha = 0.65f))
+                                .padding(horizontal = 10.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Collections,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = "${pagerState.currentPage + 1}/${allSelectedPhotoPaths.size}",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            repeat(allSelectedPhotoPaths.size) { idx ->
+                                Box(
+                                    modifier = Modifier
+                                        .size(if (idx == pagerState.currentPage) 8.dp else 6.dp)
+                                        .clip(CircleShape)
+                                        .background(
+                                            if (idx == pagerState.currentPage) Color.White
+                                            else Color.White.copy(alpha = 0.45f)
+                                        )
+                                )
+                            }
+                        }
+                    }
                 } else {
                     PostMediaImage(
                         imageKey = selectedImageKey,
@@ -393,6 +496,33 @@ fun CreatePostScreen(
                         contentDescription = "Selected post preview",
                         modifier = Modifier.fillMaxSize()
                     )
+                }
+
+                if (mediaType != "VIDEO" && hasSelectedMusic) {
+                    MomiMusicAudioPlayer(
+                        mediaId = "preview_${selectedAudioTitle}_${localAudioPath.orEmpty()}",
+                        localAudioPath = localAudioPath,
+                        audioData = null,
+                        audioTitle = selectedAudioTitle,
+                        isPlaying = true,
+                        isMuted = previewMuted
+                    )
+                    IconButton(
+                        onClick = { previewMuted = !previewMuted },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(12.dp)
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.65f))
+                    ) {
+                        Icon(
+                            imageVector = if (previewMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                            contentDescription = if (previewMuted) "Unmute preview music" else "Mute preview music",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
 
                 if (isProcessingMedia || isPublishing) {
@@ -435,7 +565,7 @@ fun CreatePostScreen(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Photo or Video",
+                        text = if (isStoryMode) "Photo or Video" else "Up to 5 Photos or 1 Video",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -448,9 +578,12 @@ fun CreatePostScreen(
                     OutlinedButton(
                         enabled = !isProcessingMedia && !isPublishing,
                         onClick = {
-                            photoPickerLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                            )
+                            val req = PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            if (isStoryMode) {
+                                singlePhotoPickerLauncher.launch(req)
+                            } else {
+                                multiPhotoPickerLauncher.launch(req)
+                            }
                         },
                         shape = RoundedCornerShape(14.dp),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
@@ -466,7 +599,7 @@ fun CreatePostScreen(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Photo",
+                            text = if (isStoryMode) "Photo" else "Photos (1-5)",
                             maxLines = 1,
                             softWrap = false,
                             fontWeight = FontWeight.SemiBold
@@ -500,6 +633,45 @@ fun CreatePostScreen(
                         )
                     }
                 }
+                if (!isStoryMode && localExtraImagePaths.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        itemsIndexed(localExtraImagePaths) { idx, extraPath ->
+                            Box(
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                            ) {
+                                PostMediaImage(
+                                    imageKey = selectedImageKey,
+                                    localImagePath = extraPath,
+                                    filterTag = selectedFilter,
+                                    contentDescription = "Extra photo ${idx + 2}",
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(3.dp)
+                                        .size(20.dp)
+                                        .clip(CircleShape)
+                                        .background(Color.Black.copy(alpha = 0.7f))
+                                        .clickable {
+                                            localExtraImagePaths = localExtraImagePaths.filterIndexed { i, _ -> i != idx }
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Close,
+                                        contentDescription = "Remove photo",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -514,6 +686,7 @@ fun CreatePostScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.clickable {
                             localImagePath = null
+                            localExtraImagePaths = emptyList()
                             localVideoPath = null
                             videoDurationMs = 0L
                             mediaType = "IMAGE"

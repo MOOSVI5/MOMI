@@ -23,8 +23,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.MusicNote
@@ -56,6 +59,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.PaddingValues
 import com.example.data.model.Story
 import com.example.ui.components.LumaAvatar
+import com.example.ui.components.MomiMusicAudioPlayer
 import com.example.ui.components.MomiVideoPlayer
 import com.example.ui.components.PostMediaImage
 import com.example.ui.theme.DarkBackground
@@ -86,6 +90,7 @@ fun StoryViewerScreen(
     var currentIndex by remember { mutableIntStateOf(startIndex) }
     var progress by remember { mutableFloatStateOf(0f) }
     var isPaused by remember { mutableStateOf(false) }
+    var storyMuted by remember { mutableStateOf(false) }
     var liked by remember(currentIndex) { mutableStateOf(false) }
 
     val currentStory = stories.getOrNull(currentIndex) ?: stories.first()
@@ -165,8 +170,11 @@ fun StoryViewerScreen(
                 filterTag = "NONE",
                 isPlaying = !isPaused,
                 localAudioPath = currentStory.localAudioPath,
+                audioData = currentStory.audioData,
                 audioTitle = currentStory.audioTitle,
                 initialMuted = false,
+                externalMuted = storyMuted,
+                onMuteChange = { storyMuted = it },
                 showMuteButton = true,
                 showDurationBadge = false,
                 muteButtonAlignment = Alignment.TopEnd,
@@ -183,6 +191,35 @@ fun StoryViewerScreen(
                 contentDescription = "Story by ${currentStory.username}",
                 modifier = Modifier.fillMaxSize()
             )
+            val hasMusic = currentStory.audioTitle.isNotBlank() ||
+                !currentStory.localAudioPath.isNullOrBlank() ||
+                !currentStory.audioData.isNullOrBlank()
+            if (hasMusic) {
+                MomiMusicAudioPlayer(
+                    mediaId = currentStory.id,
+                    localAudioPath = currentStory.localAudioPath,
+                    audioData = currentStory.audioData,
+                    audioTitle = currentStory.audioTitle,
+                    isPlaying = !isPaused,
+                    isMuted = storyMuted
+                )
+                IconButton(
+                    onClick = { storyMuted = !storyMuted },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 92.dp, end = 14.dp)
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.6f))
+                ) {
+                    Icon(
+                        imageVector = if (storyMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                        contentDescription = if (storyMuted) "Unmute story music" else "Mute story music",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
         }
 
         // Top Scrim + Progress Segments + Header

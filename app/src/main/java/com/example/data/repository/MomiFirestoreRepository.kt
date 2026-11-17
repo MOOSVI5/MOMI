@@ -715,6 +715,8 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         imageKey: String,
         localImagePath: String?,
         imageData: String?,
+        localExtraImagePaths: List<String> = emptyList(),
+        extraImageDatas: List<String> = emptyList(),
         mediaType: String = "IMAGE",
         localVideoPath: String? = null,
         videoData: String? = null,
@@ -722,6 +724,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         videoDurationMs: Long = 0L,
         audioTitle: String = "",
         localAudioPath: String? = null,
+        audioData: String? = null,
         filterTag: String,
         caption: String,
         location: String,
@@ -733,6 +736,8 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         val resolvedAudioTitle = audioTitle.trim().take(120).ifBlank {
             if (isReel || mediaType == "VIDEO") "${profile.displayName} · Original Audio" else ""
         }
+        val safeExtraPaths = localExtraImagePaths.filter { it.isNotBlank() }.take(4).map { it.take(500) }
+        val safeExtraDatas = extraImageDatas.filter { it.isNotBlank() }.take(4)
         val payload = buildMap<String, Any> {
             put("userId", uid)
             put("authorUsername", profile.username)
@@ -743,12 +748,15 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             put("imageKey", imageKey)
             if (!localImagePath.isNullOrBlank()) put("localImagePath", localImagePath.take(500))
             if (!imageData.isNullOrBlank()) put("imageData", imageData)
+            if (safeExtraPaths.isNotEmpty()) put("localExtraImagePaths", safeExtraPaths)
+            if (safeExtraDatas.isNotEmpty()) put("extraImageDatas", safeExtraDatas)
             put("mediaType", mediaType)
             if (!localVideoPath.isNullOrBlank()) put("localVideoPath", localVideoPath.take(500))
             if (!videoData.isNullOrBlank()) put("videoData", videoData)
             if (videoChunks.isNotEmpty()) put("videoChunksCount", videoChunks.size.toLong())
             put("videoDurationMs", videoDurationMs.coerceIn(0L, 3_600_000L))
             if (!localAudioPath.isNullOrBlank()) put("localAudioPath", localAudioPath.take(500))
+            if (!audioData.isNullOrBlank()) put("audioData", audioData)
             put("filterTag", filterTag)
             put("caption", caption.trim().take(1000))
             put("likesCount", 0L)
@@ -791,6 +799,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         videoDurationMs: Long = 0L,
         audioTitle: String = "",
         localAudioPath: String? = null,
+        audioData: String? = null,
         caption: String
     ): Result<String> = runCatching {
         val uid = requireUserId()
@@ -809,6 +818,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             put("videoDurationMs", videoDurationMs.coerceIn(0L, 3_600_000L))
             if (audioTitle.isNotBlank()) put("audioTitle", audioTitle.trim().take(120))
             if (!localAudioPath.isNullOrBlank()) put("localAudioPath", localAudioPath.take(500))
+            if (!audioData.isNullOrBlank()) put("audioData", audioData)
             put("caption", caption.ifBlank { "Shared a moment" }.take(300))
             put("createdAt", FieldValue.serverTimestamp())
             put("updatedAt", FieldValue.serverTimestamp())
@@ -862,7 +872,11 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     ): List<String> {
         requireUserId()
         if (mediaId.isBlank() || mediaId.startsWith("showcase_")) return emptyList()
-        val safeCollection = if (collectionName == "stories") "stories" else "posts"
+        val safeCollection = when (collectionName) {
+            "stories" -> "stories"
+            "marketProducts" -> "marketProducts"
+            else -> "posts"
+        }
         val chunksRef = db.collection(safeCollection).document(mediaId).collection("videoChunks")
         val retryDelaysMs = longArrayOf(600L, 1000L, 1500L, 2000L, 2500L)
 
@@ -1144,23 +1158,61 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         thread: MessageThread,
         senderProfile: UserProfile,
         text: String
+    ): Result<String> = sendMediaMessage(
+        thread = thread,
+        senderProfile = senderProfile,
+        messageType = "TEXT",
+        caption = text
+    )
+
+    suspend fun sendMediaMessage(
+        thread: MessageThread,
+        senderProfile: UserProfile,
+        messageType: String,
+        caption: String = "",
+        imageData: String? = null,
+        videoData: String? = null,
+        videoDurationMs: Long = 0L,
+        audioData: String? = null,
+        audioDurationMs: Long = 0L
     ): Result<String> = runCatching {
         val uid = requireUserId()
         require(thread.id.isNotBlank()) { "Thread ID must not be blank" }
-        val trimmed = text.trim()
-        require(trimmed.isNotEmpty()) { "Message text must not be empty" }
+        val normalizedType = messageType.uppercase().takeIf { it in setOf("TEXT", "IMAGE", "VIDEO", "AUDIO") } ?: "TEXT"
+        val trimmed = caption.trim()
+        val displayText = when (normalizedType) {
+            "IMAGE" -> trimmed.ifBlank { "Photo" }
+            "VIDEO" -> trimmed.ifBlank { "Video clip" }
+            "AUDIO" -> trimmed.ifBlank { "Voice message" }
+            else -> {
+                require(trimmed.isNotEmpty()) { "Message text must not be empty" }
+                trimmed
+            }
+        }
+        val summaryPreview = when (normalizedType) {
+            "IMAGE" -> "Photo"
+            "VIDEO" -> "Video clip"
+            "AUDIO" -> "Voice message"
+            else -> displayText.take(500)
+        }
 
         val threadRef = threadsCol().document(thread.id)
         val msgRef = threadRef.collection("messages").document()
         val peerUid = thread.peerUidFor(uid)
 
-        val msgPayload = mapOf(
-            "participantUids" to thread.participantUids,
-            "senderUid" to uid,
-            "senderUsername" to senderProfile.username.ifBlank { "creator" }.take(50),
-            "text" to trimmed.take(1000),
-            "createdAt" to FieldValue.serverTimestamp()
-        )
+        val msgPayload = buildMap<String, Any> {
+            put("participantUids", thread.participantUids)
+            put("senderUid", uid)
+            put("senderUsername", senderProfile.username.ifBlank { "creator" }.take(50))
+            put("text", displayText.take(1000))
+            put("messageType", normalizedType)
+            if (!imageData.isNullOrBlank()) put("imageData", imageData)
+            if (!videoData.isNullOrBlank()) put("videoData", videoData)
+            if (videoDurationMs > 0L) put("videoDurationMs", videoDurationMs.coerceIn(0L, 3_600_000L))
+            if (!audioData.isNullOrBlank()) put("audioData", audioData)
+            if (audioDurationMs > 0L) put("audioDurationMs", audioDurationMs.coerceIn(0L, 600_000L))
+            put("createdAt", FieldValue.serverTimestamp())
+        }
 
         try {
             db.runTransaction { transaction ->
@@ -1173,7 +1225,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                 transaction.update(
                     threadRef,
                     mapOf(
-                        "lastMessage" to trimmed.take(500),
+                        "lastMessage" to summaryPreview,
                         "lastSenderUid" to uid,
                         "timeLabel" to "now",
                         "unreadUid" to peerUid,

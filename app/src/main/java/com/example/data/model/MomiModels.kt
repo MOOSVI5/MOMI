@@ -7,6 +7,12 @@ import com.google.firebase.firestore.IgnoreExtraProperties
 import com.google.firebase.firestore.PropertyName
 import com.google.firebase.firestore.ServerTimestamp
 
+data class MediaFrame(
+    val imageKey: String = "img_post_coastal",
+    val localImagePath: String? = null,
+    val imageData: String? = null
+)
+
 @IgnoreExtraProperties
 data class UserProfile(
     @DocumentId val id: String = "",
@@ -38,6 +44,8 @@ data class Post(
     val imageKey: String = "img_post_coastal",
     val localImagePath: String? = null,
     val imageData: String? = null,
+    val localExtraImagePaths: List<String> = emptyList(),
+    val extraImageDatas: List<String> = emptyList(),
     val mediaType: String = "IMAGE",
     val localVideoPath: String? = null,
     val videoData: String? = null,
@@ -55,11 +63,39 @@ data class Post(
     @get:PropertyName("isReel") val isReel: Boolean = false,
     val audioTitle: String = "",
     val localAudioPath: String? = null,
+    val audioData: String? = null,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     val isVideoPost: Boolean
         get() = mediaType == "VIDEO" || !localVideoPath.isNullOrBlank() || !videoData.isNullOrBlank() || videoChunksCount > 0L
+
+    @get:Exclude
+    val allImageFrames: List<MediaFrame>
+        get() {
+            val frames = mutableListOf(
+                MediaFrame(
+                    imageKey = imageKey,
+                    localImagePath = localImagePath,
+                    imageData = imageData
+                )
+            )
+            val extraCount = maxOf(localExtraImagePaths.size, extraImageDatas.size)
+            for (i in 0 until extraCount) {
+                val path = localExtraImagePaths.getOrNull(i)
+                val data = extraImageDatas.getOrNull(i)
+                if (!path.isNullOrBlank() || !data.isNullOrBlank()) {
+                    frames.add(
+                        MediaFrame(
+                            imageKey = imageKey,
+                            localImagePath = path,
+                            imageData = data
+                        )
+                    )
+                }
+            }
+            return frames
+        }
 }
 
 @IgnoreExtraProperties
@@ -93,6 +129,7 @@ data class Story(
     val videoDurationMs: Long = 0L,
     val audioTitle: String = "",
     val localAudioPath: String? = null,
+    val audioData: String? = null,
     val caption: String = "",
     @get:PropertyName("isSeen") val isSeen: Boolean = false,
     @get:PropertyName("isOwnStory") val isOwnStory: Boolean = false,
@@ -183,6 +220,12 @@ data class ChatMessage(
     val senderUid: String = "",
     val senderUsername: String = "",
     val text: String = "",
+    val messageType: String = "TEXT",
+    val imageData: String? = null,
+    val videoData: String? = null,
+    val videoDurationMs: Long = 0L,
+    val audioData: String? = null,
+    val audioDurationMs: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null
 )
 
@@ -212,4 +255,80 @@ data class LiveComment(
     val avatarKey: String = "avatar_aria",
     val text: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
+data class MerchantAccount(
+    @DocumentId val id: String = "",
+    val userId: String = "",
+    val ownerUsername: String = "",
+    val storeName: String = "",
+    val tagline: String = "",
+    val category: String = "Collectibles",
+    val location: String = "",
+    val avatarKey: String = "avatar_aria",
+    val avatarData: String? = null,
+    @get:PropertyName("isVerified") val isVerified: Boolean = false,
+    val verifiedByEmail: String? = null,
+    val totalSales: Long = 0L,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
+data class MarketProduct(
+    @DocumentId val id: String = "",
+    val sellerUid: String = "",
+    val sellerUsername: String = "",
+    val storeName: String = "",
+    @get:Exclude val sellerVerified: Boolean = false,
+    val title: String = "",
+    val description: String = "",
+    val category: String = "Collectibles",
+    val priceUsd: Double = 0.0,
+    val originalPriceUsd: Double = 0.0,
+    val discountPercent: Long = 0L,
+    @get:PropertyName("freeShipping") val freeShipping: Boolean = true,
+    val imageKey: String = "img_post_coastal",
+    val imageData: String? = null,
+    val extraImageDatas: List<String> = emptyList(),
+    val videoData: String? = null,
+    val videoChunksCount: Long = 0L,
+    val videoDurationMs: Long = 0L,
+    val stockCount: Long = 1L,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    val isVideoProduct: Boolean
+        get() = !videoData.isNullOrBlank() || videoChunksCount > 0L
+
+    @get:Exclude
+    val allProductFrames: List<MediaFrame>
+        get() {
+            val frames = mutableListOf(MediaFrame(imageKey = imageKey, imageData = imageData))
+            extraImageDatas.forEach { data ->
+                if (data.isNotBlank()) {
+                    frames.add(MediaFrame(imageKey = imageKey, imageData = data))
+                }
+            }
+            return frames
+        }
+}
+
+@IgnoreExtraProperties
+data class MarketOrder(
+    @DocumentId val id: String = "",
+    val buyerUid: String = "",
+    val buyerUsername: String = "",
+    val sellerUid: String = "",
+    val sellerStoreName: String = "",
+    val productId: String = "",
+    val productTitle: String = "",
+    val productImageKey: String = "img_post_coastal",
+    val productImageData: String? = null,
+    val priceUsd: Double = 0.0,
+    val shippingAddress: String = "",
+    val status: String = "PLACED",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
 )

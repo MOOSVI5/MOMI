@@ -34,6 +34,8 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Favorite
@@ -70,6 +72,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.Post
 import com.example.ui.components.LumaAvatar
+import com.example.ui.components.MomiMusicAudioPlayer
 import com.example.ui.components.MomiVideoPlayer
 import com.example.ui.components.PostMediaImage
 import com.example.ui.theme.DarkBackground
@@ -242,6 +245,7 @@ private fun ReelPageItem(
                 filterTag = reel.filterTag,
                 isPlaying = isActivePage,
                 localAudioPath = reel.localAudioPath,
+                audioData = reel.audioData,
                 audioTitle = reel.audioTitle,
                 initialMuted = false,
                 showMuteButton = true,
@@ -256,6 +260,10 @@ private fun ReelPageItem(
                 modifier = Modifier.fillMaxSize()
             )
         } else {
+            var clipMuted by remember(reel.id) { mutableStateOf(false) }
+            val hasMusic = reel.audioTitle.isNotBlank() ||
+                !reel.localAudioPath.isNullOrBlank() ||
+                !reel.audioData.isNullOrBlank()
             PostMediaImage(
                 imageKey = reel.imageKey,
                 localImagePath = reel.localImagePath,
@@ -266,6 +274,32 @@ private fun ReelPageItem(
                     .fillMaxSize()
                     .scale(zoomScale)
             )
+            if (hasMusic) {
+                MomiMusicAudioPlayer(
+                    mediaId = reel.id,
+                    localAudioPath = reel.localAudioPath,
+                    audioData = reel.audioData,
+                    audioTitle = reel.audioTitle,
+                    isPlaying = isActivePage,
+                    isMuted = clipMuted
+                )
+                IconButton(
+                    onClick = { clipMuted = !clipMuted },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 92.dp, end = 16.dp)
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.6f))
+                ) {
+                    Icon(
+                        imageVector = if (clipMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                        contentDescription = if (clipMuted) "Unmute clip music" else "Mute clip music",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
         }
 
         // Top & Bottom Scrim

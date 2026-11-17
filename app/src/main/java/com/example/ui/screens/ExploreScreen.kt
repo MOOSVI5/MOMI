@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Verified
@@ -503,6 +504,22 @@ private fun ExploreGridTile(
                         fontWeight = FontWeight.SemiBold
                     )
                 }
+            }
+        } else if (post.allImageFrames.size > 1) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(horizontal = 5.dp, vertical = 4.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Collections,
+                    contentDescription = "Multiple photos",
+                    tint = Color.White,
+                    modifier = Modifier.size(13.dp)
+                )
             }
         }
     }

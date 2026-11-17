@@ -39,6 +39,11 @@ enum class AppColorScheme(
         displayName = "Silk & Maroon",
         subtitle = "Classic Momi Palette",
         gradientColors = ClassicGradientColors
+    ),
+    WHITE_GREY(
+        displayName = "White & Grey",
+        subtitle = "Crisp Minimal Studio",
+        gradientColors = WhiteGreyGradientColors
     )
 }
 
@@ -246,6 +251,48 @@ private val LumaLightColorScheme = lightColorScheme(
     outlineVariant = LightOutline
 )
 
+private val WhiteGreyDarkColorScheme = darkColorScheme(
+    primary = WhiteGreyPrimaryBright,
+    onPrimary = Color(0xFF111827),
+    primaryContainer = Color(0xFF374151),
+    onPrimaryContainer = Color(0xFFF9FAFB),
+    secondary = WhiteGreySecondaryBright,
+    onSecondary = Color(0xFF111827),
+    secondaryContainer = Color(0xFF21242B),
+    onSecondaryContainer = Color(0xFFE5E7EB),
+    tertiary = Color(0xFFD1D5DB),
+    onTertiary = Color(0xFF111827),
+    background = Color(0xFF101114),
+    onBackground = Color(0xFFF3F4F6),
+    surface = Color(0xFF17191D),
+    onSurface = Color(0xFFF3F4F6),
+    surfaceVariant = Color(0xFF252830),
+    onSurfaceVariant = Color(0xFFB3B8C4),
+    outline = Color(0xFF3A3F4B),
+    outlineVariant = Color(0xFF2D313B)
+)
+
+private val WhiteGreyLightColorScheme = lightColorScheme(
+    primary = WhiteGreyPrimary,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFE5E7EB),
+    onPrimaryContainer = Color(0xFF111827),
+    secondary = WhiteGreySecondary,
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFF3F4F6),
+    onSecondaryContainer = Color(0xFF1F2937),
+    tertiary = Color(0xFF374151),
+    onTertiary = Color.White,
+    background = Color(0xFFFFFFFF),
+    onBackground = Color(0xFF111827),
+    surface = Color(0xFFFAFAFA),
+    onSurface = Color(0xFF111827),
+    surfaceVariant = Color(0xFFF1F3F5),
+    onSurfaceVariant = Color(0xFF4B5563),
+    outline = Color(0xFFD1D5DB),
+    outlineVariant = Color(0xFFE5E7EB)
+)
+
 private fun resolveColorScheme(
     appColorScheme: AppColorScheme,
     darkTheme: Boolean
@@ -254,6 +301,7 @@ private fun resolveColorScheme(
     AppColorScheme.EMERALD_GOLD -> if (darkTheme) EmeraldDarkColorScheme else EmeraldLightColorScheme
     AppColorScheme.COBALT_INDIGO -> if (darkTheme) IndigoDarkColorScheme else IndigoLightColorScheme
     AppColorScheme.SILK_MAROON -> if (darkTheme) LumaDarkColorScheme else LumaLightColorScheme
+    AppColorScheme.WHITE_GREY -> if (darkTheme) WhiteGreyDarkColorScheme else WhiteGreyLightColorScheme
 }
 
 @Composable

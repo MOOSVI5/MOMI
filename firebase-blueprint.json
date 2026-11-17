@@ -34,6 +34,8 @@
         "imageKey": { "type": "string" },
         "localImagePath": { "type": "string" },
         "imageData": { "type": "string", "description": "Compressed Base64 JPEG payload for cross-device photo sync." },
+        "localExtraImagePaths": { "type": "array", "items": { "type": "string" } },
+        "extraImageDatas": { "type": "array", "items": { "type": "string" } },
         "mediaType": { "type": "string", "enum": ["IMAGE", "VIDEO"] },
         "localVideoPath": { "type": "string" },
         "videoData": { "type": "string" },
@@ -48,6 +50,7 @@
         "isReel": { "type": "boolean" },
         "audioTitle": { "type": "string" },
         "localAudioPath": { "type": "string" },
+        "audioData": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
@@ -97,6 +100,7 @@
         "videoDurationMs": { "type": "integer" },
         "audioTitle": { "type": "string" },
         "localAudioPath": { "type": "string" },
+        "audioData": { "type": "string" },
         "caption": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
@@ -182,6 +186,12 @@
         "senderUid": { "type": "string" },
         "senderUsername": { "type": "string" },
         "text": { "type": "string" },
+        "messageType": { "type": "string", "enum": ["TEXT", "IMAGE", "VIDEO", "AUDIO"] },
+        "imageData": { "type": "string" },
+        "videoData": { "type": "string" },
+        "videoDurationMs": { "type": "integer" },
+        "audioData": { "type": "string" },
+        "audioDurationMs": { "type": "integer" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
       "required": ["participantUids", "senderUid", "senderUsername", "text", "createdAt"]
@@ -218,6 +228,75 @@
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
       "required": ["userId", "username", "avatarKey", "text", "createdAt"]
+    },
+    "MerchantAccount": {
+      "title": "MerchantAccount",
+      "description": "Momi Marketplace merchant storefront verified exclusively by admin.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "ownerUsername": { "type": "string" },
+        "storeName": { "type": "string" },
+        "tagline": { "type": "string" },
+        "category": { "type": "string" },
+        "location": { "type": "string" },
+        "avatarKey": { "type": "string" },
+        "avatarData": { "type": "string" },
+        "isVerified": { "type": "boolean" },
+        "verifiedByEmail": { "type": "string" },
+        "totalSales": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["userId", "ownerUsername", "storeName", "tagline", "category", "location", "avatarKey", "isVerified", "totalSales", "createdAt"]
+    },
+    "MarketProduct": {
+      "title": "MarketProduct",
+      "description": "Momi Marketplace product listing with photos and optional video.",
+      "type": "object",
+      "properties": {
+        "sellerUid": { "type": "string" },
+        "sellerUsername": { "type": "string" },
+        "storeName": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "priceUsd": { "type": "number" },
+        "originalPriceUsd": { "type": "number" },
+        "discountPercent": { "type": "integer" },
+        "freeShipping": { "type": "boolean" },
+        "imageKey": { "type": "string" },
+        "imageData": { "type": "string" },
+        "extraImageDatas": { "type": "array", "items": { "type": "string" } },
+        "videoData": { "type": "string" },
+        "videoChunksCount": { "type": "integer" },
+        "videoDurationMs": { "type": "integer" },
+        "stockCount": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["sellerUid", "sellerUsername", "storeName", "title", "description", "category", "priceUsd", "originalPriceUsd", "discountPercent", "freeShipping", "imageKey", "videoDurationMs", "stockCount", "createdAt"]
+    },
+    "MarketOrder": {
+      "title": "MarketOrder",
+      "description": "Private 1:1 marketplace order visible only to buyerUid and sellerUid.",
+      "type": "object",
+      "properties": {
+        "buyerUid": { "type": "string" },
+        "buyerUsername": { "type": "string" },
+        "sellerUid": { "type": "string" },
+        "sellerStoreName": { "type": "string" },
+        "productId": { "type": "string" },
+        "productTitle": { "type": "string" },
+        "productImageKey": { "type": "string" },
+        "productImageData": { "type": "string" },
+        "priceUsd": { "type": "number" },
+        "shippingAddress": { "type": "string" },
+        "status": { "type": "string", "enum": ["PLACED", "SHIPPED", "DELIVERED"] },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["buyerUid", "buyerUsername", "sellerUid", "sellerStoreName", "productId", "productTitle", "productImageKey", "priceUsd", "shippingAddress", "status", "createdAt"]
     }
   },
   "firestore": {
@@ -276,6 +355,18 @@
     "/liveStreams/{streamId}/liveComments/{commentId}": {
       "schema": { "$ref": "#/entities/LiveComment" },
       "description": "Real-time chat comments inside a Live broadcast."
+    },
+    "/merchants/{merchantId}": {
+      "schema": { "$ref": "#/entities/MerchantAccount" },
+      "description": "Momi Marketplace merchant storefronts."
+    },
+    "/marketProducts/{productId}": {
+      "schema": { "$ref": "#/entities/MarketProduct" },
+      "description": "Momi Marketplace product listings."
+    },
+    "/marketOrders/{orderId}": {
+      "schema": { "$ref": "#/entities/MarketOrder" },
+      "description": "Private marketplace orders between buyer and seller."
     }
   }
 }
