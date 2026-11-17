@@ -309,6 +309,95 @@ class MomiRepositoryRuleTest : FirestoreEmulatorTestBase() {
         assertArrayEquals(originalBytes, assembledFile.readBytes())
     }
 
+    @Test
+    fun viewsAndLiveStreams_multiUserViewIncrementAndLiveChatRoomWorkEndToEnd() = runBlocking {
+        val aliceEmail = "alice_live_${UUID.randomUUID()}@momi.photo"
+        val bobEmail = "bob_live_${UUID.randomUUID()}@momi.photo"
+
+        val aliceUid = signInTestUser(aliceEmail)
+        val aliceRepo = MomiFirestoreRepository(firestore)
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            aliceRepo.ensureUserSeeded("Alice Live", aliceEmail).getOrThrow()
+        }
+        val aliceProfile = withTimeout(FLOW_TIMEOUT_MS) {
+            aliceRepo.observeProfile(aliceUid).first { it != null }
+        }!!
+
+        val postId = withTimeout(DEFAULT_TIMEOUT_MS) {
+            aliceRepo.createPost(
+                profile = aliceProfile,
+                imageKey = "img_post_coastal",
+                localImagePath = null,
+                imageData = null,
+                filterTag = "NONE",
+                caption = "Views test post",
+                location = "Amalfi",
+                category = "Travel",
+                isReel = false
+            ).getOrThrow()
+        }
+
+        // Alice goes live
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            aliceRepo.startLiveStream(aliceProfile, "Morning sunset walk").getOrThrow()
+        }
+
+        // Bob views Alice's post and joins Alice's live stream
+        val bobUid = signInTestUser(bobEmail)
+        val bobRepo = MomiFirestoreRepository(firestore)
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            bobRepo.ensureUserSeeded("Bob Live", bobEmail).getOrThrow()
+        }
+        val bobProfile = withTimeout(FLOW_TIMEOUT_MS) {
+            bobRepo.observeProfile(bobUid).first { it != null }
+        }!!
+
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            bobRepo.incrementPostView(postId).getOrThrow()
+        }
+        val viewedPost = withTimeout(FLOW_TIMEOUT_MS) {
+            bobRepo.observePost(bobUid, postId).first { it?.viewsCount == 1L }
+        }!!
+        assertEquals(1L, viewedPost.viewsCount)
+
+        val liveStreams = withTimeout(FLOW_TIMEOUT_MS) {
+            bobRepo.observeActiveLiveStreams(bobUid).first { list -> list.any { it.userId == aliceUid } }
+        }
+        assertTrue(liveStreams.any { it.title == "Morning sunset walk" && it.isLive })
+
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            bobRepo.joinLiveStream(aliceUid).getOrThrow()
+            bobRepo.sendLiveHeart(aliceUid).getOrThrow()
+            bobRepo.sendLiveComment(aliceUid, bobProfile, "Awesome stream!").getOrThrow()
+        }
+
+        val updatedStream = withTimeout(FLOW_TIMEOUT_MS) {
+            bobRepo.observeLiveStream(bobUid, aliceUid).first {
+                it != null && it.viewerCount == 1L && it.likesCount == 1L
+            }
+        }!!
+        assertEquals(1L, updatedStream.viewerCount)
+        assertEquals(1L, updatedStream.likesCount)
+
+        val comments = withTimeout(FLOW_TIMEOUT_MS) {
+            bobRepo.observeLiveComments(bobUid, aliceUid).first { it.isNotEmpty() }
+        }
+        assertEquals("Awesome stream!", comments.first().text)
+
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            bobRepo.leaveLiveStream(aliceUid).getOrThrow()
+        }
+
+        signInTestUser(aliceEmail)
+        withTimeout(DEFAULT_TIMEOUT_MS) {
+            aliceRepo.endLiveStream(aliceUid).getOrThrow()
+        }
+        val endedStream = withTimeout(FLOW_TIMEOUT_MS) {
+            aliceRepo.observeLiveStream(aliceUid, aliceUid).first { it != null && !it.isLive }
+        }!!
+        assertFalse(endedStream.isLive)
+    }
+
     private companion object {
         const val DEFAULT_TIMEOUT_MS = 10000L
         const val FLOW_TIMEOUT_MS = 5000L

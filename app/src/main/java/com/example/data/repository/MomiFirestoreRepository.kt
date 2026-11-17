@@ -6,6 +6,8 @@ import com.example.data.model.ChatMessage
 import com.example.data.model.Comment
 import com.example.data.model.FollowEdge
 import com.example.data.model.InteractionMarker
+import com.example.data.model.LiveComment
+import com.example.data.model.LiveStream
 import com.example.data.model.MessageThread
 import com.example.data.model.NotificationItem
 import com.example.data.model.Post
@@ -51,6 +53,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     private fun storiesCol() = db.collection("stories")
     private fun followsCol() = db.collection("follows")
     private fun threadsCol() = db.collection("threads")
+    private fun liveStreamsCol() = db.collection("liveStreams")
 
     fun observeProfile(userId: String): Flow<UserProfile?> {
         val docRef = userDoc(userId)
@@ -354,6 +357,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                 "filterTag" to "NONE",
                 "caption" to "Golden hour spilling over the cliffs before the ferries drift back in. #amalfi #coastal #momi",
                 "likesCount" to 24L,
+                "viewsCount" to 128L,
                 "commentsCount" to 0L,
                 "category" to "Travel",
                 "isReel" to true,
@@ -374,6 +378,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                 "filterTag" to "NONE",
                 "caption" to "Morning ritual: stone-ground Uji matcha over crystal ice and warm pastry. #matcha #cafeculture",
                 "likesCount" to 18L,
+                "viewsCount" to 94L,
                 "commentsCount" to 0L,
                 "category" to "Coffee",
                 "isReel" to true,
@@ -394,6 +399,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                 "filterTag" to "NONE",
                 "caption" to "When raw concrete meets warm white oak and four o'clock sunbeams. #architecture #minimal",
                 "likesCount" to 31L,
+                "viewsCount" to 165L,
                 "commentsCount" to 0L,
                 "category" to "Architecture",
                 "isReel" to true,
@@ -414,6 +420,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                 "filterTag" to "NONE",
                 "caption" to "Silk blue & maroon neon reflections after a sudden midnight downpour. #tokyo #nightphotography",
                 "likesCount" to 42L,
+                "viewsCount" to 210L,
                 "commentsCount" to 0L,
                 "category" to "Night",
                 "isReel" to true,
@@ -745,6 +752,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             put("filterTag", filterTag)
             put("caption", caption.trim().take(1000))
             put("likesCount", 0L)
+            put("viewsCount", 0L)
             put("commentsCount", 0L)
             put("category", category)
             put("isReel", isReel)
@@ -1200,6 +1208,247 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            throw e
+        }
+    }
+
+    suspend fun incrementPostView(postId: String): Result<Unit> = runCatching {
+        requireUserId()
+        if (postId.isBlank()) return@runCatching
+        val postRef = postsCol().document(postId)
+        try {
+            db.runTransaction { transaction ->
+                val snap = transaction.get(postRef)
+                if (!snap.exists()) return@runTransaction
+                val currentViews = (snap.getLong("viewsCount") ?: 0L).coerceAtLeast(0L)
+                transaction.update(
+                    postRef,
+                    mapOf(
+                        "viewsCount" to currentViews + 1L,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }.await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, postRef.path)
+            throw e
+        }
+    }
+
+    fun observeActiveLiveStreams(currentUid: String): Flow<List<LiveStream>> {
+        val colRef = liveStreamsCol()
+        val path = colRef.path
+        return colRef
+            .whereEqualTo("isLive", true)
+            .snapshots(MetadataChanges.EXCLUDE)
+            .map { snapshot ->
+                snapshot.toObjects(LiveStream::class.java, ServerTimestampBehavior.ESTIMATE)
+                    .sortedWith(
+                        compareByDescending<LiveStream> { it.userId == currentUid }
+                            .thenByDescending { it.viewerCount }
+                            .thenByDescending { it.createdAt ?: Timestamp(0, 0) }
+                    )
+            }
+            .catch { error ->
+                logFlowErrorIfSignedIn(currentUid, error, OperationType.LIST, path)
+                throw error
+            }
+    }
+
+    fun observeLiveStream(currentUid: String, streamId: String): Flow<LiveStream?> {
+        val docRef = liveStreamsCol().document(streamId)
+        val path = docRef.path
+        return docRef.snapshots(MetadataChanges.EXCLUDE)
+            .map { snapshot ->
+                if (snapshot.exists()) {
+                    snapshot.toObject(LiveStream::class.java, ServerTimestampBehavior.ESTIMATE)
+                } else {
+                    null
+                }
+            }
+            .catch { error ->
+                logFlowErrorIfSignedIn(currentUid, error, OperationType.GET, path)
+                throw error
+            }
+    }
+
+    fun observeLiveComments(currentUid: String, streamId: String): Flow<List<LiveComment>> {
+        val colRef = liveStreamsCol().document(streamId).collection("liveComments")
+        val path = colRef.path
+        return colRef
+            .orderBy("createdAt", Query.Direction.ASCENDING)
+            .snapshots(MetadataChanges.EXCLUDE)
+            .map { snapshot ->
+                snapshot.toObjects(LiveComment::class.java, ServerTimestampBehavior.ESTIMATE)
+                    .sortedWith(
+                        compareBy<LiveComment> { it.createdAt ?: Timestamp(0, 0) }
+                            .thenBy { it.id }
+                    )
+            }
+            .catch { error ->
+                logFlowErrorIfSignedIn(currentUid, error, OperationType.LIST, path)
+                throw error
+            }
+    }
+
+    suspend fun startLiveStream(
+        profile: UserProfile,
+        title: String,
+        category: String = "Live"
+    ): Result<String> = runCatching {
+        val uid = requireUserId()
+        val streamRef = liveStreamsCol().document(uid)
+        val cleanTitle = title.trim().ifBlank { "${profile.displayName} is live on Momi" }.take(140)
+        val payload = mapOf(
+            "userId" to uid,
+            "username" to profile.username.ifBlank { "creator" }.take(50),
+            "displayName" to profile.displayName.ifBlank { "Momi Creator" }.take(80),
+            "avatarKey" to profile.avatarKey.ifBlank { "avatar_aria" }.take(64),
+            "authorVerified" to profile.isVerified,
+            "title" to cleanTitle,
+            "category" to category.trim().ifBlank { "Live" }.take(40),
+            "isLive" to true,
+            "viewerCount" to 0L,
+            "likesCount" to 0L,
+            "createdAt" to FieldValue.serverTimestamp(),
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
+        try {
+            streamRef.set(payload).await()
+            uid
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, streamRef.path)
+            throw e
+        }
+    }
+
+    suspend fun endLiveStream(streamId: String): Result<Unit> = runCatching {
+        val uid = requireUserId()
+        val targetId = streamId.ifBlank { uid }
+        val streamRef = liveStreamsCol().document(targetId)
+        try {
+            val snap = streamRef.get().await()
+            if (snap.exists() && snap.getString("userId") == uid) {
+                streamRef.update(
+                    mapOf(
+                        "isLive" to false,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, streamRef.path)
+            throw e
+        }
+    }
+
+    suspend fun joinLiveStream(streamId: String): Result<Unit> = runCatching {
+        val uid = requireUserId()
+        if (streamId.isBlank() || streamId == uid) return@runCatching
+        val streamRef = liveStreamsCol().document(streamId)
+        try {
+            db.runTransaction { transaction ->
+                val snap = transaction.get(streamRef)
+                if (!snap.exists() || snap.getBoolean("isLive") != true) return@runTransaction
+                val current = (snap.getLong("viewerCount") ?: 0L).coerceAtLeast(0L)
+                transaction.update(
+                    streamRef,
+                    mapOf(
+                        "viewerCount" to current + 1L,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }.await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, streamRef.path)
+            throw e
+        }
+    }
+
+    suspend fun leaveLiveStream(streamId: String): Result<Unit> = runCatching {
+        val uid = requireUserId()
+        if (streamId.isBlank() || streamId == uid) return@runCatching
+        val streamRef = liveStreamsCol().document(streamId)
+        try {
+            db.runTransaction { transaction ->
+                val snap = transaction.get(streamRef)
+                if (!snap.exists()) return@runTransaction
+                val current = (snap.getLong("viewerCount") ?: 0L).coerceAtLeast(0L)
+                if (current > 0L) {
+                    transaction.update(
+                        streamRef,
+                        mapOf(
+                            "viewerCount" to current - 1L,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                }
+            }.await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, streamRef.path)
+            throw e
+        }
+    }
+
+    suspend fun sendLiveHeart(streamId: String): Result<Unit> = runCatching {
+        requireUserId()
+        if (streamId.isBlank()) return@runCatching
+        val streamRef = liveStreamsCol().document(streamId)
+        try {
+            db.runTransaction { transaction ->
+                val snap = transaction.get(streamRef)
+                if (!snap.exists()) return@runTransaction
+                val current = (snap.getLong("likesCount") ?: 0L).coerceAtLeast(0L)
+                transaction.update(
+                    streamRef,
+                    mapOf(
+                        "likesCount" to current + 1L,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }.await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, streamRef.path)
+            throw e
+        }
+    }
+
+    suspend fun sendLiveComment(
+        streamId: String,
+        actorProfile: UserProfile,
+        text: String
+    ): Result<String> = runCatching {
+        val uid = requireUserId()
+        require(streamId.isNotBlank()) { "Stream ID must not be blank" }
+        val trimmed = text.trim()
+        require(trimmed.isNotEmpty()) { "Live comment cannot be empty" }
+        val commentRef = liveStreamsCol().document(streamId).collection("liveComments").document()
+        val payload = mapOf(
+            "userId" to uid,
+            "username" to actorProfile.username.ifBlank { "creator" }.take(50),
+            "avatarKey" to actorProfile.avatarKey.ifBlank { "avatar_aria" }.take(64),
+            "text" to trimmed.take(300),
+            "createdAt" to FieldValue.serverTimestamp()
+        )
+        try {
+            commentRef.set(payload).await()
+            commentRef.id
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, commentRef.path)
             throw e
         }
     }

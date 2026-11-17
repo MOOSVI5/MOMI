@@ -21,6 +21,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -40,10 +41,15 @@ fun PostDetailScreen(
     onBookmarkToggle: (Post) -> Unit,
     onFollowToggle: (Post) -> Unit,
     onDeletePost: (Post) -> Unit,
+    onPostViewed: (Post) -> Unit = {},
     onAuthorClick: (Post) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     BackHandler(onBack = onBack)
+
+    LaunchedEffect(post?.id) {
+        post?.let(onPostViewed)
+    }
 
     Column(
         modifier = modifier

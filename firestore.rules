@@ -70,6 +70,7 @@ service cloud.firestore {
              data.filterTag is string && data.filterTag in ['NONE', 'BLUE', 'MAROON', 'MONO'] &&
              data.caption is string && data.caption.size() <= 1000 &&
              data.likesCount is int && data.likesCount >= 0 &&
+             (!('viewsCount' in data) || data.viewsCount == null || (data.viewsCount is int && data.viewsCount >= 0)) &&
              data.commentsCount is int && data.commentsCount >= 0 &&
              data.category is string && data.category.size() >= 1 && data.category.size() <= 40 &&
              data.isReel is bool &&
@@ -187,6 +188,29 @@ service cloud.firestore {
              data.createdAt is timestamp && data.createdAt <= request.time;
     }
 
+    function isValidLiveStream(data, streamId) {
+      return data.userId is string && data.userId == streamId && isValidId(data.userId) &&
+             data.username is string && data.username.size() >= 1 && data.username.size() <= 50 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+             data.avatarKey is string && data.avatarKey.size() >= 1 && data.avatarKey.size() <= 64 &&
+             data.authorVerified is bool &&
+             data.title is string && data.title.size() <= 140 &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 40 &&
+             data.isLive is bool &&
+             data.viewerCount is int && data.viewerCount >= 0 &&
+             data.likesCount is int && data.likesCount >= 0 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
+    }
+
+    function isValidLiveComment(data) {
+      return data.userId is string && isValidId(data.userId) &&
+             data.username is string && data.username.size() >= 1 && data.username.size() <= 50 &&
+             data.avatarKey is string && data.avatarKey.size() >= 1 && data.avatarKey.size() <= 64 &&
+             data.text is string && data.text.size() >= 1 && data.text.size() <= 300 &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
     // Public creator profiles (strictly no PII) + owner-isolated private subcollections
     match /users/{userId} {
       allow get: if isSignedIn() && isValidId(userId);
@@ -293,7 +317,7 @@ service cloud.firestore {
                        isValidId(postId) &&
                        incoming().userId == request.auth.uid &&
                        incoming().keys().hasAll(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'imageKey', 'filterTag', 'caption', 'likesCount', 'commentsCount', 'category', 'isReel', 'createdAt']) &&
-                       incoming().keys().hasOnly(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'location', 'imageKey', 'localImagePath', 'imageData', 'mediaType', 'localVideoPath', 'videoData', 'videoChunksCount', 'videoDurationMs', 'localAudioPath', 'filterTag', 'caption', 'likesCount', 'commentsCount', 'category', 'isReel', 'audioTitle', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'location', 'imageKey', 'localImagePath', 'imageData', 'mediaType', 'localVideoPath', 'videoData', 'videoChunksCount', 'videoDurationMs', 'localAudioPath', 'filterTag', 'caption', 'likesCount', 'viewsCount', 'commentsCount', 'category', 'isReel', 'audioTitle', 'createdAt', 'updatedAt']) &&
                        isValidPost(incoming());
 
       allow update: if isSignedIn() &&
@@ -305,6 +329,9 @@ service cloud.firestore {
                          (existing().userId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['caption', 'location', 'updatedAt'])) ||
                          (incoming().diff(existing()).affectedKeys().hasOnly(['likesCount', 'updatedAt']) &&
                            (incoming().likesCount == existing().likesCount + 1 || incoming().likesCount == existing().likesCount - 1)) ||
+                         (incoming().diff(existing()).affectedKeys().hasOnly(['viewsCount', 'updatedAt']) &&
+                           ((('viewsCount' in existing()) && existing().viewsCount is int && incoming().viewsCount == existing().viewsCount + 1) ||
+                            (!('viewsCount' in existing()) && incoming().viewsCount == 1))) ||
                          (incoming().diff(existing()).affectedKeys().hasOnly(['commentsCount', 'updatedAt']) &&
                            (incoming().commentsCount == existing().commentsCount + 1 || incoming().commentsCount == existing().commentsCount - 1))
                        );
@@ -461,6 +488,57 @@ service cloud.firestore {
 
         allow update: if false;
         allow delete: if isSignedIn() && isValidId(threadId) && isValidId(messageId) && existing().senderUid == request.auth.uid;
+      }
+    }
+
+    // Shared Momi Live Broadcast Rooms & Live Chat
+    match /liveStreams/{streamId} {
+      allow get: if isSignedIn() && isValidId(streamId);
+      allow list: if isSignedIn();
+
+      allow create: if isSignedIn() &&
+                       isValidId(streamId) &&
+                       streamId == request.auth.uid &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'username', 'displayName', 'avatarKey', 'authorVerified', 'title', 'category', 'isLive', 'viewerCount', 'likesCount', 'createdAt']) &&
+                       incoming().keys().hasOnly(['userId', 'username', 'displayName', 'avatarKey', 'authorVerified', 'title', 'category', 'isLive', 'viewerCount', 'likesCount', 'createdAt', 'updatedAt']) &&
+                       isValidLiveStream(incoming(), streamId);
+
+      allow update: if isSignedIn() &&
+                       isValidId(streamId) &&
+                       isValidLiveStream(incoming(), streamId) &&
+                       incoming().userId == existing().userId &&
+                       (
+                         (existing().userId == request.auth.uid &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['username', 'displayName', 'avatarKey', 'authorVerified', 'title', 'category', 'isLive', 'viewerCount', 'likesCount', 'createdAt', 'updatedAt'])) ||
+                         (incoming().createdAt == existing().createdAt &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['viewerCount', 'updatedAt']) &&
+                           (incoming().viewerCount == existing().viewerCount + 1 || incoming().viewerCount == existing().viewerCount - 1)) ||
+                         (incoming().createdAt == existing().createdAt &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['likesCount', 'updatedAt']) &&
+                           incoming().likesCount == existing().likesCount + 1)
+                       );
+
+      allow delete: if isSignedIn() && isValidId(streamId) && existing().userId == request.auth.uid;
+
+      match /liveComments/{commentId} {
+        allow get: if isSignedIn() && isValidId(streamId) && isValidId(commentId);
+        allow list: if isSignedIn() && isValidId(streamId);
+
+        allow create: if isSignedIn() &&
+                         isValidId(streamId) &&
+                         isValidId(commentId) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().keys().hasAll(['userId', 'username', 'avatarKey', 'text', 'createdAt']) &&
+                         incoming().keys().hasOnly(['userId', 'username', 'avatarKey', 'text', 'createdAt']) &&
+                         isValidLiveComment(incoming()) &&
+                         exists(/databases/$(database)/documents/liveStreams/$(streamId));
+
+        allow update: if false;
+        allow delete: if isSignedIn() &&
+                         isValidId(streamId) &&
+                         isValidId(commentId) &&
+                         (existing().userId == request.auth.uid || get(/databases/$(database)/documents/liveStreams/$(streamId)).data.userId == request.auth.uid);
       }
     }
   }

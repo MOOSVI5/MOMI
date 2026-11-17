@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -87,6 +88,7 @@ fun ReelsScreen(
     onShareClick: (Post) -> Unit,
     onBookmarkToggle: (Post) -> Unit,
     onFollowToggle: (Post) -> Unit,
+    onReelViewed: (Post) -> Unit = {},
     onAuthorClick: (Post) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -129,6 +131,7 @@ fun ReelsScreen(
                 onShareClick = { onShareClick(reel) },
                 onBookmarkToggle = { onBookmarkToggle(reel) },
                 onFollowToggle = { onFollowToggle(reel) },
+                onViewed = { onReelViewed(reel) },
                 onAuthorClick = { onAuthorClick(reel) }
             )
         }
@@ -177,9 +180,17 @@ private fun ReelPageItem(
     onShareClick: () -> Unit,
     onBookmarkToggle: () -> Unit,
     onFollowToggle: () -> Unit,
+    onViewed: () -> Unit,
     onAuthorClick: () -> Unit
 ) {
     var showHeartBurst by remember { mutableStateOf(false) }
+
+    LaunchedEffect(reel.id, isActivePage) {
+        if (isActivePage) {
+            delay(700L)
+            onViewed()
+        }
+    }
 
     LaunchedEffect(showHeartBurst) {
         if (showHeartBurst) {
@@ -435,6 +446,22 @@ private fun ReelPageItem(
                     }
                     Text(
                         text = reel.commentsCount.toString(),
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Outlined.Visibility,
+                        contentDescription = "Views",
+                        tint = Color.White,
+                        modifier = Modifier.size(25.dp)
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = MediaAssets.formatCompactCount(reel.viewsCount),
                         color = Color.White,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold

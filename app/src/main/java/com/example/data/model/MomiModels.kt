@@ -46,6 +46,7 @@ data class Post(
     val filterTag: String = "NONE",
     val caption: String = "",
     val likesCount: Long = 0L,
+    val viewsCount: Long = 0L,
     @get:PropertyName("isLiked") val isLiked: Boolean = false,
     @get:PropertyName("isBookmarked") val isBookmarked: Boolean = false,
     @get:PropertyName("isFollowingAuthor") val isFollowingAuthor: Boolean = false,
@@ -181,6 +182,34 @@ data class ChatMessage(
     val participantUids: List<String> = emptyList(),
     val senderUid: String = "",
     val senderUsername: String = "",
+    val text: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
+data class LiveStream(
+    @DocumentId val id: String = "",
+    val userId: String = "",
+    val username: String = "",
+    val displayName: String = "",
+    val avatarKey: String = "avatar_aria",
+    @get:Exclude val avatarData: String? = null,
+    @get:PropertyName("authorVerified") val authorVerified: Boolean = false,
+    val title: String = "",
+    val category: String = "Live",
+    @get:PropertyName("isLive") val isLive: Boolean = true,
+    val viewerCount: Long = 0L,
+    val likesCount: Long = 0L,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
+data class LiveComment(
+    @DocumentId val id: String = "",
+    val userId: String = "",
+    val username: String = "",
+    val avatarKey: String = "avatar_aria",
     val text: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null
 )

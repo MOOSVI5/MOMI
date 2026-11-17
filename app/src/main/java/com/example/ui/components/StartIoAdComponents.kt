@@ -436,8 +436,12 @@ private fun StartIoMrecSponsoredCard(
                                         Gravity.CENTER
                                     )
                                 )
-                                mrec.showBanner()
-                                mrec.loadAd(300, 250)
+                                post {
+                                    runCatching {
+                                        mrec.loadAd(300, 250)
+                                        mrec.showBanner()
+                                    }
+                                }
                             }
                         },
                         modifier = Modifier
@@ -515,8 +519,12 @@ fun MomiAnchoredExploreBanner(
                                 Gravity.CENTER
                             )
                         )
-                        banner.showBanner()
-                        banner.loadAd(320, 50)
+                        post {
+                            runCatching {
+                                banner.loadAd(320, 50)
+                                banner.showBanner()
+                            }
+                        }
                     }
                 },
                 modifier = Modifier

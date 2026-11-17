@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -30,6 +31,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.outlined.LocationOn
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.VideoLibrary
@@ -112,6 +114,7 @@ fun CreatePostScreen(
         caption: String,
         onFinished: (Boolean) -> Unit
     ) -> Unit,
+    onGoLiveClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -217,31 +220,14 @@ fun CreatePostScreen(
                 )
             }
 
-            // Mode switcher: Post vs Story
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                    .padding(3.dp)
-            ) {
-                listOf(false to "Post", true to "Story").forEach { (storyOption, label) ->
-                    val active = isStoryMode == storyOption
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(if (active) MaterialTheme.colorScheme.primary else Color.Transparent)
-                            .clickable { isStoryMode = storyOption }
-                            .padding(horizontal = 16.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            text = label,
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
+            Text(
+                text = if (isStoryMode) "New Story" else "New Post",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground,
+                maxLines = 1,
+                softWrap = false
+            )
 
             Button(
                 enabled = !isProcessingMedia && !isPublishing,
@@ -298,6 +284,68 @@ fun CreatePostScreen(
                         fontWeight = FontWeight.Bold
                     )
                 }
+            }
+        }
+
+        // Spacious Segmented Mode Switcher: Post | Story | Go Live
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 6.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            listOf(false to "Post", true to "Story").forEach { (storyOption, label) ->
+                val active = isStoryMode == storyOption
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 38.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (active) MaterialTheme.colorScheme.primary else Color.Transparent)
+                        .clickable { isStoryMode = storyOption }
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
+                        color = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 38.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFFD92D4E).copy(alpha = 0.14f))
+                    .clickable(onClick = onGoLiveClick)
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+                    .testTag("go_live_mode_button"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Sensors,
+                    contentDescription = null,
+                    tint = Color(0xFFD92D4E),
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(5.dp))
+                Text(
+                    text = "Go Live",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    softWrap = false,
+                    color = Color(0xFFD92D4E)
+                )
             }
         }
 
@@ -371,19 +419,32 @@ fun CreatePostScreen(
             Spacer(modifier = Modifier.height(12.dp))
 
             // Media Pickers (Photo & Video via Zero-Permission Android Photo Picker)
-            Row(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                    .padding(horizontal = 16.dp)
             ) {
-                Text(
-                    text = "Select media",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "Select media",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Photo or Video",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                     OutlinedButton(
                         enabled = !isProcessingMedia && !isPublishing,
                         onClick = {
@@ -391,8 +452,12 @@ fun CreatePostScreen(
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                             )
                         },
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.testTag("pick_photo_button")
+                        shape = RoundedCornerShape(14.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .testTag("pick_photo_button")
                     ) {
                         Icon(
                             imageVector = Icons.Outlined.PhotoLibrary,
@@ -400,7 +465,12 @@ fun CreatePostScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Photo")
+                        Text(
+                            text = "Photo",
+                            maxLines = 1,
+                            softWrap = false,
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
                     OutlinedButton(
                         enabled = !isProcessingMedia && !isPublishing,
@@ -409,8 +479,12 @@ fun CreatePostScreen(
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
                             )
                         },
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.testTag("pick_video_button")
+                        shape = RoundedCornerShape(14.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .testTag("pick_video_button")
                     ) {
                         Icon(
                             imageVector = Icons.Outlined.VideoLibrary,
@@ -418,7 +492,12 @@ fun CreatePostScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Video")
+                        Text(
+                            text = "Video",
+                            maxLines = 1,
+                            softWrap = false,
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
                 }
             }

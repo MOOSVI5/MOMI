@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.border
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -26,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.PhotoCamera
@@ -38,23 +40,29 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.LiveStream
 import com.example.data.model.Post
 import com.example.data.model.Story
 import com.example.data.model.UserProfile
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import com.example.ui.components.LumaAvatar
 import com.example.ui.components.MomiInlineFeedAdCard
 import com.example.ui.components.PostCard
@@ -68,6 +76,7 @@ fun HomeScreen(
     followingUids: Set<String> = emptySet(),
     posts: List<Post>,
     stories: List<Story>,
+    liveStreams: List<LiveStream> = emptyList(),
     unreadNotificationCount: Int,
     unreadMessageCount: Int,
     onOpenSearch: () -> Unit = {},
@@ -75,6 +84,9 @@ fun HomeScreen(
     onOpenMessages: () -> Unit,
     onOpenStory: (Story) -> Unit,
     onAddStoryClick: () -> Unit,
+    onGoLiveClick: () -> Unit = {},
+    onOpenLiveStream: (LiveStream) -> Unit = {},
+    onPostViewed: (Post) -> Unit = {},
     onLikeToggle: (Post) -> Unit,
     onDoubleTapLike: (Post) -> Unit,
     onCommentClick: (Post) -> Unit,
@@ -141,6 +153,24 @@ fun HomeScreen(
 
     val ownStory = remember(stories) { stories.firstOrNull { it.isOwnStory } }
     val friendStories = remember(stories) { stories.filter { !it.isOwnStory } }
+
+    LaunchedEffect(activeVideoPostId, displayedPosts) {
+        val targetId = activeVideoPostId ?: return@LaunchedEffect
+        delay(600L)
+        displayedPosts.firstOrNull { it.id == targetId }?.let(onPostViewed)
+    }
+
+    LaunchedEffect(displayedPosts, listState) {
+        val postById = displayedPosts.associateBy { it.id }
+        snapshotFlow {
+            listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }
+        }.collectLatest { visibleKeys ->
+            delay(900L)
+            visibleKeys.forEach { key ->
+                postById[key]?.let(onPostViewed)
+            }
+        }
+    }
 
     Column(
         modifier = modifier
@@ -314,6 +344,96 @@ fun HomeScreen(
                                 text = "Your story",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+
+                    // Go Live Launcher Tile
+                    item(key = "go_live_tile") {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .width(74.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable(onClick = onGoLiveClick)
+                                .testTag("home_go_live_button")
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(70.dp)
+                                    .clip(CircleShape)
+                                    .border(
+                                        width = 2.5.dp,
+                                        brush = Brush.linearGradient(
+                                            listOf(Color(0xFFD92D4E), Color(0xFFFF6B6B), MaterialTheme.colorScheme.primary)
+                                        ),
+                                        shape = CircleShape
+                                    )
+                                    .padding(4.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFFD92D4E).copy(alpha = 0.14f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Sensors,
+                                    contentDescription = "Go Live",
+                                    tint = Color(0xFFD92D4E),
+                                    modifier = Modifier.size(30.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "Go Live",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFD92D4E),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+
+                    // Active Live Broadcasts
+                    items(liveStreams, key = { "live_${it.id}" }) { stream ->
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .width(74.dp)
+                                .clickable { onOpenLiveStream(stream) }
+                                .testTag("live_stream_tile_${stream.id}")
+                        ) {
+                            Box(contentAlignment = Alignment.BottomCenter) {
+                                LumaAvatar(
+                                    username = stream.username,
+                                    avatarKey = stream.avatarKey,
+                                    avatarData = stream.avatarData,
+                                    size = 70.dp,
+                                    hasActiveStory = true,
+                                    isSeenStory = false,
+                                    onClick = { onOpenLiveStream(stream) }
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(Color(0xFFD92D4E))
+                                        .padding(horizontal = 6.dp, vertical = 1.dp)
+                                ) {
+                                    Text(
+                                        text = "LIVE",
+                                        color = Color.White,
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = stream.username,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onBackground,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )

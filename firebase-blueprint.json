@@ -42,6 +42,7 @@
         "filterTag": { "type": "string", "enum": ["NONE", "BLUE", "MAROON", "MONO"] },
         "caption": { "type": "string" },
         "likesCount": { "type": "integer" },
+        "viewsCount": { "type": "integer" },
         "commentsCount": { "type": "integer" },
         "category": { "type": "string" },
         "isReel": { "type": "boolean" },
@@ -184,6 +185,39 @@
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
       "required": ["participantUids", "senderUid", "senderUsername", "text", "createdAt"]
+    },
+    "LiveStream": {
+      "title": "LiveStream",
+      "description": "Active or recently ended Momi Live broadcast room synced across devices.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "username": { "type": "string" },
+        "displayName": { "type": "string" },
+        "avatarKey": { "type": "string" },
+        "authorVerified": { "type": "boolean" },
+        "title": { "type": "string" },
+        "category": { "type": "string" },
+        "isLive": { "type": "boolean" },
+        "viewerCount": { "type": "integer" },
+        "likesCount": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["userId", "username", "displayName", "avatarKey", "authorVerified", "title", "category", "isLive", "viewerCount", "likesCount", "createdAt"]
+    },
+    "LiveComment": {
+      "title": "LiveComment",
+      "description": "Real-time chat message in a Momi Live room.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "username": { "type": "string" },
+        "avatarKey": { "type": "string" },
+        "text": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["userId", "username", "avatarKey", "text", "createdAt"]
     }
   },
   "firestore": {
@@ -234,6 +268,14 @@
     "/threads/{threadId}/messages/{messageId}": {
       "schema": { "$ref": "#/entities/ChatMessage" },
       "description": "Messages inside a shared 1:1 DM thread."
+    },
+    "/liveStreams/{streamId}": {
+      "schema": { "$ref": "#/entities/LiveStream" },
+      "description": "Shared Momi Live broadcast rooms."
+    },
+    "/liveStreams/{streamId}/liveComments/{commentId}": {
+      "schema": { "$ref": "#/entities/LiveComment" },
+      "description": "Real-time chat comments inside a Live broadcast."
     }
   }
 }

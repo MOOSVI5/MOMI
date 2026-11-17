@@ -534,3 +534,125 @@ test("Threads & Messages: Alice and Bob share a 1:1 thread and exchange messages
     )
   );
 });
+
+// --- 7. Post Views Count & Live Streams Rules ---
+
+test("Posts viewsCount: allows +1 view increment on new and legacy posts, blocks tampering", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+
+  // Legacy post without viewsCount
+  await assertSucceeds(aliceDb.collection("posts").doc("legacy_post").set(validPostPayload(ALICE_UID)));
+
+  // First view on legacy doc initializes viewsCount to 1
+  await assertSucceeds(
+    bobDb.collection("posts").doc("legacy_post").update({
+      viewsCount: 1,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Subsequent view increments +1
+  await assertSucceeds(
+    aliceDb.collection("posts").doc("legacy_post").update({
+      viewsCount: 2,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Reject skipping (+5) or negative
+  await assertFails(
+    bobDb.collection("posts").doc("legacy_post").update({
+      viewsCount: 7,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    bobDb.collection("posts").doc("legacy_post").update({
+      viewsCount: -1,
+      updatedAt: serverTimestamp(),
+    })
+  );
+});
+
+test("LiveStreams & LiveComments: host broadcasts, viewers join/leave/heart/comment, spoofers denied", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const charlieDb = testEnv.authenticatedContext(CHARLIE_UID).firestore();
+
+  const streamPayload = {
+    userId: ALICE_UID,
+    username: "aria.studio",
+    displayName: "Aria Vance",
+    avatarKey: "avatar_aria",
+    authorVerified: false,
+    title: "Evening studio session",
+    category: "Live",
+    isLive: true,
+    viewerCount: 0,
+    likesCount: 0,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+
+  // Bob cannot hijack Alice's live stream document
+  await assertFails(bobDb.collection("liveStreams").doc(ALICE_UID).set(streamPayload));
+
+  // Alice starts her own live stream
+  await assertSucceeds(aliceDb.collection("liveStreams").doc(ALICE_UID).set(streamPayload));
+
+  // Bob joins (+1 viewerCount), sends heart (+1 likesCount), and comments
+  await assertSucceeds(
+    bobDb.collection("liveStreams").doc(ALICE_UID).update({
+      viewerCount: 1,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("liveStreams").doc(ALICE_UID).update({
+      likesCount: 1,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("liveStreams").doc(ALICE_UID).collection("liveComments").doc("lc1").set({
+      userId: BOB_UID,
+      username: "bob.lens",
+      avatarKey: "avatar_kenji",
+      text: "Hello from the stream!",
+      createdAt: serverTimestamp(),
+    })
+  );
+
+  // Charlie cannot spoof Bob's comment userId, inflate viewerCount by +50, or end Alice's stream
+  await assertFails(
+    charlieDb.collection("liveStreams").doc(ALICE_UID).collection("liveComments").doc("lc2").set({
+      userId: BOB_UID,
+      username: "bob.lens",
+      avatarKey: "avatar_kenji",
+      text: "Spoofed!",
+      createdAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    charlieDb.collection("liveStreams").doc(ALICE_UID).update({
+      viewerCount: 51,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    charlieDb.collection("liveStreams").doc(ALICE_UID).update({
+      isLive: false,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Alice ends her own stream
+  await assertSucceeds(
+    aliceDb.collection("liveStreams").doc(ALICE_UID).update({
+      isLive: false,
+      viewerCount: 0,
+      updatedAt: serverTimestamp(),
+    })
+  );
+});

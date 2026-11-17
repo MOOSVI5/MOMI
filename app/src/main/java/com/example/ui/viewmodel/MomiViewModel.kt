@@ -6,6 +6,8 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.model.ChatMessage
 import com.example.data.model.Comment
 import com.example.data.model.FollowEdge
+import com.example.data.model.LiveComment
+import com.example.data.model.LiveStream
 import com.example.data.model.MessageThread
 import com.example.data.model.NotificationItem
 import com.example.data.model.Post
@@ -69,6 +71,7 @@ class MomiViewModel(
     private val optimisticCommentsByPost = MutableStateFlow<Map<String, List<Comment>>>(emptyMap())
     private val videoDownloadMutex = Mutex()
     private val inFlightVideoDownloads = mutableMapOf<String, Deferred<Uri?>>()
+    private val recordedPostViewIds = mutableSetOf<String>()
 
     init {
         viewModelScope.launch {
@@ -287,6 +290,26 @@ class MomiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
+    val activeLiveStreams: StateFlow<List<LiveStream>> = combine(
+        repository.observeActiveLiveStreams(currentUserId),
+        allProfiles
+    ) { streams, profiles ->
+        val profilesByUid = profiles.associateBy { it.userId }
+        streams.map { stream ->
+            val p = profilesByUid[stream.userId]
+            stream.copy(
+                avatarData = p?.avatarData,
+                authorVerified = p?.isVerified ?: stream.authorVerified
+            )
+        }
+    }
+        .catch { error ->
+            val root = unwrapOrRethrowCancellation(error)
+            Log.w(TAG, "Error observing live streams", root)
+            emit(emptyList())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
+
     val notifications: StateFlow<List<NotificationItem>> = combine(
         repository.observeNotifications(currentUserId),
         followingUids
@@ -464,6 +487,30 @@ class MomiViewModel(
         repository.observeChatMessages(currentUserId, threadId).catch { error ->
             val root = unwrapOrRethrowCancellation(error)
             Log.w(TAG, "Error observing chat messages for $threadId", root)
+            emit(emptyList())
+        }
+
+    fun observeLiveStream(streamId: String): Flow<LiveStream?> = combine(
+        repository.observeLiveStream(currentUserId, streamId),
+        allProfiles
+    ) { stream, profiles ->
+        stream?.let { s ->
+            val p = profiles.firstOrNull { it.userId == s.userId }
+            s.copy(
+                avatarData = p?.avatarData,
+                authorVerified = p?.isVerified ?: s.authorVerified
+            )
+        }
+    }.catch { error ->
+        val root = unwrapOrRethrowCancellation(error)
+        Log.w(TAG, "Error observing live stream $streamId", root)
+        emit(null)
+    }
+
+    fun observeLiveComments(streamId: String): Flow<List<LiveComment>> =
+        repository.observeLiveComments(currentUserId, streamId).catch { error ->
+            val root = unwrapOrRethrowCancellation(error)
+            Log.w(TAG, "Error observing live comments for $streamId", root)
             emit(emptyList())
         }
 
@@ -865,6 +912,74 @@ class MomiViewModel(
     fun clearThreadUnread(thread: MessageThread) {
         viewModelScope.launch {
             repository.clearThreadUnread(thread)
+        }
+    }
+
+    fun recordPostView(postId: String) {
+        if (postId.isBlank()) return
+        val shouldRecord = synchronized(recordedPostViewIds) {
+            recordedPostViewIds.add(postId)
+        }
+        if (!shouldRecord) return
+        viewModelScope.launch {
+            repository.incrementPostView(postId).onFailure { error ->
+                Log.w(TAG, "Failed to record post view for $postId", error)
+            }
+        }
+    }
+
+    fun startLiveStream(title: String, category: String = "Live", onStarted: (Result<String>) -> Unit) {
+        val currentProfile = fallbackProfile()
+        viewModelScope.launch {
+            val result = repository.startLiveStream(
+                profile = currentProfile,
+                title = title,
+                category = category
+            )
+            result.onFailure { error ->
+                _errorMessage.value = unwrapErrorMessage(error, "Could not start live broadcast")
+            }
+            onStarted(result)
+        }
+    }
+
+    fun endLiveStream(streamId: String = currentUserId, onEnded: () -> Unit = {}) {
+        viewModelScope.launch {
+            repository.endLiveStream(streamId).onFailure { error ->
+                Log.w(TAG, "Error ending live stream $streamId", error)
+            }
+            onEnded()
+        }
+    }
+
+    fun joinLiveStream(streamId: String) {
+        if (streamId.isBlank() || streamId == currentUserId) return
+        viewModelScope.launch {
+            repository.joinLiveStream(streamId)
+        }
+    }
+
+    fun leaveLiveStream(streamId: String) {
+        if (streamId.isBlank() || streamId == currentUserId) return
+        viewModelScope.launch {
+            repository.leaveLiveStream(streamId)
+        }
+    }
+
+    fun sendLiveHeart(streamId: String) {
+        viewModelScope.launch {
+            repository.sendLiveHeart(streamId)
+        }
+    }
+
+    fun sendLiveComment(streamId: String, text: String) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+        val currentProfile = fallbackProfile()
+        viewModelScope.launch {
+            repository.sendLiveComment(streamId, currentProfile, trimmed).onFailure { error ->
+                _errorMessage.value = unwrapErrorMessage(error, "Could not send live comment")
+            }
         }
     }
 

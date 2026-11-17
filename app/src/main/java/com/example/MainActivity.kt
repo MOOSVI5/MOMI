@@ -75,7 +75,9 @@ import com.example.ui.components.LumaAvatar
 import android.net.Uri
 import com.example.ui.screens.CreatePostScreen
 import com.example.ui.screens.ExploreScreen
+import com.example.ui.screens.GoLiveScreen
 import com.example.ui.screens.HomeScreen
+import com.example.ui.screens.LiveViewerScreen
 import com.example.ui.screens.MessagesScreen
 import com.example.ui.screens.NotificationsScreen
 import com.example.ui.screens.PostDetailScreen
@@ -107,6 +109,8 @@ private object LumaRoutes {
     const val MESSAGES = "messages?threadId={threadId}"
     const val STORY_VIEWER = "story/{storyId}"
     const val POST_DETAIL = "post/{postId}"
+    const val GO_LIVE = "go_live"
+    const val LIVE_VIEWER = "live/{streamId}"
 
     fun createRoute(isStory: Boolean = false) = "create?story=$isStory"
     fun userProfileRoute(userId: String, username: String = "", isShowcase: Boolean = false): String {
@@ -118,6 +122,7 @@ private object LumaRoutes {
         if (threadId.isNullOrBlank()) "messages" else "messages?threadId=$threadId"
     fun storyRoute(storyId: String) = "story/$storyId"
     fun postDetailRoute(postId: String) = "post/$postId"
+    fun liveViewerRoute(streamId: String) = "live/${Uri.encode(streamId)}"
 }
 
 private data class BottomNavTab(
@@ -247,6 +252,7 @@ private fun LumaApp(
     val explorePosts by viewModel.explorePosts.collectAsStateWithLifecycle()
     val reels by viewModel.reels.collectAsStateWithLifecycle()
     val stories by viewModel.stories.collectAsStateWithLifecycle()
+    val activeLiveStreams by viewModel.activeLiveStreams.collectAsStateWithLifecycle()
     val notifications by viewModel.notifications.collectAsStateWithLifecycle()
     val unreadNotifications by viewModel.unreadNotificationCount.collectAsStateWithLifecycle()
     val messageThreads by viewModel.messageThreads.collectAsStateWithLifecycle()
@@ -398,6 +404,7 @@ private fun LumaApp(
                                 followingUids = followingUids,
                                 posts = allPosts,
                                 stories = stories,
+                                liveStreams = activeLiveStreams,
                                 unreadNotificationCount = unreadNotifications,
                                 unreadMessageCount = unreadMessages,
                                 onOpenSearch = { navigatePrimaryTab(LumaRoutes.EXPLORE) },
@@ -405,6 +412,15 @@ private fun LumaApp(
                                 onOpenMessages = { navController.navigate(LumaRoutes.messagesRoute()) },
                                 onOpenStory = { story -> navController.navigate(LumaRoutes.storyRoute(story.id)) },
                                 onAddStoryClick = { navController.navigate(LumaRoutes.createRoute(true)) },
+                                onGoLiveClick = { navController.navigate(LumaRoutes.GO_LIVE) },
+                                onOpenLiveStream = { stream ->
+                                    if (stream.userId == viewModel.currentUserId) {
+                                        navController.navigate(LumaRoutes.GO_LIVE)
+                                    } else {
+                                        navController.navigate(LumaRoutes.liveViewerRoute(stream.id))
+                                    }
+                                },
+                                onPostViewed = { viewModel.recordPostView(it.id) },
                                 onLikeToggle = { viewModel.toggleLike(it) },
                                 onDoubleTapLike = { viewModel.doubleTapLike(it) },
                                 onCommentClick = { viewModel.openComments(it.id) },
@@ -524,6 +540,10 @@ private fun LumaApp(
                                             navigatePrimaryTab(LumaRoutes.HOME)
                                         }
                                     }
+                                },
+                                onGoLiveClick = {
+                                    navController.popBackStack()
+                                    navController.navigate(LumaRoutes.GO_LIVE)
                                 }
                             )
                         }
@@ -544,6 +564,7 @@ private fun LumaApp(
                                         currentlyFollowing = it.isFollowingAuthor
                                     )
                                 },
+                                onReelViewed = { viewModel.recordPostView(it.id) },
                                 onAuthorClick = { reel ->
                                     openUserProfile(
                                         reel.userId,
@@ -743,7 +764,64 @@ private fun LumaApp(
                                         clickedPost.id.startsWith("showcase_")
                                     )
                                 },
-                                onDeletePost = { viewModel.deletePost(it.id) }
+                                onDeletePost = { viewModel.deletePost(it.id) },
+                                onPostViewed = { viewModel.recordPostView(it.id) }
+                            )
+                        }
+
+                        composable(LumaRoutes.GO_LIVE) {
+                            val streamId = viewModel.currentUserId
+                            val activeStream by remember(streamId) {
+                                viewModel.observeLiveStream(streamId)
+                            }.collectAsStateWithLifecycle(initialValue = null)
+                            val liveComments by remember(streamId) {
+                                viewModel.observeLiveComments(streamId)
+                            }.collectAsStateWithLifecycle(initialValue = emptyList())
+
+                            GoLiveScreen(
+                                profile = profile,
+                                activeStream = activeStream,
+                                comments = liveComments,
+                                onStartLive = { title, onDone ->
+                                    viewModel.startLiveStream(title) { result ->
+                                        onDone(result.isSuccess)
+                                    }
+                                },
+                                onEndLive = {
+                                    viewModel.endLiveStream(streamId)
+                                },
+                                onSendComment = { text ->
+                                    viewModel.sendLiveComment(streamId, text)
+                                },
+                                onClose = { navController.popBackStack() }
+                            )
+                        }
+
+                        composable(
+                            route = LumaRoutes.LIVE_VIEWER,
+                            arguments = listOf(navArgument("streamId") { type = NavType.StringType })
+                        ) { backStackEntry ->
+                            val streamId = Uri.decode(backStackEntry.arguments?.getString("streamId").orEmpty())
+                            val liveStream by remember(streamId) {
+                                viewModel.observeLiveStream(streamId)
+                            }.collectAsStateWithLifecycle(
+                                initialValue = activeLiveStreams.firstOrNull { it.id == streamId }
+                            )
+                            val liveComments by remember(streamId) {
+                                viewModel.observeLiveComments(streamId)
+                            }.collectAsStateWithLifecycle(initialValue = emptyList())
+
+                            LiveViewerScreen(
+                                stream = liveStream,
+                                comments = liveComments,
+                                onJoin = { viewModel.joinLiveStream(streamId) },
+                                onLeave = { viewModel.leaveLiveStream(streamId) },
+                                onSendComment = { text -> viewModel.sendLiveComment(streamId, text) },
+                                onSendHeart = { viewModel.sendLiveHeart(streamId) },
+                                onAuthorClick = { uid, username ->
+                                    openUserProfile(uid, username, false)
+                                },
+                                onClose = { navController.popBackStack() }
                             )
                         }
                     }
