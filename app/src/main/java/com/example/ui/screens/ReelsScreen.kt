@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -92,6 +93,7 @@ fun ReelsScreen(
     onBookmarkToggle: (Post) -> Unit,
     onFollowToggle: (Post) -> Unit,
     onReelViewed: (Post) -> Unit = {},
+    onReportReel: (Post) -> Unit = {},
     onAuthorClick: (Post) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -135,6 +137,7 @@ fun ReelsScreen(
                 onBookmarkToggle = { onBookmarkToggle(reel) },
                 onFollowToggle = { onFollowToggle(reel) },
                 onViewed = { onReelViewed(reel) },
+                onReportReel = { onReportReel(reel) },
                 onAuthorClick = { onAuthorClick(reel) }
             )
         }
@@ -184,6 +187,7 @@ private fun ReelPageItem(
     onBookmarkToggle: () -> Unit,
     onFollowToggle: () -> Unit,
     onViewed: () -> Unit,
+    onReportReel: () -> Unit,
     onAuthorClick: () -> Unit
 ) {
     var showHeartBurst by remember { mutableStateOf(false) }
@@ -524,6 +528,20 @@ private fun ReelPageItem(
                         tint = if (reel.isBookmarked) SilkBlueLight else Color.White,
                         modifier = Modifier.size(28.dp)
                     )
+                }
+
+                if (!isOwnReel) {
+                    IconButton(
+                        onClick = onReportReel,
+                        modifier = Modifier.minimumInteractiveComponentSize()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Flag,
+                            contentDescription = "Report clip",
+                            tint = Color.White,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
                 }
 
                 Box(

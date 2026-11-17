@@ -33,8 +33,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -90,10 +93,13 @@ internal fun MarketProductDetailSheet(
     product: MarketProduct,
     merchant: MerchantAccount?,
     isOwnListing: Boolean,
+    canCurateEditorial: Boolean = false,
     onDismiss: () -> Unit,
     onPlaceOrder: (shippingAddress: String, onDone: (Boolean) -> Unit) -> Unit,
     onMessageSeller: () -> Unit,
-    onDeleteListing: () -> Unit
+    onDeleteListing: () -> Unit,
+    onToggleFeatured: ((Boolean) -> Unit)? = null,
+    onReportListing: (() -> Unit)? = null
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var showCheckoutDialog by remember { mutableStateOf(false) }
@@ -295,19 +301,46 @@ internal fun MarketProductDetailSheet(
                     }
                 }
 
-                if (product.freeShipping) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(Color(0xFFE53238))
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = "Free shipping",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+                if (product.freeShipping || product.isFeatured) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (product.isFeatured) {
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color(0xFF3665F3))
+                                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Star,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "Editor's Pick",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                        if (product.freeShipping) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color(0xFFE53238))
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = "Free shipping",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -330,6 +363,29 @@ internal fun MarketProductDetailSheet(
                 }
 
                 Spacer(modifier = Modifier.height(6.dp))
+
+                if (canCurateEditorial && onToggleFeatured != null) {
+                    OutlinedButton(
+                        onClick = { onToggleFeatured(!product.isFeatured) },
+                        shape = RoundedCornerShape(22.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("market_feature_toggle_button")
+                    ) {
+                        Icon(
+                            imageVector = if (product.isFeatured) Icons.Filled.Star else Icons.Outlined.StarOutline,
+                            contentDescription = null,
+                            tint = Color(0xFF3665F3)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (product.isFeatured) "Remove from Editor's Picks" else "Feature as Editor's Pick",
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF3665F3)
+                        )
+                    }
+                }
 
                 if (isOwnListing) {
                     OutlinedButton(
@@ -370,6 +426,29 @@ internal fun MarketProductDetailSheet(
                                 .testTag("market_buy_now_button")
                         ) {
                             Text("Buy Now", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    if (onReportListing != null) {
+                        TextButton(
+                            onClick = onReportListing,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("market_report_listing_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Flag,
+                                contentDescription = null,
+                                tint = Color(0xFFE53238),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Report listing to Safety Team",
+                                color = Color(0xFFE53238),
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp
+                            )
                         }
                     }
                 }

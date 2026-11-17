@@ -53,6 +53,8 @@ object AppearancePrefs {
     private const val PREFS_NAME = "momi_appearance_prefs"
     private const val KEY_THEME_MODE = "theme_mode"
     private const val KEY_COLOR_SCHEME = "color_scheme"
+    private const val KEY_ADMIN_VIEW_MODE = "owner_admin_view_mode"
+    private const val KEY_AUTO_SIGN_IN = "stay_signed_in_auto"
 
     fun loadThemePreference(context: Context): ThemePreference {
         val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -79,6 +81,30 @@ object AppearancePrefs {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_COLOR_SCHEME, scheme.name)
+            .apply()
+    }
+
+    fun loadAdminViewMode(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_ADMIN_VIEW_MODE, true)
+    }
+
+    fun saveAdminViewMode(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_ADMIN_VIEW_MODE, enabled)
+            .apply()
+    }
+
+    fun isAutoSignInEnabled(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_AUTO_SIGN_IN, true)
+    }
+
+    fun setAutoSignInEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_AUTO_SIGN_IN, enabled)
             .apply()
     }
 }

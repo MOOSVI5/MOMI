@@ -13,6 +13,55 @@ data class MediaFrame(
     val imageData: String? = null
 )
 
+object MomiRoles {
+    const val USER = "USER"
+    const val MODERATOR = "MODERATOR"
+    const val EDITOR = "EDITOR"
+    const val ADMIN = "ADMIN"
+
+    fun labelOf(role: String): String = when (role.uppercase()) {
+        ADMIN -> "Admin"
+        MODERATOR -> "Moderator"
+        EDITOR -> "Editor"
+        else -> "Member"
+    }
+}
+
+object ModerationScopes {
+    const val VIOLENCE_GRAPHIC = "VIOLENCE_GRAPHIC"
+    const val SEXUAL_NUDITY = "SEXUAL_NUDITY"
+    const val HARASSMENT_SPAM = "HARASSMENT_SPAM"
+    const val MARKETPLACE_SAFETY = "MARKETPLACE_SAFETY"
+    const val EDITORIAL_CURATION = "EDITORIAL_CURATION"
+
+    val SURVEILLANCE_SCOPES = listOf(
+        VIOLENCE_GRAPHIC,
+        SEXUAL_NUDITY,
+        HARASSMENT_SPAM,
+        MARKETPLACE_SAFETY
+    )
+
+    val ALL_SCOPES = SURVEILLANCE_SCOPES + EDITORIAL_CURATION
+
+    fun labelOf(scope: String): String = when (scope) {
+        VIOLENCE_GRAPHIC -> "Violent & Graphic"
+        SEXUAL_NUDITY -> "Sexual & Explicit"
+        HARASSMENT_SPAM -> "Harassment & Spam"
+        MARKETPLACE_SAFETY -> "Marketplace Safety"
+        EDITORIAL_CURATION -> "Editorial Curation"
+        else -> scope
+    }
+
+    fun descriptionOf(scope: String): String = when (scope) {
+        VIOLENCE_GRAPHIC -> "Review & remove reported gore, violence, or graphic posts"
+        SEXUAL_NUDITY -> "Review & remove reported adult, sexual, or NSFW uploads"
+        HARASSMENT_SPAM -> "Review & remove reported abuse, hate, or spam content"
+        MARKETPLACE_SAFETY -> "Surveil & remove unsafe or prohibited Marketplace items"
+        EDITORIAL_CURATION -> "Feature top Marketplace deals as Editor's Picks"
+        else -> ""
+    }
+}
+
 @IgnoreExtraProperties
 data class UserProfile(
     @DocumentId val id: String = "",
@@ -27,6 +76,9 @@ data class UserProfile(
     val followersCount: Long = 0L,
     val followingCount: Long = 0L,
     @get:PropertyName("isVerified") val isVerified: Boolean = false,
+    val role: String = MomiRoles.USER,
+    val moderationScopes: List<String> = emptyList(),
+    val assignedByEmail: String? = null,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -296,6 +348,7 @@ data class MarketProduct(
     val videoChunksCount: Long = 0L,
     val videoDurationMs: Long = 0L,
     val stockCount: Long = 1L,
+    @get:PropertyName("isFeatured") val isFeatured: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
@@ -329,6 +382,27 @@ data class MarketOrder(
     val priceUsd: Double = 0.0,
     val shippingAddress: String = "",
     val status: String = "PLACED",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
+data class ContentReport(
+    @DocumentId val id: String = "",
+    val targetType: String = "POST",
+    val targetId: String = "",
+    val targetAuthorUid: String = "",
+    val targetAuthorUsername: String = "",
+    val targetPreviewText: String = "",
+    val reporterUid: String = "",
+    val reporterUsername: String = "",
+    val category: String = ModerationScopes.VIOLENCE_GRAPHIC,
+    val reasonDetail: String = "",
+    val status: String = "OPEN",
+    val reviewedByUid: String? = null,
+    val reviewedByUsername: String? = null,
+    val reviewedByRole: String? = null,
+    val resolutionNote: String? = null,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )

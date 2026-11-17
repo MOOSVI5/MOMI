@@ -9,6 +9,7 @@ import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
 import com.example.R
+import com.example.ui.theme.AppearancePrefs
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
@@ -45,7 +46,12 @@ fun attemptAutoSignIn(
     scope: CoroutineScope
 ) {
     if (Firebase.auth.currentUser != null) {
+        AppearancePrefs.setAutoSignInEnabled(context, true)
         onAuthSuccess()
+        return
+    }
+    if (!AppearancePrefs.isAutoSignInEnabled(context)) {
+        onUnauthenticated()
         return
     }
     val clientId = try {
@@ -55,29 +61,49 @@ fun attemptAutoSignIn(
         return
     }
 
-    val googleIdOption = GetGoogleIdOption.Builder()
-        .setFilterByAuthorizedAccounts(true)
-        .setServerClientId(clientId)
-        .setAutoSelectEnabled(true)
-        .build()
+    val activityContext = context as? Activity ?: context
 
-    val request = GetCredentialRequest.Builder()
-        .addCredentialOption(googleIdOption)
-        .build()
+    suspend fun tryGoogleId(filterAuthorizedOnly: Boolean): Boolean {
+        val option = GetGoogleIdOption.Builder()
+            .setFilterByAuthorizedAccounts(filterAuthorizedOnly)
+            .setServerClientId(clientId)
+            .setAutoSelectEnabled(true)
+            .build()
+        val req = GetCredentialRequest.Builder()
+            .addCredentialOption(option)
+            .build()
+        val result = credentialManager.getCredential(activityContext, req)
+        val credential = result.credential
+        if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
+            val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
+            val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
+            Firebase.auth.signInWithCredential(authCredential).await()
+            AppearancePrefs.setAutoSignInEnabled(context, true)
+            return true
+        }
+        return false
+    }
 
     scope.launch {
         try {
-            val result = credentialManager.getCredential(context, request)
-            val credential = result.credential
-            if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
-                val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-                Firebase.auth.signInWithCredential(authCredential).await()
+            if (tryGoogleId(filterAuthorizedOnly = true)) {
+                onAuthSuccess()
+                return@launch
+            }
+        } catch (_: GetCredentialCancellationException) {
+            onUnauthenticated()
+            return@launch
+        } catch (_: Exception) {
+            // Fall through to unfiltered Credential Manager auto-select retry for fresh preview launches
+        }
+
+        try {
+            if (tryGoogleId(filterAuthorizedOnly = false)) {
                 onAuthSuccess()
             } else {
                 onUnauthenticated()
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             onUnauthenticated()
         }
     }
@@ -112,6 +138,7 @@ fun onGoogleSignInClicked(
                 val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
                 val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
                 Firebase.auth.signInWithCredential(authCredential).await()
+                AppearancePrefs.setAutoSignInEnabled(context, true)
                 onAuthSuccess()
             } else {
                 onAuthError("Unexpected credential type returned.")
@@ -127,10 +154,12 @@ fun onGoogleSignInClicked(
 }
 
 fun signOut(
+    context: Context,
     credentialManager: CredentialManager,
     scope: CoroutineScope,
     onSignOutComplete: () -> Unit = {}
 ) {
+    AppearancePrefs.setAutoSignInEnabled(context, false)
     scope.launch {
         withContext(NonCancellable) {
             try {

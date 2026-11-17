@@ -932,3 +932,206 @@ test("Marketplace: admin-only merchant verification, seller product ownership, a
   );
   await assertFails(aliceDb.collection("marketOrders").doc("ord_1").delete());
 });
+
+// --- 10. Team Roles, Scoped Surveillance & Content Moderation ---
+
+test("Team RBAC & Content Moderation: admin appoints scoped moderators/editors, non-admin cannot self-escalate, moderators handle only enrolled scopes", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, { email: "alice@example.com", email_verified: true }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, { email: "bob@example.com", email_verified: true }).firestore();
+  const charlieDb = testEnv.authenticatedContext(CHARLIE_UID, { email: "charlie@example.com", email_verified: true }).firestore();
+  const adminDb = testEnv.authenticatedContext("admin_momi", {
+    email: "syali6511@gmail.com",
+    email_verified: true,
+  }).firestore();
+
+  // Users cannot create profiles with pre-assigned MODERATOR or EDITOR roles
+  await assertFails(
+    aliceDb.collection("users").doc(ALICE_UID).set({
+      ...validProfilePayload(ALICE_UID),
+      role: "MODERATOR",
+      moderationScopes: ["VIOLENCE_GRAPHIC"],
+    })
+  );
+
+  // Create regular profiles
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set({
+    ...validProfilePayload(ALICE_UID),
+    role: "USER",
+    moderationScopes: [],
+  }));
+  await assertSucceeds(bobDb.collection("users").doc(BOB_UID).set({
+    ...validProfilePayload(BOB_UID, "bob.lens", "Bob Lens"),
+    role: "USER",
+    moderationScopes: [],
+  }));
+  await assertSucceeds(charlieDb.collection("users").doc(CHARLIE_UID).set({
+    ...validProfilePayload(CHARLIE_UID, "charlie.art", "Charlie Art"),
+    role: "USER",
+    moderationScopes: [],
+  }));
+
+  // Bob cannot self-promote to MODERATOR or appoint Alice
+  await assertFails(
+    bobDb.collection("users").doc(BOB_UID).update({
+      role: "MODERATOR",
+      moderationScopes: ["VIOLENCE_GRAPHIC", "SEXUAL_NUDITY"],
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    bobDb.collection("users").doc(ALICE_UID).update({
+      role: "EDITOR",
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Admin appoints Alice as MODERATOR enrolled strictly in VIOLENCE_GRAPHIC & SEXUAL_NUDITY
+  await assertSucceeds(
+    adminDb.collection("users").doc(ALICE_UID).update({
+      role: "MODERATOR",
+      moderationScopes: ["VIOLENCE_GRAPHIC", "SEXUAL_NUDITY"],
+      assignedByEmail: "syali6511@gmail.com",
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Admin appoints Charlie as EDITOR enrolled strictly in EDITORIAL_CURATION
+  await assertSucceeds(
+    adminDb.collection("users").doc(CHARLIE_UID).update({
+      role: "EDITOR",
+      moderationScopes: ["EDITORIAL_CURATION"],
+      assignedByEmail: "syali6511@gmail.com",
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Alice (Moderator) does NOT have full authority: cannot verify Bob or appoint Bob as staff
+  await assertFails(
+    aliceDb.collection("users").doc(BOB_UID).update({
+      isVerified: true,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    aliceDb.collection("users").doc(BOB_UID).update({
+      role: "MODERATOR",
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Bob publishes a violating post and a marketplace product
+  await assertSucceeds(bobDb.collection("posts").doc("bad_post_1").set(validPostPayload(BOB_UID, "bob.lens")));
+  await assertSucceeds(
+    bobDb.collection("marketProducts").doc("prod_curate").set({
+      sellerUid: BOB_UID,
+      sellerUsername: "bob.lens",
+      storeName: "Bob Goods",
+      title: "Vintage Tripod",
+      description: "Brass tripod stand",
+      category: "Collectibles",
+      priceUsd: 49.0,
+      originalPriceUsd: 65.0,
+      discountPercent: 24,
+      freeShipping: true,
+      imageKey: "img_post_coastal",
+      videoDurationMs: 0,
+      stockCount: 3,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Regular user Bob reports violent/graphic post AND a marketplace safety item
+  const violentReport = {
+    reporterUid: BOB_UID,
+    reporterUsername: "bob.lens",
+    targetType: "POST",
+    targetId: "bad_post_1",
+    targetAuthorUid: BOB_UID,
+    targetAuthorUsername: "bob.lens",
+    targetPreviewText: "Reported graphic content",
+    category: "VIOLENCE_GRAPHIC",
+    reasonDetail: "Contains graphic violence",
+    status: "OPEN",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+  const marketReport = {
+    ...violentReport,
+    targetType: "PRODUCT",
+    targetId: "prod_curate",
+    category: "MARKETPLACE_SAFETY",
+    reasonDetail: "Suspicious listing",
+  };
+
+  await assertSucceeds(bobDb.collection("contentReports").doc("rep_graphic").set(violentReport));
+  await assertSucceeds(bobDb.collection("contentReports").doc("rep_market").set(marketReport));
+
+  // Regular user Bob can query own submitted reports, CANNOT list all reports
+  await assertSucceeds(bobDb.collection("contentReports").where("reporterUid", "==", BOB_UID).get());
+  await assertFails(bobDb.collection("contentReports").get());
+
+  // Alice (Moderator with VIOLENCE_GRAPHIC) can list reports and resolve rep_graphic + delete violating post
+  await assertSucceeds(aliceDb.collection("contentReports").get());
+  await assertSucceeds(
+    aliceDb.collection("contentReports").doc("rep_graphic").update({
+      status: "REMOVED",
+      reviewedByUid: ALICE_UID,
+      reviewedByUsername: "aria.studio",
+      reviewedByRole: "MODERATOR",
+      resolutionNote: "Removed graphic post",
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(aliceDb.collection("posts").doc("bad_post_1").delete());
+
+  // Alice is NOT enrolled in MARKETPLACE_SAFETY -> denied resolving rep_market, deleting product, or featuring product
+  await assertFails(
+    aliceDb.collection("contentReports").doc("rep_market").update({
+      status: "DISMISSED",
+      reviewedByUid: ALICE_UID,
+      reviewedByUsername: "aria.studio",
+      reviewedByRole: "MODERATOR",
+      resolutionNote: "Out of scope",
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(aliceDb.collection("marketProducts").doc("prod_curate").delete());
+  await assertFails(
+    aliceDb.collection("marketProducts").doc("prod_curate").update({
+      isFeatured: true,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Charlie (Editor with EDITORIAL_CURATION) CAN feature product, CANNOT delete Bob's product or fake ADMIN role
+  await assertSucceeds(
+    charlieDb.collection("marketProducts").doc("prod_curate").update({
+      isFeatured: true,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(charlieDb.collection("marketProducts").doc("prod_curate").delete());
+  await assertFails(
+    charlieDb.collection("contentReports").doc("rep_market").update({
+      status: "DISMISSED",
+      reviewedByUid: CHARLIE_UID,
+      reviewedByUsername: "charlie.art",
+      reviewedByRole: "ADMIN",
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Admin can resolve any report and delete reports
+  await assertSucceeds(adminDb.collection("contentReports").get());
+  await assertSucceeds(
+    adminDb.collection("contentReports").doc("rep_market").update({
+      status: "DISMISSED",
+      reviewedByUid: "admin_momi",
+      reviewedByUsername: "syali6511",
+      reviewedByRole: "ADMIN",
+      resolutionNote: "Checked by owner",
+      updatedAt: serverTimestamp(),
+    })
+  );
+});

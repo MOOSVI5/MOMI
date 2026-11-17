@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.ai.MomiAiAssistantRepository
 import com.example.data.model.ChatMessage
 import com.example.data.model.Comment
+import com.example.data.model.ContentReport
 import com.example.data.model.FollowEdge
 import com.example.data.model.LiveComment
 import com.example.data.model.LiveStream
@@ -15,6 +16,8 @@ import com.example.data.model.MarketOrder
 import com.example.data.model.MarketProduct
 import com.example.data.model.MerchantAccount
 import com.example.data.model.MessageThread
+import com.example.data.model.ModerationScopes
+import com.example.data.model.MomiRoles
 import com.example.data.model.NotificationItem
 import com.example.data.model.Post
 import com.example.data.model.Story
@@ -72,7 +75,14 @@ class MomiViewModel(
     private val aiAssistantRepository: MomiAiAssistantRepository = MomiAiAssistantRepository()
 ) : ViewModel() {
 
-    val isAdminUser: Boolean = initialEmail?.trim().equals("syali6511@gmail.com", ignoreCase = true)
+    val isOwnerAccount: Boolean = initialEmail?.trim().equals("syali6511@gmail.com", ignoreCase = true)
+
+    private val _adminViewEnabled = MutableStateFlow(isOwnerAccount)
+    val adminViewEnabled: StateFlow<Boolean> = _adminViewEnabled.asStateFlow()
+
+    val isAdminModeActive: StateFlow<Boolean> = _adminViewEnabled
+        .map { isOwnerAccount && it }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), isOwnerAccount)
 
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
@@ -206,6 +216,75 @@ class MomiViewModel(
     val profile: StateFlow<UserProfile?> = profileState
         .map { (it as? StreamUiState.Success)?.data }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), null)
+
+    val currentUserRole: StateFlow<String> = combine(profile, isAdminModeActive) { prof, adminActive ->
+        when {
+            adminActive -> MomiRoles.ADMIN
+            isOwnerAccount -> MomiRoles.USER
+            else -> prof?.role?.uppercase()?.takeIf {
+                it in setOf(MomiRoles.MODERATOR, MomiRoles.EDITOR, MomiRoles.USER)
+            } ?: MomiRoles.USER
+        }
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+        if (isOwnerAccount) MomiRoles.ADMIN else MomiRoles.USER
+    )
+
+    val currentModerationScopes: StateFlow<Set<String>> = combine(profile, isAdminModeActive) { prof, adminActive ->
+        when {
+            adminActive -> ModerationScopes.ALL_SCOPES.toSet()
+            isOwnerAccount -> emptySet()
+            prof?.role?.uppercase() in setOf(MomiRoles.MODERATOR, MomiRoles.EDITOR) ->
+                prof?.moderationScopes?.toSet().orEmpty()
+            else -> emptySet()
+        }
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+        if (isOwnerAccount) ModerationScopes.ALL_SCOPES.toSet() else emptySet()
+    )
+
+    val canAccessModerationQueue: StateFlow<Boolean> = combine(
+        isAdminModeActive,
+        currentUserRole,
+        currentModerationScopes
+    ) { adminActive, role, scopes ->
+        adminActive || (role in setOf(MomiRoles.MODERATOR, MomiRoles.EDITOR) &&
+            scopes.any { it in ModerationScopes.SURVEILLANCE_SCOPES })
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), isOwnerAccount)
+
+    val canCurateMarketplace: StateFlow<Boolean> = combine(
+        isAdminModeActive,
+        currentUserRole,
+        currentModerationScopes
+    ) { adminActive, role, scopes ->
+        adminActive || (role == MomiRoles.EDITOR && scopes.contains(ModerationScopes.EDITORIAL_CURATION))
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), isOwnerAccount)
+
+    val contentReports: StateFlow<List<ContentReport>> = canAccessModerationQueue
+        .flatMapLatest { canView ->
+            if (!canView) {
+                flowOf(emptyList())
+            } else {
+                repository.observeContentReports(currentUserId).catch { error ->
+                    val root = unwrapOrRethrowCancellation(error)
+                    Log.w(TAG, "Error observing content reports", root)
+                    emit(emptyList())
+                }
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
+
+    val openReportsCount: StateFlow<Int> = combine(
+        contentReports,
+        currentModerationScopes,
+        isAdminModeActive
+    ) { reports, scopes, adminActive ->
+        reports.count { report ->
+            report.status == "OPEN" && (adminActive || scopes.contains(report.category))
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), 0)
 
     private val likedPostIds: StateFlow<Set<String>> = repository.observeLikedPostIds(currentUserId)
         .catch { error ->
@@ -658,6 +737,9 @@ class MomiViewModel(
     fun loadAppearance(context: android.content.Context) {
         _themePreference.value = AppearancePrefs.loadThemePreference(context)
         _colorScheme.value = AppearancePrefs.loadColorScheme(context)
+        if (isOwnerAccount) {
+            _adminViewEnabled.value = AppearancePrefs.loadAdminViewMode(context)
+        }
     }
 
     fun setThemePreference(context: android.content.Context, preference: ThemePreference) {
@@ -668,6 +750,17 @@ class MomiViewModel(
     fun setColorScheme(context: android.content.Context, scheme: AppColorScheme) {
         _colorScheme.value = scheme
         AppearancePrefs.saveColorScheme(context, scheme)
+    }
+
+    fun setAdminViewEnabled(context: Context, enabled: Boolean) {
+        if (!isOwnerAccount) return
+        _adminViewEnabled.value = enabled
+        AppearancePrefs.saveAdminViewMode(context, enabled)
+        _statusNotice.value = if (enabled) {
+            "Switched to Admin View"
+        } else {
+            "Switched to User View"
+        }
     }
 
     fun setSearchQuery(query: String) {
@@ -1023,13 +1116,120 @@ class MomiViewModel(
     }
 
     fun setUserVerified(targetUid: String, verified: Boolean) {
-        if (!isAdminUser) {
-            _errorMessage.value = "Only the Momi owner can manage verified checkmarks."
+        if (!isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to manage verified checkmarks."
             return
         }
         viewModelScope.launch {
             repository.setUserVerified(targetUid, verified).onFailure {
                 _errorMessage.value = unwrapErrorMessage(it, "Could not update verified badge")
+            }
+        }
+    }
+
+    fun assignTeamMemberRole(
+        targetUid: String,
+        role: String,
+        scopes: List<String>
+    ) {
+        if (!isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to appoint team roles."
+            return
+        }
+        if (targetUid == currentUserId) {
+            _errorMessage.value = "Your owner account always retains Admin authority."
+            return
+        }
+        viewModelScope.launch {
+            repository.setUserRoleAndScopes(
+                targetUid = targetUid,
+                role = role,
+                scopes = scopes,
+                adminEmail = initialEmail ?: "syali6511@gmail.com"
+            ).onSuccess {
+                _statusNotice.value = if (role == MomiRoles.USER) {
+                    "Team role removed — user restored to regular member."
+                } else {
+                    "Updated team member to ${MomiRoles.labelOf(role)} (${scopes.size} duties)."
+                }
+            }.onFailure { error ->
+                _errorMessage.value = unwrapErrorMessage(error, "Could not update team member role")
+            }
+        }
+    }
+
+    fun submitContentReport(
+        targetType: String,
+        targetId: String,
+        targetAuthorUid: String,
+        targetAuthorUsername: String,
+        targetPreviewText: String,
+        category: String,
+        reasonDetail: String
+    ) {
+        val currentProfile = fallbackProfile()
+        viewModelScope.launch {
+            repository.submitContentReport(
+                reporterProfile = currentProfile,
+                targetType = targetType,
+                targetId = targetId,
+                targetAuthorUid = targetAuthorUid,
+                targetAuthorUsername = targetAuthorUsername,
+                targetPreviewText = targetPreviewText,
+                category = category,
+                reasonDetail = reasonDetail
+            ).onSuccess {
+                _statusNotice.value = "Report submitted to Momi Safety Team."
+            }.onFailure { error ->
+                _errorMessage.value = unwrapErrorMessage(error, "Could not submit report")
+            }
+        }
+    }
+
+    fun resolveContentReport(
+        report: ContentReport,
+        removeContent: Boolean,
+        resolutionNote: String
+    ) {
+        val allowed = isAdminModeActive.value || currentModerationScopes.value.contains(report.category)
+        if (!allowed) {
+            _errorMessage.value = "You are not enrolled in ${ModerationScopes.labelOf(report.category)} moderation."
+            return
+        }
+        val reviewer = fallbackProfile()
+        val role = currentUserRole.value
+        viewModelScope.launch {
+            if (removeContent) {
+                when (report.targetType.uppercase()) {
+                    "POST" -> {
+                        if (!report.targetId.startsWith("showcase_")) {
+                            val delResult = repository.deletePost(report.targetId)
+                            if (delResult.isFailure) {
+                                val err = delResult.exceptionOrNull()
+                                Log.w(TAG, "Post delete before resolving report failed/already gone", err)
+                            }
+                        }
+                    }
+                    "PRODUCT" -> {
+                        val delResult = marketplaceRepository.deleteProduct(report.targetId)
+                        if (delResult.isFailure) {
+                            Log.w(TAG, "Product delete failed", delResult.exceptionOrNull())
+                        }
+                    }
+                }
+            }
+            repository.resolveContentReport(
+                reportId = report.id,
+                status = if (removeContent) "REMOVED" else "DISMISSED",
+                reviewerProfile = reviewer,
+                reviewerRole = role,
+                resolutionNote = resolutionNote.ifBlank {
+                    if (removeContent) "Removed violating content" else "Reviewed and cleared"
+                }
+            ).onSuccess {
+                _statusNotice.value = if (removeContent) "Content removed & report closed." else "Report dismissed."
+            }.onFailure { error ->
+                _errorMessage.value = unwrapErrorMessage(error, "Could not update report status")
             }
         }
     }
@@ -1195,8 +1395,8 @@ class MomiViewModel(
     }
 
     fun setMerchantVerified(merchantUid: String, verified: Boolean) {
-        if (!isAdminUser) {
-            _errorMessage.value = "Only the Momi owner can verify merchant storefronts."
+        if (!isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to verify merchant storefronts."
             return
         }
         viewModelScope.launch {
@@ -1207,6 +1407,22 @@ class MomiViewModel(
             ).onFailure {
                 _errorMessage.value = unwrapErrorMessage(it, "Could not update merchant verification")
             }
+        }
+    }
+
+    fun setProductFeatured(productId: String, featured: Boolean) {
+        if (!canCurateMarketplace.value) {
+            _errorMessage.value = "Only Admin or enrolled Editors can feature deals."
+            return
+        }
+        viewModelScope.launch {
+            marketplaceRepository.setProductFeatured(productId, featured)
+                .onSuccess {
+                    _statusNotice.value = if (featured) "Added to Editor's Picks!" else "Removed from Editor's Picks."
+                }
+                .onFailure {
+                    _errorMessage.value = unwrapErrorMessage(it, "Could not update featured status")
+                }
         }
     }
 

@@ -26,14 +26,18 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.filled.AddBox
+import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.GridOn
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SmartDisplay
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.BookmarkBorder
@@ -51,6 +55,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -70,7 +75,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.ContentReport
 import com.example.data.model.FollowEdge
+import com.example.data.model.ModerationScopes
+import com.example.data.model.MomiRoles
 import com.example.data.model.Post
 import com.example.data.model.UserProfile
 import com.example.ui.components.EditProfileDialog
@@ -103,7 +111,15 @@ fun ProfileScreen(
     allPosts: List<Post>,
     themePreference: ThemePreference,
     appColorScheme: AppColorScheme,
-    isAdminUser: Boolean = false,
+    isOwnerAccount: Boolean = false,
+    isAdminViewActive: Boolean = false,
+    currentRole: String = MomiRoles.USER,
+    enrolledScopes: Set<String> = emptySet(),
+    contentReports: List<ContentReport> = emptyList(),
+    openReportsCount: Int = 0,
+    onToggleAdminViewMode: (Boolean) -> Unit = {},
+    onAssignTeamMemberRole: (targetUid: String, role: String, scopes: List<String>) -> Unit = { _, _, _ -> },
+    onResolveReport: (report: ContentReport, removeContent: Boolean, resolutionNote: String) -> Unit = { _, _, _ -> },
     onThemeChange: (ThemePreference) -> Unit,
     onColorSchemeChange: (AppColorScheme) -> Unit,
     onCreateClick: () -> Unit,
@@ -132,7 +148,14 @@ fun ProfileScreen(
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showCreatorsSheet by remember { mutableStateOf(false) }
     var showAdminVerifySheet by remember { mutableStateOf(false) }
+    var showTeamRolesSheet by remember { mutableStateOf(false) }
+    var showModerationQueueSheet by remember { mutableStateOf(false) }
     var followSheetTab by remember { mutableStateOf<Int?>(null) }
+
+    val canAccessSafetyQueue = isAdminViewActive || (
+        currentRole in setOf(MomiRoles.MODERATOR, MomiRoles.EDITOR) &&
+            enrolledScopes.any { it in ModerationScopes.SURVEILLANCE_SCOPES }
+        )
 
     val ownPosts = remember(allPosts, profile?.userId) {
         val uid = profile?.userId.orEmpty()
@@ -424,27 +447,123 @@ fun ProfileScreen(
                     }
                 }
 
-                if (isAdminUser) {
+                if (isOwnerAccount) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (isAdminViewActive) Icons.Filled.AdminPanelSettings else Icons.Filled.SwapHoriz,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (isAdminViewActive) "Admin View Active" else "User View Active",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = if (isAdminViewActive) {
+                                        "Team roles, verification & full safety tools enabled"
+                                    } else {
+                                        "Browsing Momi cleanly as a normal community member"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = isAdminViewActive,
+                                onCheckedChange = { onToggleAdminViewMode(it) },
+                                modifier = Modifier.testTag("owner_admin_mode_switch")
+                            )
+                        }
+                    }
+                }
+
+                if (isAdminViewActive) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                showSettingsSheet = false
+                                showTeamRolesSheet = true
+                            },
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("admin_team_roles_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Groups,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Team & Roles", fontWeight = FontWeight.Bold, maxLines = 1)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                showSettingsSheet = false
+                                showAdminVerifySheet = true
+                            },
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("admin_verify_users_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Verified,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Verify Users", fontWeight = FontWeight.Bold, maxLines = 1)
+                        }
+                    }
+                }
+
+                if (canAccessSafetyQueue) {
                     OutlinedButton(
                         onClick = {
                             showSettingsSheet = false
-                            showAdminVerifySheet = true
+                            showModerationQueueSheet = true
                         },
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(48.dp)
-                            .testTag("admin_verify_users_button")
+                            .testTag("safety_queue_settings_button")
                     ) {
                         Icon(
-                            imageVector = Icons.Filled.Verified,
+                            imageVector = Icons.Filled.Shield,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Manage Verified Checkmarks",
+                            text = if (openReportsCount > 0) {
+                                "Safety Surveillance Queue ($openReportsCount open)"
+                            } else {
+                                "Safety Surveillance Queue"
+                            },
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -513,7 +632,27 @@ fun ProfileScreen(
         }
     }
 
-    if (showAdminVerifySheet && isAdminUser) {
+    if (showTeamRolesSheet && isAdminViewActive) {
+        TeamRolesManagementSheet(
+            currentUserId = profile?.userId.orEmpty(),
+            allUsers = allCreators,
+            onAssignRoleAndScopes = onAssignTeamMemberRole,
+            onDismiss = { showTeamRolesSheet = false }
+        )
+    }
+
+    if (showModerationQueueSheet && canAccessSafetyQueue) {
+        ModerationQueueSheet(
+            isAdminModeActive = isAdminViewActive,
+            currentRole = currentRole,
+            enrolledScopes = enrolledScopes,
+            reports = contentReports,
+            onResolveReport = onResolveReport,
+            onDismiss = { showModerationQueueSheet = false }
+        )
+    }
+
+    if (showAdminVerifySheet && isAdminViewActive) {
         var userFilter by remember { mutableStateOf("") }
         val filteredUsers = remember(allCreators, userFilter) {
             val q = userFilter.trim()
@@ -854,31 +993,191 @@ fun ProfileScreen(
                         }
                     }
 
-                    if (isAdminUser) {
+                    if (isOwnerAccount && isAdminViewActive) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Surface(
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Filled.AdminPanelSettings,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Owner Admin Console",
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                                        )
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(MaterialTheme.colorScheme.surface)
+                                            .clickable { onToggleAdminViewMode(false) }
+                                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                                            .testTag("switch_to_user_view_button")
+                                    ) {
+                                        Text(
+                                            text = "Switch to User",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(38.dp)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(MaterialTheme.colorScheme.surface)
+                                            .clickable { showTeamRolesSheet = true }
+                                            .testTag("profile_team_roles_chip"),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "Team Roles",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1.1f)
+                                            .height(38.dp)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(MaterialTheme.colorScheme.surface)
+                                            .clickable { showModerationQueueSheet = true }
+                                            .testTag("profile_safety_queue_chip"),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = if (openReportsCount > 0) "Safety ($openReportsCount)" else "Safety Queue",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (openReportsCount > 0) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(0.9f)
+                                            .height(38.dp)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(MaterialTheme.colorScheme.surface)
+                                            .clickable { showAdminVerifySheet = true }
+                                            .testTag("profile_verify_chip"),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "Verify",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    } else if (isOwnerAccount && !isAdminViewActive) {
                         Spacer(modifier = Modifier.height(8.dp))
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(10.dp))
-                                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f))
-                                .clickable { showAdminVerifySheet = true }
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f))
+                                .clickable { onToggleAdminViewMode(true) }
+                                .padding(horizontal = 12.dp, vertical = 9.dp)
+                                .testTag("switch_to_admin_view_button"),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.Center
                         ) {
                             Icon(
-                                imageVector = Icons.Filled.Verified,
+                                imageVector = Icons.Filled.SwapHoriz,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "Verify users (Admin)",
+                                text = "Using Member View · Switch to Admin",
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                        }
+                    } else if (!isOwnerAccount && currentRole in setOf(MomiRoles.MODERATOR, MomiRoles.EDITOR) && enrolledScopes.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Shield,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Momi ${MomiRoles.labelOf(currentRole)}",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "Enrolled: ${enrolledScopes.joinToString(", ") { ModerationScopes.labelOf(it) }}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (canAccessSafetyQueue) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(MaterialTheme.colorScheme.primary)
+                                            .clickable { showModerationQueueSheet = true }
+                                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                                            .testTag("staff_open_safety_queue_button")
+                                    ) {
+                                        Text(
+                                            text = if (openReportsCount > 0) "Queue ($openReportsCount)" else "Queue",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onPrimary
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }

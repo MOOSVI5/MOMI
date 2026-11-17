@@ -90,6 +90,7 @@ fun MarketplaceScreen(
     profile: UserProfile?,
     currentUserId: String,
     isAdminUser: Boolean,
+    canCurateEditorial: Boolean = false,
     merchants: List<MerchantAccount>,
     products: List<MarketProduct>,
     orders: List<MarketOrder>,
@@ -114,6 +115,8 @@ fun MarketplaceScreen(
     onPlaceOrder: (MarketProduct, String, (Boolean) -> Unit) -> Unit,
     onUpdateOrderStatus: (String, String) -> Unit,
     onMessageSeller: (String) -> Unit,
+    onToggleProductFeatured: (String, Boolean) -> Unit = { _, _ -> },
+    onReportProduct: (MarketProduct) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var selectedCategory by remember { mutableStateOf("All Deals") }
@@ -155,6 +158,7 @@ fun MarketplaceScreen(
             product = freshProduct,
             merchant = merchantsByUid[freshProduct.sellerUid],
             isOwnListing = freshProduct.sellerUid == currentUserId,
+            canCurateEditorial = canCurateEditorial,
             onDismiss = { selectedProduct = null },
             onPlaceOrder = { address, onDone ->
                 onPlaceOrder(freshProduct, address) { ok ->
@@ -169,6 +173,13 @@ fun MarketplaceScreen(
             onDeleteListing = {
                 onDeleteProduct(freshProduct.id)
                 selectedProduct = null
+            },
+            onToggleFeatured = { next ->
+                onToggleProductFeatured(freshProduct.id, next)
+            },
+            onReportListing = {
+                selectedProduct = null
+                onReportProduct(freshProduct)
             }
         )
     }
@@ -823,6 +834,22 @@ private fun MarketLeadProductCard(
             }
 
             Column(modifier = Modifier.weight(1f)) {
+                if (product.isFeatured) {
+                    Box(
+                        modifier = Modifier
+                            .padding(bottom = 4.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(MarketPromoBlue)
+                            .padding(horizontal = 7.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "Editor's Pick",
+                            color = Color.White,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
                 Text(
                     text = product.title,
                     fontSize = 15.sp,
@@ -911,6 +938,23 @@ private fun MarketGridProductCard(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
+            if (product.isFeatured) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(6.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MarketPromoBlue)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = "Editor's Pick",
+                        color = Color.White,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
             if (product.isVideoProduct) {
                 Icon(
                     imageVector = Icons.Filled.PlayCircleFilled,

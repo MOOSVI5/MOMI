@@ -4,11 +4,14 @@ import android.content.Context
 import com.example.R
 import com.example.data.model.ChatMessage
 import com.example.data.model.Comment
+import com.example.data.model.ContentReport
 import com.example.data.model.FollowEdge
 import com.example.data.model.InteractionMarker
 import com.example.data.model.LiveComment
 import com.example.data.model.LiveStream
 import com.example.data.model.MessageThread
+import com.example.data.model.ModerationScopes
+import com.example.data.model.MomiRoles
 import com.example.data.model.NotificationItem
 import com.example.data.model.Post
 import com.example.data.model.Story
@@ -54,6 +57,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     private fun followsCol() = db.collection("follows")
     private fun threadsCol() = db.collection("threads")
     private fun liveStreamsCol() = db.collection("liveStreams")
+    private fun reportsCol() = db.collection("contentReports")
 
     fun observeProfile(userId: String): Flow<UserProfile?> {
         val docRef = userDoc(userId)
@@ -314,6 +318,8 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                         "followersCount" to 0L,
                         "followingCount" to 0L,
                         "isVerified" to false,
+                        "role" to MomiRoles.USER,
+                        "moderationScopes" to emptyList<String>(),
                         "createdAt" to FieldValue.serverTimestamp(),
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
@@ -1003,6 +1009,136 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            throw e
+        }
+    }
+
+    suspend fun setUserRoleAndScopes(
+        targetUid: String,
+        role: String,
+        scopes: List<String>,
+        adminEmail: String = "syali6511@gmail.com"
+    ): Result<Unit> = runCatching {
+        requireUserId()
+        require(targetUid.isNotBlank()) { "Target user ID must not be blank" }
+        val normalizedRole = role.uppercase().takeIf {
+            it in setOf(MomiRoles.USER, MomiRoles.MODERATOR, MomiRoles.EDITOR)
+        } ?: MomiRoles.USER
+        val cleanScopes = if (normalizedRole == MomiRoles.USER) {
+            emptyList()
+        } else {
+            scopes.distinct().filter { it in ModerationScopes.ALL_SCOPES }.take(6)
+        }
+        val docRef = userDoc(targetUid)
+        try {
+            val updates = hashMapOf<String, Any?>(
+                "role" to normalizedRole,
+                "moderationScopes" to cleanScopes,
+                "assignedByEmail" to if (normalizedRole == MomiRoles.USER) null else adminEmail.take(120),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            docRef.update(updates).await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            throw e
+        }
+    }
+
+    fun observeContentReports(currentUid: String): Flow<List<ContentReport>> {
+        val colRef = reportsCol()
+        val path = colRef.path
+        return colRef
+            .orderBy("createdAt", Query.Direction.DESCENDING)
+            .snapshots(MetadataChanges.EXCLUDE)
+            .map { snapshot ->
+                snapshot.toObjects(ContentReport::class.java, ServerTimestampBehavior.ESTIMATE)
+                    .sortedWith(
+                        compareBy<ContentReport> { if (it.status == "OPEN") 0 else 1 }
+                            .thenByDescending { it.createdAt ?: Timestamp(0, 0) }
+                            .thenBy { it.id }
+                    )
+            }
+            .catch { error ->
+                logFlowErrorIfSignedIn(currentUid, error, OperationType.LIST, path)
+                throw error
+            }
+    }
+
+    suspend fun submitContentReport(
+        reporterProfile: UserProfile,
+        targetType: String,
+        targetId: String,
+        targetAuthorUid: String,
+        targetAuthorUsername: String,
+        targetPreviewText: String,
+        category: String,
+        reasonDetail: String
+    ): Result<String> = runCatching {
+        val uid = requireUserId()
+        val normalizedTargetType = targetType.uppercase().takeIf {
+            it in setOf("POST", "PRODUCT", "COMMENT", "USER")
+        } ?: "POST"
+        val normalizedCategory = category.uppercase().takeIf {
+            it in ModerationScopes.SURVEILLANCE_SCOPES
+        } ?: ModerationScopes.VIOLENCE_GRAPHIC
+        require(targetId.isNotBlank()) { "Target ID must not be blank" }
+
+        val docRef = reportsCol().document()
+        val payload = buildMap<String, Any> {
+            put("reporterUid", uid)
+            put("reporterUsername", reporterProfile.username.ifBlank { "member" }.take(50))
+            put("targetType", normalizedTargetType)
+            put("targetId", targetId.take(128))
+            if (targetAuthorUid.isNotBlank()) put("targetAuthorUid", targetAuthorUid.take(128))
+            put("targetAuthorUsername", targetAuthorUsername.take(50))
+            put("targetPreviewText", targetPreviewText.trim().take(240))
+            put("category", normalizedCategory)
+            put("reasonDetail", reasonDetail.trim().take(400))
+            put("status", "OPEN")
+            put("createdAt", FieldValue.serverTimestamp())
+            put("updatedAt", FieldValue.serverTimestamp())
+        }
+        try {
+            docRef.set(payload).await()
+            docRef.id
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docRef.path)
+            throw e
+        }
+    }
+
+    suspend fun resolveContentReport(
+        reportId: String,
+        status: String,
+        reviewerProfile: UserProfile,
+        reviewerRole: String,
+        resolutionNote: String
+    ): Result<Unit> = runCatching {
+        val uid = requireUserId()
+        require(reportId.isNotBlank()) { "Report ID must not be blank" }
+        val cleanStatus = status.uppercase().takeIf { it in setOf("REMOVED", "DISMISSED") } ?: "DISMISSED"
+        val cleanRole = reviewerRole.uppercase().takeIf {
+            it in setOf(MomiRoles.ADMIN, MomiRoles.MODERATOR, MomiRoles.EDITOR)
+        } ?: MomiRoles.MODERATOR
+        val docRef = reportsCol().document(reportId)
+        try {
+            val updates = hashMapOf<String, Any?>(
+                "status" to cleanStatus,
+                "reviewedByUid" to uid,
+                "reviewedByUsername" to reviewerProfile.username.ifBlank { "staff" }.take(50),
+                "reviewedByRole" to cleanRole,
+                "resolutionNote" to resolutionNote.trim().take(300),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            docRef.update(updates).await()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

@@ -97,6 +97,7 @@ fun HomeScreen(
     onFollowToggle: (Post) -> Unit,
     onFollowCreator: (UserProfile, Boolean) -> Unit = { _, _ -> },
     onDeletePost: (Post) -> Unit,
+    onReportPost: (Post) -> Unit = {},
     onAuthorClick: (userId: String, username: String, isShowcase: Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -540,6 +541,7 @@ fun HomeScreen(
                         onBookmarkToggle = { onBookmarkToggle(post) },
                         onFollowToggle = { onFollowToggle(post) },
                         onDeletePost = { onDeletePost(post) },
+                        onReportPost = { onReportPost(post) },
                         onAuthorClick = {
                             onAuthorClick(
                                 post.userId,

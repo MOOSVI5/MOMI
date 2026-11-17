@@ -101,6 +101,8 @@ import com.example.ui.screens.NotificationsScreen
 import com.example.ui.screens.PostDetailScreen
 import com.example.ui.screens.ProfileScreen
 import com.example.ui.screens.ReelsScreen
+import com.example.ui.screens.ReportContentSheet
+import com.example.ui.screens.ReportDraftTarget
 import com.example.ui.screens.SignInScreen
 import com.example.ui.screens.StoryViewerScreen
 import com.example.ui.screens.UserProfileScreen
@@ -244,6 +246,7 @@ private fun AppNavigation(
                 viewModel = viewModel,
                 onSignOut = {
                     signOut(
+                        context = context,
                         credentialManager = credentialManager,
                         scope = coroutineScope
                     )
@@ -292,7 +295,14 @@ private fun LumaApp(
     val availableUpdate by viewModel.availableUpdate.collectAsStateWithLifecycle()
     val aiMessages by viewModel.aiMessages.collectAsStateWithLifecycle()
     val aiUiState by viewModel.aiUiState.collectAsStateWithLifecycle()
+    val isAdminViewActive by viewModel.isAdminModeActive.collectAsStateWithLifecycle()
+    val currentUserRole by viewModel.currentUserRole.collectAsStateWithLifecycle()
+    val currentModerationScopes by viewModel.currentModerationScopes.collectAsStateWithLifecycle()
+    val canCurateMarketplace by viewModel.canCurateMarketplace.collectAsStateWithLifecycle()
+    val contentReports by viewModel.contentReports.collectAsStateWithLifecycle()
+    val openReportsCount by viewModel.openReportsCount.collectAsStateWithLifecycle()
     var showAiAssistantSheet by remember { mutableStateOf(false) }
+    var pendingReportTarget by remember { mutableStateOf<ReportDraftTarget?>(null) }
 
     val activeCommentPostId by viewModel.activeCommentPostId.collectAsStateWithLifecycle()
     val activeComments by viewModel.activeComments.collectAsStateWithLifecycle()
@@ -506,6 +516,15 @@ private fun LumaApp(
                                     )
                                 },
                                 onDeletePost = { viewModel.deletePost(it.id) },
+                                onReportPost = { post ->
+                                    pendingReportTarget = ReportDraftTarget(
+                                        targetType = "POST",
+                                        targetId = post.id,
+                                        targetAuthorUid = post.userId,
+                                        targetAuthorUsername = post.authorUsername,
+                                        previewText = post.caption.ifBlank { "Shared post by @${post.authorUsername}" }
+                                    )
+                                },
                                 onAuthorClick = { userId, username, isShowcase ->
                                     openUserProfile(userId, username, isShowcase)
                                 }
@@ -623,6 +642,15 @@ private fun LumaApp(
                                     )
                                 },
                                 onReelViewed = { viewModel.recordPostView(it.id) },
+                                onReportReel = { reel ->
+                                    pendingReportTarget = ReportDraftTarget(
+                                        targetType = "POST",
+                                        targetId = reel.id,
+                                        targetAuthorUid = reel.userId,
+                                        targetAuthorUsername = reel.authorUsername,
+                                        previewText = reel.caption.ifBlank { "Clip by @${reel.authorUsername}" }
+                                    )
+                                },
                                 onAuthorClick = { reel ->
                                     openUserProfile(
                                         reel.userId,
@@ -642,7 +670,19 @@ private fun LumaApp(
                                 allPosts = allPosts,
                                 themePreference = themePreference,
                                 appColorScheme = appColorScheme,
-                                isAdminUser = viewModel.isAdminUser,
+                                isOwnerAccount = viewModel.isOwnerAccount,
+                                isAdminViewActive = isAdminViewActive,
+                                currentRole = currentUserRole,
+                                enrolledScopes = currentModerationScopes,
+                                contentReports = contentReports,
+                                openReportsCount = openReportsCount,
+                                onToggleAdminViewMode = { enabled -> viewModel.setAdminViewEnabled(context, enabled) },
+                                onAssignTeamMemberRole = { targetUid, role, scopes ->
+                                    viewModel.assignTeamMemberRole(targetUid, role, scopes)
+                                },
+                                onResolveReport = { report, removeContent, note ->
+                                    viewModel.resolveContentReport(report, removeContent, note)
+                                },
                                 onThemeChange = { viewModel.setThemePreference(context, it) },
                                 onColorSchemeChange = { viewModel.setColorScheme(context, it) },
                                 onCreateClick = { navController.navigate(LumaRoutes.createRoute(false)) },
@@ -686,7 +726,8 @@ private fun LumaApp(
                             MarketplaceScreen(
                                 profile = profile,
                                 currentUserId = viewModel.currentUserId,
-                                isAdminUser = viewModel.isAdminUser,
+                                isAdminUser = isAdminViewActive,
+                                canCurateEditorial = canCurateMarketplace,
                                 merchants = merchants,
                                 products = marketProducts,
                                 orders = marketOrders,
@@ -731,6 +772,18 @@ private fun LumaApp(
                                     viewModel.startDirectChatWithUid(sellerUid) { thread ->
                                         navController.navigate(LumaRoutes.messagesRoute(thread.id))
                                     }
+                                },
+                                onToggleProductFeatured = { productId, featured ->
+                                    viewModel.setProductFeatured(productId, featured)
+                                },
+                                onReportProduct = { product ->
+                                    pendingReportTarget = ReportDraftTarget(
+                                        targetType = "PRODUCT",
+                                        targetId = product.id,
+                                        targetAuthorUid = product.sellerUid,
+                                        targetAuthorUsername = product.sellerUsername,
+                                        previewText = product.title
+                                    )
                                 },
                                 modifier = Modifier.navigationBarsPadding()
                             )
@@ -883,6 +936,15 @@ private fun LumaApp(
                                     )
                                 },
                                 onDeletePost = { viewModel.deletePost(it.id) },
+                                onReportPost = { reportedPost ->
+                                    pendingReportTarget = ReportDraftTarget(
+                                        targetType = "POST",
+                                        targetId = reportedPost.id,
+                                        targetAuthorUid = reportedPost.userId,
+                                        targetAuthorUsername = reportedPost.authorUsername,
+                                        previewText = reportedPost.caption.ifBlank { "Shared post by @${reportedPost.authorUsername}" }
+                                    )
+                                },
                                 onPostViewed = { viewModel.recordPostView(it.id) }
                             )
                         }
@@ -1036,6 +1098,24 @@ private fun LumaApp(
             onToggleCommentLike = viewModel::toggleCommentLike,
             onAuthorClick = { userId, username ->
                 openUserProfile(userId, username, false)
+            }
+        )
+    }
+
+    pendingReportTarget?.let { target ->
+        ReportContentSheet(
+            target = target,
+            onDismiss = { pendingReportTarget = null },
+            onSubmitReport = { category, detail ->
+                viewModel.submitContentReport(
+                    targetType = target.targetType,
+                    targetId = target.targetId,
+                    targetAuthorUid = target.targetAuthorUid,
+                    targetAuthorUsername = target.targetAuthorUsername,
+                    targetPreviewText = target.previewText,
+                    category = category,
+                    reasonDetail = detail
+                )
             }
         )
     }

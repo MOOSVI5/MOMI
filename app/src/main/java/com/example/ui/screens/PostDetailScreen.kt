@@ -41,6 +41,7 @@ fun PostDetailScreen(
     onBookmarkToggle: (Post) -> Unit,
     onFollowToggle: (Post) -> Unit,
     onDeletePost: (Post) -> Unit,
+    onReportPost: (Post) -> Unit = {},
     onPostViewed: (Post) -> Unit = {},
     onAuthorClick: (Post) -> Unit = {},
     modifier: Modifier = Modifier
@@ -99,6 +100,7 @@ fun PostDetailScreen(
                     onBookmarkToggle = { onBookmarkToggle(post) },
                     onFollowToggle = { onFollowToggle(post) },
                     onAuthorClick = { onAuthorClick(post) },
+                    onReportPost = { onReportPost(post) },
                     onDeletePost = {
                         onDeletePost(post)
                         onBack()

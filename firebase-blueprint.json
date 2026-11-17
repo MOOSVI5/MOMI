@@ -15,6 +15,9 @@
         "followersCount": { "type": "integer" },
         "followingCount": { "type": "integer" },
         "isVerified": { "type": "boolean" },
+        "role": { "type": "string", "enum": ["USER", "MODERATOR", "EDITOR"] },
+        "moderationScopes": { "type": "array", "items": { "type": "string" } },
+        "assignedByEmail": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
@@ -272,6 +275,7 @@
         "videoChunksCount": { "type": "integer" },
         "videoDurationMs": { "type": "integer" },
         "stockCount": { "type": "integer" },
+        "isFeatured": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
@@ -297,6 +301,30 @@
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
       "required": ["buyerUid", "buyerUsername", "sellerUid", "sellerStoreName", "productId", "productTitle", "productImageKey", "priceUsd", "shippingAddress", "status", "createdAt"]
+    },
+    "ContentReport": {
+      "title": "ContentReport",
+      "description": "User safety report for violent, sexual, graphic, harassment, or marketplace violations.",
+      "type": "object",
+      "properties": {
+        "reporterUid": { "type": "string" },
+        "reporterUsername": { "type": "string" },
+        "targetType": { "type": "string", "enum": ["POST", "PRODUCT", "COMMENT", "USER"] },
+        "targetId": { "type": "string" },
+        "targetAuthorUid": { "type": "string" },
+        "targetAuthorUsername": { "type": "string" },
+        "targetPreviewText": { "type": "string" },
+        "category": { "type": "string", "enum": ["VIOLENCE_GRAPHIC", "SEXUAL_NUDITY", "HARASSMENT_SPAM", "MARKETPLACE_SAFETY"] },
+        "reasonDetail": { "type": "string" },
+        "status": { "type": "string", "enum": ["OPEN", "REMOVED", "DISMISSED"] },
+        "reviewedByUid": { "type": "string" },
+        "reviewedByUsername": { "type": "string" },
+        "reviewedByRole": { "type": "string", "enum": ["ADMIN", "MODERATOR", "EDITOR"] },
+        "resolutionNote": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["reporterUid", "reporterUsername", "targetType", "targetId", "targetAuthorUsername", "targetPreviewText", "category", "reasonDetail", "status", "createdAt"]
     }
   },
   "firestore": {
@@ -367,6 +395,10 @@
     "/marketOrders/{orderId}": {
       "schema": { "$ref": "#/entities/MarketOrder" },
       "description": "Private marketplace orders between buyer and seller."
+    },
+    "/contentReports/{reportId}": {
+      "schema": { "$ref": "#/entities/ContentReport" },
+      "description": "Moderation surveillance queue for reported graphic, sexual, violent, or marketplace content."
     }
   }
 }

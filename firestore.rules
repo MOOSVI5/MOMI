@@ -35,6 +35,43 @@ service cloud.firestore {
       return resource.data;
     }
 
+    function requesterUserDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function hasRequesterProfile() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function requesterRole() {
+      return hasRequesterProfile() && ('role' in requesterUserDoc()) ? requesterUserDoc().role : 'USER';
+    }
+
+    function hasModerationScope(scope) {
+      return hasRequesterProfile() &&
+             ('moderationScopes' in requesterUserDoc()) &&
+             requesterUserDoc().moderationScopes is list &&
+             scope in requesterUserDoc().moderationScopes;
+    }
+
+    function isModerator() {
+      return requesterRole() == 'MODERATOR' &&
+             ('moderationScopes' in requesterUserDoc()) &&
+             requesterUserDoc().moderationScopes is list &&
+             requesterUserDoc().moderationScopes.size() > 0;
+    }
+
+    function isEditor() {
+      return requesterRole() == 'EDITOR' &&
+             ('moderationScopes' in requesterUserDoc()) &&
+             requesterUserDoc().moderationScopes is list &&
+             requesterUserDoc().moderationScopes.size() > 0;
+    }
+
+    function isTeamStaff() {
+      return isAdmin() || isModerator() || isEditor();
+    }
+
     // Entity Validation Helpers
     function isValidUserProfile(data, userId) {
       return data.userId is string && data.userId == userId &&
@@ -48,6 +85,9 @@ service cloud.firestore {
              data.followersCount is int && data.followersCount >= 0 &&
              data.followingCount is int && data.followingCount >= 0 &&
              data.isVerified is bool &&
+             (!('role' in data) || (data.role is string && data.role in ['USER', 'MODERATOR', 'EDITOR'])) &&
+             (!('moderationScopes' in data) || (data.moderationScopes is list && data.moderationScopes.size() <= 6 && (data.moderationScopes.size() == 0 || data.moderationScopes[0] is string))) &&
+             (!('assignedByEmail' in data) || data.assignedByEmail == null || (data.assignedByEmail is string && data.assignedByEmail.size() <= 120)) &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
     }
@@ -255,6 +295,26 @@ service cloud.firestore {
              (!('videoChunksCount' in data) || data.videoChunksCount == null || (data.videoChunksCount is int && data.videoChunksCount >= 0 && data.videoChunksCount <= 25)) &&
              data.videoDurationMs is int && data.videoDurationMs >= 0 && data.videoDurationMs <= 3600000 &&
              data.stockCount is int && data.stockCount >= 0 && data.stockCount <= 99999 &&
+             (!('isFeatured' in data) || data.isFeatured is bool) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
+    }
+
+    function isValidContentReport(data) {
+      return data.reporterUid is string && isValidId(data.reporterUid) &&
+             data.reporterUsername is string && data.reporterUsername.size() >= 1 && data.reporterUsername.size() <= 50 &&
+             data.targetType is string && data.targetType in ['POST', 'PRODUCT', 'COMMENT', 'USER'] &&
+             data.targetId is string && isValidId(data.targetId) &&
+             (!('targetAuthorUid' in data) || data.targetAuthorUid == null || (data.targetAuthorUid is string && data.targetAuthorUid.size() <= 128)) &&
+             data.targetAuthorUsername is string && data.targetAuthorUsername.size() <= 50 &&
+             data.targetPreviewText is string && data.targetPreviewText.size() <= 240 &&
+             data.category is string && data.category in ['VIOLENCE_GRAPHIC', 'SEXUAL_NUDITY', 'HARASSMENT_SPAM', 'MARKETPLACE_SAFETY'] &&
+             data.reasonDetail is string && data.reasonDetail.size() <= 400 &&
+             data.status is string && data.status in ['OPEN', 'REMOVED', 'DISMISSED'] &&
+             (!('reviewedByUid' in data) || data.reviewedByUid == null || (data.reviewedByUid is string && isValidId(data.reviewedByUid))) &&
+             (!('reviewedByUsername' in data) || data.reviewedByUsername == null || (data.reviewedByUsername is string && data.reviewedByUsername.size() <= 50)) &&
+             (!('reviewedByRole' in data) || data.reviewedByRole == null || (data.reviewedByRole is string && data.reviewedByRole in ['ADMIN', 'MODERATOR', 'EDITOR'])) &&
+             (!('resolutionNote' in data) || data.resolutionNote == null || (data.resolutionNote is string && data.resolutionNote.size() <= 300)) &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
     }
@@ -284,9 +344,12 @@ service cloud.firestore {
       allow create: if isOwner(userId) &&
                        isValidId(userId) &&
                        incoming().keys().hasAll(['userId', 'username', 'displayName', 'avatarKey', 'followersCount', 'followingCount', 'isVerified', 'createdAt']) &&
-                       incoming().keys().hasOnly(['userId', 'username', 'displayName', 'category', 'bio', 'website', 'avatarKey', 'avatarData', 'followersCount', 'followingCount', 'isVerified', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'username', 'displayName', 'category', 'bio', 'website', 'avatarKey', 'avatarData', 'followersCount', 'followingCount', 'isVerified', 'role', 'moderationScopes', 'assignedByEmail', 'createdAt', 'updatedAt']) &&
                        isValidUserProfile(incoming(), userId) &&
-                       (incoming().isVerified == false || isAdmin());
+                       (incoming().isVerified == false || isAdmin()) &&
+                       (!('role' in incoming()) || incoming().role == 'USER' || isAdmin()) &&
+                       (!('moderationScopes' in incoming()) || incoming().moderationScopes.size() == 0 || isAdmin()) &&
+                       (!('assignedByEmail' in incoming()) || incoming().assignedByEmail == null || isAdmin());
 
       allow update: if isValidId(userId) &&
                        isValidUserProfile(incoming(), userId) &&
@@ -296,7 +359,10 @@ service cloud.firestore {
                          (isOwner(userId) &&
                           incoming().diff(existing()).affectedKeys().hasOnly(['username', 'displayName', 'category', 'bio', 'website', 'avatarKey', 'avatarData', 'updatedAt'])) ||
                          (isAdmin() &&
-                          incoming().diff(existing()).affectedKeys().hasOnly(['isVerified', 'updatedAt']))
+                          (
+                            incoming().diff(existing()).affectedKeys().hasOnly(['isVerified', 'updatedAt']) ||
+                            incoming().diff(existing()).affectedKeys().hasOnly(['role', 'moderationScopes', 'assignedByEmail', 'updatedAt'])
+                          ))
                        );
 
       allow delete: if isOwner(userId) && isValidId(userId);
@@ -401,7 +467,11 @@ service cloud.firestore {
                            (incoming().commentsCount == existing().commentsCount + 1 || incoming().commentsCount == existing().commentsCount - 1))
                        );
 
-      allow delete: if isSignedIn() && isValidId(postId) && existing().userId == request.auth.uid;
+      allow delete: if isSignedIn() && isValidId(postId) && (
+        existing().userId == request.auth.uid ||
+        isAdmin() ||
+        isModerator()
+      );
 
       match /comments/{commentId} {
         allow get: if isSignedIn() && isValidId(postId) && isValidId(commentId);
@@ -428,7 +498,10 @@ service cloud.firestore {
         allow delete: if isSignedIn() &&
                          isValidId(postId) &&
                          isValidId(commentId) &&
-                         (existing().userId == request.auth.uid || get(/databases/$(database)/documents/posts/$(postId)).data.userId == request.auth.uid);
+                         (existing().userId == request.auth.uid ||
+                          get(/databases/$(database)/documents/posts/$(postId)).data.userId == request.auth.uid ||
+                          isAdmin() ||
+                          isModerator());
       }
 
       match /videoChunks/{chunkId} {
@@ -446,8 +519,9 @@ service cloud.firestore {
         allow delete: if isSignedIn() &&
                          isValidId(postId) &&
                          isValidId(chunkId) &&
-                         exists(/databases/$(database)/documents/posts/$(postId)) &&
-                         get(/databases/$(database)/documents/posts/$(postId)).data.userId == request.auth.uid;
+                         (isAdmin() || isModerator() ||
+                          (exists(/databases/$(database)/documents/posts/$(postId)) &&
+                           get(/databases/$(database)/documents/posts/$(postId)).data.userId == request.auth.uid));
       }
     }
 
@@ -645,18 +719,27 @@ service cloud.firestore {
                        isValidId(productId) &&
                        incoming().sellerUid == request.auth.uid &&
                        incoming().keys().hasAll(['sellerUid', 'sellerUsername', 'storeName', 'title', 'description', 'category', 'priceUsd', 'originalPriceUsd', 'discountPercent', 'freeShipping', 'imageKey', 'videoDurationMs', 'stockCount', 'createdAt']) &&
-                       incoming().keys().hasOnly(['sellerUid', 'sellerUsername', 'storeName', 'title', 'description', 'category', 'priceUsd', 'originalPriceUsd', 'discountPercent', 'freeShipping', 'imageKey', 'imageData', 'extraImageDatas', 'videoData', 'videoChunksCount', 'videoDurationMs', 'stockCount', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['sellerUid', 'sellerUsername', 'storeName', 'title', 'description', 'category', 'priceUsd', 'originalPriceUsd', 'discountPercent', 'freeShipping', 'imageKey', 'imageData', 'extraImageDatas', 'videoData', 'videoChunksCount', 'videoDurationMs', 'stockCount', 'isFeatured', 'createdAt', 'updatedAt']) &&
+                       (!('isFeatured' in incoming()) || incoming().isFeatured == false || isAdmin()) &&
                        isValidMarketProduct(incoming());
 
       allow update: if isSignedIn() &&
                        isValidId(productId) &&
-                       existing().sellerUid == request.auth.uid &&
                        isValidMarketProduct(incoming()) &&
                        incoming().sellerUid == existing().sellerUid &&
                        incoming().createdAt == existing().createdAt &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'category', 'priceUsd', 'originalPriceUsd', 'discountPercent', 'freeShipping', 'stockCount', 'updatedAt']);
+                       (
+                         (existing().sellerUid == request.auth.uid &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'category', 'priceUsd', 'originalPriceUsd', 'discountPercent', 'freeShipping', 'stockCount', 'updatedAt'])) ||
+                         ((isAdmin() || (isEditor() && hasModerationScope('EDITORIAL_CURATION'))) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['isFeatured', 'updatedAt']))
+                       );
 
-      allow delete: if isSignedIn() && isValidId(productId) && existing().sellerUid == request.auth.uid;
+      allow delete: if isSignedIn() && isValidId(productId) && (
+        existing().sellerUid == request.auth.uid ||
+        isAdmin() ||
+        (isTeamStaff() && hasModerationScope('MARKETPLACE_SAFETY'))
+      );
 
       match /videoChunks/{chunkId} {
         allow get: if isSignedIn() && isValidId(productId) && isValidId(chunkId);
@@ -673,8 +756,10 @@ service cloud.firestore {
         allow delete: if isSignedIn() &&
                          isValidId(productId) &&
                          isValidId(chunkId) &&
-                         exists(/databases/$(database)/documents/marketProducts/$(productId)) &&
-                         get(/databases/$(database)/documents/marketProducts/$(productId)).data.sellerUid == request.auth.uid;
+                         (isAdmin() ||
+                          (isTeamStaff() && hasModerationScope('MARKETPLACE_SAFETY')) ||
+                          (exists(/databases/$(database)/documents/marketProducts/$(productId)) &&
+                           get(/databases/$(database)/documents/marketProducts/$(productId)).data.sellerUid == request.auth.uid));
       }
     }
 
@@ -709,6 +794,48 @@ service cloud.firestore {
                        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
 
       allow delete: if false;
+    }
+
+    // Content Moderation & Surveillance Reports (scoped to Admin & enrolled team roles)
+    match /contentReports/{reportId} {
+      allow get: if isValidId(reportId) && (
+        isAdmin() ||
+        (isSignedIn() && existing().reporterUid == request.auth.uid) ||
+        (isTeamStaff() && hasModerationScope(existing().category))
+      );
+
+      allow list: if isAdmin() ||
+                     (isSignedIn() && resource.data.reporterUid == request.auth.uid) ||
+                     isTeamStaff();
+
+      allow create: if isSignedIn() &&
+                       isValidId(reportId) &&
+                       incoming().reporterUid == request.auth.uid &&
+                       incoming().status == 'OPEN' &&
+                       (!('reviewedByUid' in incoming()) || incoming().reviewedByUid == null) &&
+                       incoming().keys().hasAll(['reporterUid', 'reporterUsername', 'targetType', 'targetId', 'targetAuthorUsername', 'targetPreviewText', 'category', 'reasonDetail', 'status', 'createdAt']) &&
+                       incoming().keys().hasOnly(['reporterUid', 'reporterUsername', 'targetType', 'targetId', 'targetAuthorUid', 'targetAuthorUsername', 'targetPreviewText', 'category', 'reasonDetail', 'status', 'reviewedByUid', 'reviewedByUsername', 'reviewedByRole', 'resolutionNote', 'createdAt', 'updatedAt']) &&
+                       isValidContentReport(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(reportId) &&
+                       isValidContentReport(incoming()) &&
+                       incoming().reporterUid == existing().reporterUid &&
+                       incoming().targetType == existing().targetType &&
+                       incoming().targetId == existing().targetId &&
+                       incoming().category == existing().category &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'reviewedByUid', 'reviewedByUsername', 'reviewedByRole', 'resolutionNote', 'updatedAt']) &&
+                       incoming().status in ['REMOVED', 'DISMISSED'] &&
+                       incoming().reviewedByUid == request.auth.uid &&
+                       (
+                         (isAdmin() && incoming().reviewedByRole == 'ADMIN') ||
+                         ((isModerator() || isEditor()) &&
+                          hasModerationScope(existing().category) &&
+                          incoming().reviewedByRole == requesterRole())
+                       );
+
+      allow delete: if isAdmin() && isValidId(reportId);
     }
   }
 }

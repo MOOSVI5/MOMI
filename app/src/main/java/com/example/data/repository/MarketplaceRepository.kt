@@ -61,7 +61,8 @@ class MarketplaceRepository(private val db: FirebaseFirestore) {
             .map { snapshot ->
                 snapshot.toObjects(MarketProduct::class.java, ServerTimestampBehavior.ESTIMATE)
                     .sortedWith(
-                        compareByDescending<MarketProduct> { it.createdAt ?: Timestamp(0, 0) }
+                        compareByDescending<MarketProduct> { it.isFeatured }
+                            .thenByDescending { it.createdAt ?: Timestamp(0, 0) }
                             .thenBy { it.id }
                     )
             }
@@ -279,6 +280,25 @@ class MarketplaceRepository(private val db: FirebaseFirestore) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.DELETE, docRef.path)
+            throw e
+        }
+    }
+
+    suspend fun setProductFeatured(productId: String, featured: Boolean): Result<Unit> = runCatching {
+        requireUserId()
+        require(productId.isNotBlank()) { "Product ID must not be blank" }
+        val docRef = productsCol().document(productId)
+        try {
+            docRef.update(
+                mapOf(
+                    "isFeatured" to featured,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
             throw e
         }
     }

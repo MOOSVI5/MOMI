@@ -216,6 +216,16 @@ fun SignInScreen(
                         )
                     }
                 }
+
+                if (isAutoChecking) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "Restoring your Momi session...",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                }
             }
         }
     }

@@ -88,6 +88,7 @@ fun PostCard(
     onBookmarkToggle: () -> Unit,
     onFollowToggle: () -> Unit,
     onDeletePost: (() -> Unit)? = null,
+    onReportPost: (() -> Unit)? = null,
     onAuthorClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -244,6 +245,15 @@ fun PostCard(
                                 onFollowToggle()
                             }
                         )
+                        if (onReportPost != null) {
+                            DropdownMenuItem(
+                                text = { Text("Report post", color = MaterialTheme.colorScheme.secondary) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onReportPost()
+                                }
+                            )
+                        }
                     }
                     if (isOwnPost && onDeletePost != null) {
                         DropdownMenuItem(
