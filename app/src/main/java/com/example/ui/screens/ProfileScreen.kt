@@ -79,6 +79,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.BuildConfig
 import com.example.data.model.ContentReport
 import com.example.data.model.FollowEdge
@@ -89,6 +90,7 @@ import com.example.data.model.UserProfile
 import com.example.ui.components.EditProfileDialog
 import com.example.ui.components.FollowListBottomSheet
 import com.example.ui.components.LumaAvatar
+import com.example.ui.components.MomiStartIoSession
 import com.example.ui.components.PostMediaImage
 import com.example.ui.theme.AppColorScheme
 import com.example.ui.theme.ThemePreference
@@ -1455,6 +1457,7 @@ private fun OwnerMonetizationAndPlaySheet(
 ) {
     val uriHandler = LocalUriHandler.current
     val isDebugAds = BuildConfig.DEBUG
+    val adDiagnostics by MomiStartIoSession.diagnostics.collectAsStateWithLifecycle()
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -1501,7 +1504,7 @@ private fun OwnerMonetizationAndPlaySheet(
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = "Start.io Live Configuration",
+                            text = "Start.io Live Configuration & Diagnostics",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
@@ -1510,10 +1513,11 @@ private fun OwnerMonetizationAndPlaySheet(
                             "Ad Serving Mode",
                             if (isDebugAds) "Debug Test Ads ($0 — switch to signed Release build for payouts)" else "Release Paid Live Ads"
                         )
-                        PlayInfoLine(
-                            "Active Placements",
-                            "Home Feed Native + MREC/Banner, Explore Banner, Market Deal Banner, Capped Publish Interstitial (4 min)"
-                        )
+                        PlayInfoLine("SDK Status", adDiagnostics.sdkStatus)
+                        PlayInfoLine("Home Native Ad", adDiagnostics.nativeStatus)
+                        PlayInfoLine("Home MREC / Fallback", adDiagnostics.mrecStatus)
+                        PlayInfoLine("Explore / Market Banner", adDiagnostics.bannerStatus)
+                        PlayInfoLine("Publish Interstitial", adDiagnostics.interstitialStatus)
                         PlayInfoLine(
                             "App Identity",
                             "${BuildConfig.APPLICATION_ID} (v${BuildConfig.VERSION_NAME} / code ${BuildConfig.VERSION_CODE})"

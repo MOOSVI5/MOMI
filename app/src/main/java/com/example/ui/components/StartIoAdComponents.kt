@@ -37,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -64,8 +65,59 @@ import com.startapp.sdk.adsbase.Ad
 import com.startapp.sdk.adsbase.StartAppAd
 import com.startapp.sdk.adsbase.adlisteners.AdDisplayListener
 import com.startapp.sdk.adsbase.adlisteners.AdEventListener
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 private const val TAG = "MomiStartIo"
+
+data class StartIoDiagnostics(
+    val sdkInitialized: Boolean = false,
+    val sdkStatus: String = "Initializing SDK...",
+    val nativeStatus: String = "Waiting for SDK",
+    val mrecStatus: String = "Standby",
+    val bannerStatus: String = "Waiting for SDK",
+    val interstitialStatus: String = "Waiting for SDK"
+)
+
+object MomiStartIoSession {
+    private val _isInitialized = MutableStateFlow(false)
+    val isInitialized: StateFlow<Boolean> = _isInitialized.asStateFlow()
+
+    private val _diagnostics = MutableStateFlow(StartIoDiagnostics())
+    val diagnostics: StateFlow<StartIoDiagnostics> = _diagnostics.asStateFlow()
+
+    fun markInitialized(source: String = "SDK ready") {
+        _isInitialized.value = true
+        _diagnostics.update { it.copy(sdkInitialized = true, sdkStatus = source) }
+    }
+
+    fun scheduleFallbackReady(delayMs: Long = 2000L) {
+        if (_isInitialized.value) return
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (!_isInitialized.value) {
+                markInitialized("SDK ready (fallback)")
+            }
+        }, delayMs)
+    }
+
+    fun updateNative(status: String) {
+        _diagnostics.update { it.copy(nativeStatus = status) }
+    }
+
+    fun updateMrec(status: String) {
+        _diagnostics.update { it.copy(mrecStatus = status) }
+    }
+
+    fun updateBanner(status: String) {
+        _diagnostics.update { it.copy(bannerStatus = status) }
+    }
+
+    fun updateInterstitial(status: String) {
+        _diagnostics.update { it.copy(interstitialStatus = status) }
+    }
+}
 
 object MomiInterstitialController {
     private const val MIN_COOLDOWN_MS = 4 * 60_000L
@@ -78,25 +130,34 @@ object MomiInterstitialController {
     fun preload(context: Context) {
         if (isLoading || isAdReady) return
         val appContext = context.applicationContext
+        if (!MomiStartIoSession.isInitialized.value) {
+            MomiStartIoSession.updateInterstitial("Waiting for SDK")
+            return
+        }
         isLoading = true
+        MomiStartIoSession.updateInterstitial("Loading...")
         runCatching {
             val ad = cachedAd ?: StartAppAd(appContext).also { cachedAd = it }
             ad.loadAd(StartAppAd.AdMode.AUTOMATIC, object : AdEventListener {
                 override fun onReceiveAd(ad: Ad) {
                     isLoading = false
                     isAdReady = true
+                    MomiStartIoSession.updateInterstitial("Ready")
                     Log.d(TAG, "Interstitial preloaded")
                 }
 
                 override fun onFailedToReceiveAd(ad: Ad?) {
                     isLoading = false
                     isAdReady = false
-                    Log.w(TAG, "Interstitial preload skipped: ${ad?.errorMessage ?: "no fill"}")
+                    val reason = ad?.errorMessage?.takeIf { it.isNotBlank() } ?: "No fill"
+                    MomiStartIoSession.updateInterstitial("No fill: $reason")
+                    Log.w(TAG, "Interstitial preload skipped: $reason")
                 }
             })
-        }.onFailure {
+        }.onFailure { err ->
             isLoading = false
             isAdReady = false
+            MomiStartIoSession.updateInterstitial("Error: ${err.message ?: "init"}")
         }
     }
 
@@ -140,38 +201,55 @@ data class StartIoNativeAdState(
 @Composable
 fun rememberStartIoNativeAds(count: Int = 3): StartIoNativeAdState {
     val context = LocalContext.current
+    val sdkReady by MomiStartIoSession.isInitialized.collectAsState()
     var state by remember { mutableStateOf(StartIoNativeAdState()) }
 
-    LaunchedEffect(context, count) {
+    LaunchedEffect(context, count, sdkReady) {
+        if (!sdkReady) return@LaunchedEffect
         val mainHandler = Handler(Looper.getMainLooper())
-        runCatching {
-            val nativeLoader = StartAppNativeAd(context)
-            val prefs = NativeAdPreferences().apply {
-                setAdsNumber(count)
-                setAutoBitmapDownload(true)
-                setImageSize(NativeAdPreferences.NativeAdBitmapSize.SIZE340X340)
-                setSecondaryImageSize(2)
-            }
-            nativeLoader.loadAd(prefs, object : AdEventListener {
-                override fun onReceiveAd(ad: Ad) {
-                    val loaded = nativeLoader.nativeAds.orEmpty().toList()
-                    Log.d(TAG, "Native ads received: ${loaded.size}")
-                    mainHandler.post {
-                        state = StartIoNativeAdState(ads = loaded, finishedLoading = true)
-                    }
-                }
 
-                override fun onFailedToReceiveAd(ad: Ad?) {
-                    Log.w(TAG, "Native ad failed to load: ${ad?.errorMessage ?: "no fill"}")
-                    mainHandler.post {
-                        state = StartIoNativeAdState(ads = emptyList(), finishedLoading = true)
-                    }
+        fun requestNative(attempt: Int) {
+            MomiStartIoSession.updateNative(if (attempt == 1) "Requesting..." else "Retrying...")
+            runCatching {
+                val nativeLoader = StartAppNativeAd(context)
+                val prefs = NativeAdPreferences().apply {
+                    setAdsNumber(count)
+                    setAutoBitmapDownload(true)
+                    setImageSize(NativeAdPreferences.NativeAdBitmapSize.SIZE340X340)
+                    setSecondaryImageSize(2)
                 }
-            })
-        }.onFailure { error ->
-            Log.w(TAG, "Native ad loader error: ${error.message}")
-            state = StartIoNativeAdState(ads = emptyList(), finishedLoading = true)
+                nativeLoader.loadAd(prefs, object : AdEventListener {
+                    override fun onReceiveAd(ad: Ad) {
+                        val loaded = nativeLoader.nativeAds.orEmpty().toList()
+                        Log.d(TAG, "Native ads received: ${loaded.size}")
+                        MomiStartIoSession.updateNative(
+                            if (loaded.isNotEmpty()) "Loaded (${loaded.size} ads)" else "Returned 0 native ads (using MREC/Banner)"
+                        )
+                        mainHandler.post {
+                            state = StartIoNativeAdState(ads = loaded, finishedLoading = true)
+                        }
+                    }
+
+                    override fun onFailedToReceiveAd(ad: Ad?) {
+                        val reason = ad?.errorMessage?.takeIf { it.isNotBlank() } ?: "No fill"
+                        Log.w(TAG, "Native ad failed (attempt $attempt): $reason")
+                        MomiStartIoSession.updateNative("No fill ($reason) — falling back to MREC/Banner")
+                        mainHandler.post {
+                            state = StartIoNativeAdState(ads = emptyList(), finishedLoading = true)
+                        }
+                        if (attempt == 1) {
+                            mainHandler.postDelayed({ requestNative(2) }, 6500L)
+                        }
+                    }
+                })
+            }.onFailure { error ->
+                Log.w(TAG, "Native ad loader error: ${error.message}")
+                MomiStartIoSession.updateNative("Error: ${error.message ?: "load failed"}")
+                state = StartIoNativeAdState(ads = emptyList(), finishedLoading = true)
+            }
         }
+
+        requestNative(attempt = 1)
     }
 
     return state
@@ -183,8 +261,11 @@ fun MomiInlineFeedAdCard(
     nativeAdState: StartIoNativeAdState = StartIoNativeAdState(),
     modifier: Modifier = Modifier
 ) {
-    val nativeAd = if (nativeAdState.ads.isNotEmpty()) {
-        nativeAdState.ads[slotIndex % nativeAdState.ads.size]
+    val sdkReady by MomiStartIoSession.isInitialized.collectAsState()
+    if (!sdkReady) return
+
+    val nativeAd = if (slotIndex in nativeAdState.ads.indices) {
+        nativeAdState.ads[slotIndex]
     } else {
         null
     }
@@ -493,11 +574,16 @@ private fun StartIoMrecSponsoredCard(
                                 val mrec = Mrec(ctx, object : BannerListener {
                                     override fun onReceiveAd(banner: View) {
                                         Log.d(TAG, "MREC ad received")
-                                        mainHandler.post { mrecFailed = false }
+                                        MomiStartIoSession.updateMrec("Loaded (300x250)")
+                                        mainHandler.post {
+                                            mrecFailed = false
+                                            runCatching { (banner as? Mrec)?.showBanner() }
+                                        }
                                     }
 
                                     override fun onFailedToReceiveAd(banner: View?) {
                                         Log.w(TAG, "MREC ad failed; falling back to 320x50 banner")
+                                        MomiStartIoSession.updateMrec("No fill — trying 320x50 Banner")
                                         mainHandler.post { mrecFailed = true }
                                     }
 
@@ -509,16 +595,14 @@ private fun StartIoMrecSponsoredCard(
                                 addView(
                                     mrec,
                                     FrameLayout.LayoutParams(
-                                        FrameLayout.LayoutParams.MATCH_PARENT,
-                                        FrameLayout.LayoutParams.MATCH_PARENT,
+                                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                                        FrameLayout.LayoutParams.WRAP_CONTENT,
                                         Gravity.CENTER
                                     )
                                 )
                                 post {
-                                    runCatching {
-                                        mrec.loadAd(300, 250)
-                                        mrec.showBanner()
-                                    }
+                                    MomiStartIoSession.updateMrec("Requesting 300x250...")
+                                    runCatching { mrec.loadAd(300, 250) }
                                 }
                             }
                         },
@@ -541,11 +625,12 @@ private fun StartIoMrecSponsoredCard(
 fun MomiAnchoredExploreBanner(
     modifier: Modifier = Modifier
 ) {
+    val sdkReady by MomiStartIoSession.isInitialized.collectAsState()
     var adFailed by remember { mutableStateOf(false) }
     var bannerRef by remember { mutableStateOf<Banner?>(null) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
-    if (adFailed) return
+    if (!sdkReady || adFailed) return
 
     DisposableEffect(Unit) {
         onDispose {
@@ -576,11 +661,16 @@ fun MomiAnchoredExploreBanner(
                         val banner = Banner(ctx, object : BannerListener {
                             override fun onReceiveAd(banner: View) {
                                 Log.d(TAG, "Explore banner ad received")
-                                mainHandler.post { adFailed = false }
+                                MomiStartIoSession.updateBanner("Loaded (320x50)")
+                                mainHandler.post {
+                                    adFailed = false
+                                    runCatching { (banner as? Banner)?.showBanner() }
+                                }
                             }
 
                             override fun onFailedToReceiveAd(banner: View?) {
                                 Log.w(TAG, "Explore banner failed to receive")
+                                MomiStartIoSession.updateBanner("No fill (Explore 320x50)")
                                 mainHandler.post { adFailed = true }
                             }
 
@@ -592,16 +682,14 @@ fun MomiAnchoredExploreBanner(
                         addView(
                             banner,
                             FrameLayout.LayoutParams(
-                                FrameLayout.LayoutParams.MATCH_PARENT,
-                                FrameLayout.LayoutParams.MATCH_PARENT,
+                                FrameLayout.LayoutParams.WRAP_CONTENT,
+                                FrameLayout.LayoutParams.WRAP_CONTENT,
                                 Gravity.CENTER
                             )
                         )
                         post {
-                            runCatching {
-                                banner.loadAd(320, 50)
-                                banner.showBanner()
-                            }
+                            MomiStartIoSession.updateBanner("Requesting 320x50...")
+                            runCatching { banner.loadAd(320, 50) }
                         }
                     }
                 },
@@ -682,9 +770,14 @@ private fun StartIoStandardFeedBannerCard(
                                 val banner = Banner(ctx, object : BannerListener {
                                     override fun onReceiveAd(banner: View) {
                                         Log.d(TAG, "Feed fallback banner received")
+                                        MomiStartIoSession.updateBanner("Loaded (Feed 320x50)")
+                                        mainHandler.post {
+                                            runCatching { (banner as? Banner)?.showBanner() }
+                                        }
                                     }
 
                                     override fun onFailedToReceiveAd(banner: View?) {
+                                        MomiStartIoSession.updateBanner("No fill (Feed 320x50)")
                                         mainHandler.post(onFailed)
                                     }
 
@@ -696,16 +789,14 @@ private fun StartIoStandardFeedBannerCard(
                                 addView(
                                     banner,
                                     FrameLayout.LayoutParams(
-                                        FrameLayout.LayoutParams.MATCH_PARENT,
-                                        FrameLayout.LayoutParams.MATCH_PARENT,
+                                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                                        FrameLayout.LayoutParams.WRAP_CONTENT,
                                         Gravity.CENTER
                                     )
                                 )
                                 post {
-                                    runCatching {
-                                        banner.loadAd(320, 50)
-                                        banner.showBanner()
-                                    }
+                                    MomiStartIoSession.updateBanner("Requesting Feed 320x50...")
+                                    runCatching { banner.loadAd(320, 50) }
                                 }
                             }
                         },
@@ -723,11 +814,12 @@ private fun StartIoStandardFeedBannerCard(
 fun MomiMarketplaceBanner(
     modifier: Modifier = Modifier
 ) {
+    val sdkReady by MomiStartIoSession.isInitialized.collectAsState()
     var adFailed by remember { mutableStateOf(false) }
     var bannerRef by remember { mutableStateOf<Banner?>(null) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
-    if (adFailed) return
+    if (!sdkReady || adFailed) return
 
     DisposableEffect(Unit) {
         onDispose {
@@ -776,10 +868,15 @@ fun MomiMarketplaceBanner(
                     FrameLayout(ctx).apply {
                         val banner = Banner(ctx, object : BannerListener {
                             override fun onReceiveAd(banner: View) {
-                                mainHandler.post { adFailed = false }
+                                MomiStartIoSession.updateBanner("Loaded (Market 320x50)")
+                                mainHandler.post {
+                                    adFailed = false
+                                    runCatching { (banner as? Banner)?.showBanner() }
+                                }
                             }
 
                             override fun onFailedToReceiveAd(banner: View?) {
+                                MomiStartIoSession.updateBanner("No fill (Market 320x50)")
                                 mainHandler.post { adFailed = true }
                             }
 
@@ -791,16 +888,13 @@ fun MomiMarketplaceBanner(
                         addView(
                             banner,
                             FrameLayout.LayoutParams(
-                                FrameLayout.LayoutParams.MATCH_PARENT,
-                                FrameLayout.LayoutParams.MATCH_PARENT,
+                                FrameLayout.LayoutParams.WRAP_CONTENT,
+                                FrameLayout.LayoutParams.WRAP_CONTENT,
                                 Gravity.CENTER
                             )
                         )
                         post {
-                            runCatching {
-                                banner.loadAd(320, 50)
-                                banner.showBanner()
-                            }
+                            runCatching { banner.loadAd(320, 50) }
                         }
                     }
                 },

@@ -91,6 +91,7 @@ import com.example.ui.components.LocalRemoteVideoResolver
 import com.example.ui.components.LumaAvatar
 import com.example.ui.components.MomiAiAssistantBottomSheet
 import com.example.ui.components.MomiInterstitialController
+import com.example.ui.components.MomiStartIoSession
 import com.example.ui.screens.CreatePostScreen
 import com.example.ui.screens.ExploreScreen
 import com.example.ui.screens.GoLiveScreen
@@ -174,7 +175,14 @@ class MainActivity : ComponentActivity() {
 
         runCatching {
             StartAppSDK.setTestAdsEnabled(BuildConfig.DEBUG)
-            StartAppSDK.init(this, BuildConfig.STARTIO_APP_ID, false)
+            StartAppSDK.initParams(this, BuildConfig.STARTIO_APP_ID)
+                .setReturnAdsEnabled(false)
+                .setCallback {
+                    MomiStartIoSession.markInitialized("SDK initialized")
+                    MomiInterstitialController.preload(applicationContext)
+                }
+                .init()
+            MomiStartIoSession.scheduleFallbackReady()
             StartAppAd.disableSplash()
         }
 
