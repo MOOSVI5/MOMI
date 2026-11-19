@@ -11,6 +11,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -21,7 +22,6 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +46,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Mic
@@ -53,6 +54,7 @@ import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -72,6 +74,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -96,6 +99,8 @@ import com.example.ui.theme.MaroonBright
 import com.example.ui.theme.SilkBlueLight
 import com.example.util.MediaAssets
 import kotlinx.coroutines.delay
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 
 @Composable
 fun GoLiveScreen(
@@ -104,6 +109,7 @@ fun GoLiveScreen(
     comments: List<LiveComment>,
     onStartLive: (title: String, onDone: (Boolean) -> Unit) -> Unit,
     onEndLive: () -> Unit,
+    onPublishFrame: (seq: Long, frameData: String, cameraEnabled: Boolean, micMuted: Boolean) -> Unit,
     onSendComment: (String) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier
@@ -141,14 +147,32 @@ fun GoLiveScreen(
         }
     }
 
-    var isLive by remember { mutableStateOf(false) }
+    var isLive by remember { mutableStateOf(activeStream?.isLive == true) }
     var isStarting by remember { mutableStateOf(false) }
+    var hasExplicitlyEnded by remember { mutableStateOf(false) }
     var useFrontCamera by remember { mutableStateOf(true) }
+    var cameraEnabled by remember { mutableStateOf(true) }
     var isMicMuted by remember { mutableStateOf(false) }
     var streamTitle by remember { mutableStateOf("") }
     var commentDraft by remember { mutableStateOf("") }
     var elapsedSeconds by remember { mutableLongStateOf(0L) }
     var cameraError by remember { mutableStateOf<String?>(null) }
+
+    val currentIsLive by rememberUpdatedState(isLive)
+    val currentCameraEnabled by rememberUpdatedState(cameraEnabled)
+    val currentMicMuted by rememberUpdatedState(isMicMuted)
+    val latestOnEndLive by rememberUpdatedState(onEndLive)
+    val latestOnPublishFrame by rememberUpdatedState(onPublishFrame)
+
+    val lastSentAtRef = remember { AtomicLong(0L) }
+    val seqRef = remember { AtomicLong(0L) }
+    val mainExecutor = remember(context) { ContextCompat.getMainExecutor(context) }
+
+    LaunchedEffect(activeStream?.isLive) {
+        if (!hasExplicitlyEnded && !isStarting && activeStream?.isLive == true) {
+            isLive = true
+        }
+    }
 
     val listState = rememberLazyListState()
 
@@ -161,6 +185,7 @@ fun GoLiveScreen(
     LaunchedEffect(isLive) {
         if (isLive) {
             elapsedSeconds = 0L
+            lastSentAtRef.set(0L)
             while (isLive) {
                 delay(1000L)
                 elapsedSeconds += 1L
@@ -168,16 +193,25 @@ fun GoLiveScreen(
         }
     }
 
-    // Ensure broadcast stops cleanly if broadcaster leaves screen
+    // Immediately broadcast paused-camera or mic state so viewers update without waiting
+    LaunchedEffect(isLive, cameraEnabled, isMicMuted) {
+        if (isLive && (!cameraEnabled || isMicMuted)) {
+            val seq = seqRef.incrementAndGet()
+            latestOnPublishFrame(seq, "", cameraEnabled, isMicMuted)
+        }
+    }
+
+    // Ensure broadcast stops cleanly if broadcaster navigates away
     DisposableEffect(Unit) {
         onDispose {
-            if (isLive) {
-                onEndLive()
+            if (currentIsLive) {
+                latestOnEndLive()
             }
         }
     }
 
     fun handleExit() {
+        hasExplicitlyEnded = true
         if (isLive) {
             isLive = false
             onEndLive()
@@ -214,16 +248,29 @@ fun GoLiveScreen(
                     )
                 }
             }
+            val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
 
-            DisposableEffect(lifecycleOwner, useFrontCamera, hasCameraPermission) {
+            DisposableEffect(Unit) {
+                onDispose {
+                    runCatching { analysisExecutor.shutdownNow() }
+                }
+            }
+
+            DisposableEffect(lifecycleOwner, useFrontCamera, hasCameraPermission, cameraEnabled) {
                 val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-                val executor = ContextCompat.getMainExecutor(context)
                 var cameraProvider: ProcessCameraProvider? = null
 
                 cameraProviderFuture.addListener({
                     runCatching {
                         val provider = cameraProviderFuture.get()
                         cameraProvider = provider
+                        provider.unbindAll()
+
+                        if (!cameraEnabled) {
+                            cameraError = null
+                            return@addListener
+                        }
+
                         val preview = Preview.Builder().build().also {
                             it.surfaceProvider = previewView.surfaceProvider
                         }
@@ -237,24 +284,111 @@ fun GoLiveScreen(
                         } else {
                             CameraSelector.DEFAULT_BACK_CAMERA
                         }
-                        provider.unbindAll()
-                        provider.bindToLifecycle(lifecycleOwner, selector, preview)
+
+                        val imageAnalysis = ImageAnalysis.Builder()
+                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .build()
+                            .apply {
+                                setAnalyzer(analysisExecutor) { imageProxy ->
+                                    try {
+                                        if (!currentIsLive || !currentCameraEnabled) {
+                                            return@setAnalyzer
+                                        }
+                                        val now = System.currentTimeMillis()
+                                        val prev = lastSentAtRef.get()
+                                        if (now - prev < 1250L) {
+                                            return@setAnalyzer
+                                        }
+                                        if (!lastSentAtRef.compareAndSet(prev, now)) {
+                                            return@setAnalyzer
+                                        }
+
+                                        val bmp = runCatching { imageProxy.toBitmap() }.getOrNull()
+                                            ?: return@setAnalyzer
+                                        val encoded = try {
+                                            MediaAssets.encodeLiveFrameBitmapToBase64(
+                                                source = bmp,
+                                                rotationDegrees = imageProxy.imageInfo.rotationDegrees
+                                            )
+                                        } finally {
+                                            runCatching { bmp.recycle() }
+                                        }
+                                        if (!encoded.isNullOrBlank()) {
+                                            val nextSeq = seqRef.incrementAndGet()
+                                            val mic = currentMicMuted
+                                            mainExecutor.execute {
+                                                if (currentIsLive && currentCameraEnabled) {
+                                                    latestOnPublishFrame(nextSeq, encoded, true, mic)
+                                                }
+                                            }
+                                        }
+                                    } finally {
+                                        imageProxy.close()
+                                    }
+                                }
+                            }
+
+                        runCatching {
+                            provider.bindToLifecycle(lifecycleOwner, selector, preview, imageAnalysis)
+                        }.onFailure {
+                            Log.w("GoLiveScreen", "Preview+ImageAnalysis bind failed; falling back to Preview only", it)
+                            provider.unbindAll()
+                            provider.bindToLifecycle(lifecycleOwner, selector, preview)
+                        }
                         cameraError = null
                     }.onFailure { err ->
                         Log.w("GoLiveScreen", "CameraX bind failed", err)
                         cameraError = "Camera preview unavailable on this device"
                     }
-                }, executor)
+                }, mainExecutor)
 
                 onDispose {
                     runCatching { cameraProvider?.unbindAll() }
                 }
             }
 
-            AndroidView(
-                factory = { previewView },
-                modifier = Modifier.fillMaxSize()
-            )
+            if (cameraEnabled) {
+                AndroidView(
+                    factory = { previewView },
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(84.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.1f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.VideocamOff,
+                            contentDescription = "Camera paused",
+                            tint = Color.White,
+                            modifier = Modifier.size(38.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Text(
+                        text = "Camera Paused",
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Viewers see your paused status while live chat stays open.",
+                        color = Color.White.copy(alpha = 0.72f),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
         } else {
             // Permission Request Card
             Column(
@@ -384,13 +518,13 @@ fun GoLiveScreen(
                     if (isLive) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Row(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(Color(0xFFD92D4E))
-                                    .padding(horizontal = 7.dp, vertical = 2.dp),
+                                    .padding(horizontal = 6.dp, vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Box(
@@ -412,7 +546,7 @@ fun GoLiveScreen(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(Color.Black.copy(alpha = 0.45f))
-                                    .padding(horizontal = 7.dp, vertical = 2.dp),
+                                    .padding(horizontal = 6.dp, vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
@@ -421,11 +555,33 @@ fun GoLiveScreen(
                                     tint = Color.White,
                                     modifier = Modifier.size(12.dp)
                                 )
-                                Spacer(modifier = Modifier.width(4.dp))
+                                Spacer(modifier = Modifier.width(3.dp))
                                 Text(
                                     text = MediaAssets.formatCompactCount(activeStream?.viewerCount ?: 0L),
                                     color = Color.White,
                                     fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(Color(0xFFF59E0B).copy(alpha = 0.28f))
+                                    .border(1.dp, Color(0xFFF59E0B).copy(alpha = 0.65f), RoundedCornerShape(6.dp))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.CardGiftcard,
+                                    contentDescription = "Gifts earned",
+                                    tint = Color(0xFFFFD54F),
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text(
+                                    text = "${MediaAssets.formatCompactCount(activeStream?.giftsCredits ?: 0L)} cr",
+                                    color = Color(0xFFFFE082),
+                                    fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
@@ -443,14 +599,28 @@ fun GoLiveScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (hasCameraPermission) {
                     IconButton(
-                        onClick = { useFrontCamera = !useFrontCamera },
-                        modifier = Modifier.minimumInteractiveComponentSize()
+                        onClick = { cameraEnabled = !cameraEnabled },
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("toggle_live_camera_button")
                     ) {
                         Icon(
-                            imageVector = Icons.Filled.Cameraswitch,
-                            contentDescription = "Switch camera",
-                            tint = Color.White
+                            imageVector = if (cameraEnabled) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
+                            contentDescription = if (cameraEnabled) "Pause camera" else "Resume camera",
+                            tint = if (cameraEnabled) Color.White else MaroonBright
                         )
+                    }
+                    if (cameraEnabled) {
+                        IconButton(
+                            onClick = { useFrontCamera = !useFrontCamera },
+                            modifier = Modifier.minimumInteractiveComponentSize()
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Cameraswitch,
+                                contentDescription = "Switch camera",
+                                tint = Color.White
+                            )
+                        }
                     }
                 }
                 IconButton(
@@ -510,6 +680,7 @@ fun GoLiveScreen(
                 Button(
                     enabled = !isStarting,
                     onClick = {
+                        hasExplicitlyEnded = false
                         isStarting = true
                         onStartLive(streamTitle) { ok ->
                             isStarting = false
@@ -547,7 +718,7 @@ fun GoLiveScreen(
                     }
                 }
             } else {
-                // Real-time Audience Comments
+                // Real-time Audience Comments & Gift Alerts
                 if (comments.isNotEmpty()) {
                     LazyColumn(
                         state = listState,
@@ -558,10 +729,21 @@ fun GoLiveScreen(
                         contentPadding = PaddingValues(vertical = 4.dp)
                     ) {
                         items(comments, key = { it.id }) { comment ->
+                            val isGiftAlert = comment.text.startsWith("[GIFT]")
                             Row(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(12.dp))
-                                    .background(Color.Black.copy(alpha = 0.48f))
+                                    .background(
+                                        if (isGiftAlert) Color(0xFF7C2D12).copy(alpha = 0.78f)
+                                        else Color.Black.copy(alpha = 0.48f)
+                                    )
+                                    .then(
+                                        if (isGiftAlert) {
+                                            Modifier.border(1.dp, Color(0xFFFBBF24), RoundedCornerShape(12.dp))
+                                        } else {
+                                            Modifier
+                                        }
+                                    )
                                     .padding(horizontal = 10.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -573,14 +755,15 @@ fun GoLiveScreen(
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
                                     text = "${comment.username}  ",
-                                    color = SilkBlueLight,
+                                    color = if (isGiftAlert) Color(0xFFFDE68A) else SilkBlueLight,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = comment.text,
+                                    text = if (isGiftAlert) comment.text.removePrefix("[GIFT]").trim() else comment.text,
                                     color = Color.White,
-                                    fontSize = 13.sp
+                                    fontSize = 13.sp,
+                                    fontWeight = if (isGiftAlert) FontWeight.SemiBold else FontWeight.Normal
                                 )
                             }
                         }

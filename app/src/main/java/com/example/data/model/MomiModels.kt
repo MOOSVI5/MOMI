@@ -295,7 +295,19 @@ data class LiveStream(
     @get:PropertyName("isLive") val isLive: Boolean = true,
     val viewerCount: Long = 0L,
     val likesCount: Long = 0L,
+    val giftsCredits: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
+data class LiveFrame(
+    @DocumentId val id: String = "",
+    val userId: String = "",
+    val seq: Long = 0L,
+    val frameData: String = "",
+    val cameraEnabled: Boolean = true,
+    val micMuted: Boolean = false,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
 
@@ -308,6 +320,215 @@ data class LiveComment(
     val text: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null
 )
+
+@IgnoreExtraProperties
+data class UserWallet(
+    @DocumentId val id: String = "",
+    val userId: String = "",
+    val balance: Long = 0L,
+    val totalEarned: Long = 0L,
+    val totalSpent: Long = 0L,
+    val totalPurchased: Long = 0L,
+    val accountTier: String = MomiCreditCatalog.TIER_STANDARD,
+    val verificationTier: String = MomiCreditCatalog.VERIFICATION_NONE,
+    val unlockedPerks: List<String> = emptyList(),
+    val lastTxId: String? = null,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
+data class CreditTransaction(
+    @DocumentId val id: String = "",
+    val txId: String = "",
+    val type: String = TYPE_TOP_UP,
+    val senderUid: String = "",
+    val senderUsername: String = "",
+    val recipientUid: String = "",
+    val recipientUsername: String = "",
+    val creditsAmount: Long = 0L,
+    val priceUsd: Double = 0.0,
+    val paymentMethod: String = METHOD_GOOGLE_PLAY,
+    val paymentRef: String? = null,
+    val giftKey: String? = null,
+    val giftName: String? = null,
+    val streamId: String? = null,
+    val perkKey: String? = null,
+    val recipientClaimed: Boolean = true,
+    val status: String = "COMPLETED",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    companion object {
+        const val TYPE_TOP_UP = "TOP_UP"
+        const val TYPE_GIFT = "GIFT"
+        const val TYPE_PERK_UNLOCK = "PERK_UNLOCK"
+
+        const val METHOD_GOOGLE_PLAY = "GOOGLE_PLAY"
+        const val METHOD_DEBUG_SANDBOX = "DEBUG_SANDBOX"
+        const val METHOD_WALLET_CREDITS = "WALLET_CREDITS"
+    }
+}
+
+data class CreditPackageOption(
+    val productId: String,
+    val title: String,
+    val credits: Long,
+    val bonusLabel: String,
+    val fallbackPriceUsd: Double,
+    val isPopular: Boolean = false
+)
+
+data class LiveGiftItem(
+    val key: String,
+    val name: String,
+    val emojiLabel: String,
+    val creditsCost: Long,
+    val accentHex: Long
+)
+
+data class AccountPerkItem(
+    val key: String,
+    val title: String,
+    val subtitle: String,
+    val creditsCost: Long,
+    val tierGranted: String,
+    val verificationStageGranted: String,
+    val comingSoonFeatures: List<String> = emptyList()
+)
+
+object MomiCreditCatalog {
+    const val TIER_STANDARD = "STANDARD"
+    const val TIER_SUPPORTER = "SUPPORTER"
+    const val TIER_CREATOR_PRO = "CREATOR_PRO"
+    const val TIER_VIP = "VIP"
+
+    const val VERIFICATION_NONE = "NONE"
+    const val VERIFICATION_PENDING_PERK = "PENDING_PERK"
+    const val VERIFICATION_CREATOR_PRO = "CREATOR_PRO"
+    const val VERIFICATION_VERIFIED = "VERIFIED"
+
+    val packages: List<CreditPackageOption> = listOf(
+        CreditPackageOption(
+            productId = "momi_credits_50",
+            title = "Starter Spark",
+            credits = 50L,
+            bonusLabel = "Try gifting live creators",
+            fallbackPriceUsd = 0.99
+        ),
+        CreditPackageOption(
+            productId = "momi_credits_200",
+            title = "Creator Pack",
+            credits = 200L,
+            bonusLabel = "Popular for live rooms",
+            fallbackPriceUsd = 2.99,
+            isPopular = true
+        ),
+        CreditPackageOption(
+            productId = "momi_credits_500",
+            title = "Patron Bundle",
+            credits = 500L,
+            bonusLabel = "+15% value · Unlocks Supporter tier",
+            fallbackPriceUsd = 6.99
+        ),
+        CreditPackageOption(
+            productId = "momi_credits_1200",
+            title = "Studio Vault",
+            credits = 1200L,
+            bonusLabel = "+25% value · Ready for Creator Pro",
+            fallbackPriceUsd = 14.99
+        ),
+        CreditPackageOption(
+            productId = "momi_credits_3000",
+            title = "VIP Patron",
+            credits = 3000L,
+            bonusLabel = "Best value · Unlocks VIP status",
+            fallbackPriceUsd = 29.99
+        )
+    )
+
+    val gifts: List<LiveGiftItem> = listOf(
+        LiveGiftItem("rose", "Silk Rose", "🌹", 5L, 0xFFE91E63),
+        LiveGiftItem("heart_burst", "Heart Burst", "💖", 20L, 0xFFFF4D6D),
+        LiveGiftItem("spotlight", "Spotlight", "✨", 50L, 0xFF4A89B8),
+        LiveGiftItem("crown", "Royal Crown", "👑", 150L, 0xFFF59E0B),
+        LiveGiftItem("supernova", "Super Nova", "🚀", 500L, 0xFF8C1D40)
+    )
+
+    val perks: List<AccountPerkItem> = listOf(
+        AccountPerkItem(
+            key = "SUPPORTER_FRAME",
+            title = "Supporter Profile Badge & Live Glow",
+            subtitle = "Stand out in creator live chat & unlock Supporter account tier.",
+            creditsCost = 100L,
+            tierGranted = TIER_SUPPORTER,
+            verificationStageGranted = VERIFICATION_NONE,
+            comingSoonFeatures = listOf("Custom chat color flare", "Priority live Q&A queue")
+        ),
+        AccountPerkItem(
+            key = "CREATOR_BOOST",
+            title = "Creator Spotlight Boost",
+            subtitle = "Featured badge in Creator Discovery & elevated Creator Pro status.",
+            creditsCost = 250L,
+            tierGranted = TIER_CREATOR_PRO,
+            verificationStageGranted = VERIFICATION_CREATOR_PRO,
+            comingSoonFeatures = listOf("HD live frame priority", "Featured Explore placement")
+        ),
+        AccountPerkItem(
+            key = "PRIORITY_VERIFICATION",
+            title = "Priority Verification Fast-Track",
+            subtitle = "Queue your account for official identity & creator verification review.",
+            creditsCost = 500L,
+            tierGranted = TIER_CREATOR_PRO,
+            verificationStageGranted = VERIFICATION_PENDING_PERK,
+            comingSoonFeatures = listOf("ID document KYC workflow", "Official verified creator shield")
+        ),
+        AccountPerkItem(
+            key = "VIP_PATRON_PASS",
+            title = "Momi VIP Patron Pass",
+            subtitle = "Top VIP patron tier with priority support & upcoming subscriber lounges.",
+            creditsCost = 1000L,
+            tierGranted = TIER_VIP,
+            verificationStageGranted = VERIFICATION_CREATOR_PRO,
+            comingSoonFeatures = listOf("VIP backstage live rooms", "Zero-fee creator payouts")
+        )
+    )
+
+    fun packageByProductId(productId: String): CreditPackageOption? =
+        packages.firstOrNull { it.productId == productId }
+
+    fun tierForTotalPurchased(totalPurchased: Long, unlockedPerks: List<String>): String {
+        return when {
+            "VIP_PATRON_PASS" in unlockedPerks || totalPurchased >= 3000L -> TIER_VIP
+            "CREATOR_BOOST" in unlockedPerks || "PRIORITY_VERIFICATION" in unlockedPerks || totalPurchased >= 1200L -> TIER_CREATOR_PRO
+            "SUPPORTER_FRAME" in unlockedPerks || totalPurchased >= 200L -> TIER_SUPPORTER
+            else -> TIER_STANDARD
+        }
+    }
+
+    fun verificationTierForPerks(current: String, unlockedPerks: List<String>): String {
+        if (current == VERIFICATION_VERIFIED) return VERIFICATION_VERIFIED
+        return when {
+            "PRIORITY_VERIFICATION" in unlockedPerks -> VERIFICATION_PENDING_PERK
+            "CREATOR_BOOST" in unlockedPerks || "VIP_PATRON_PASS" in unlockedPerks -> VERIFICATION_CREATOR_PRO
+            else -> VERIFICATION_NONE
+        }
+    }
+
+    fun tierLabel(tier: String): String = when (tier) {
+        TIER_VIP -> "VIP Patron"
+        TIER_CREATOR_PRO -> "Creator Pro"
+        TIER_SUPPORTER -> "Supporter"
+        else -> "Standard"
+    }
+
+    fun verificationLabel(tier: String): String = when (tier) {
+        VERIFICATION_VERIFIED -> "Verified Creator"
+        VERIFICATION_PENDING_PERK -> "Verification Priority Queued"
+        VERIFICATION_CREATOR_PRO -> "Creator Pro Eligible"
+        else -> "Standard Member"
+    }
+}
 
 @IgnoreExtraProperties
 data class MerchantAccount(

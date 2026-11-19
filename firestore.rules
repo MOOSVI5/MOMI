@@ -249,8 +249,18 @@ service cloud.firestore {
              data.isLive is bool &&
              data.viewerCount is int && data.viewerCount >= 0 &&
              data.likesCount is int && data.likesCount >= 0 &&
+             (!('giftsCredits' in data) || (data.giftsCredits is int && data.giftsCredits >= 0)) &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
+    }
+
+    function isValidLiveFrame(data, streamId) {
+      return data.userId is string && data.userId == streamId && isValidId(data.userId) &&
+             data.seq is int && data.seq >= 0 &&
+             data.frameData is string && data.frameData.size() <= 220000 &&
+             data.cameraEnabled is bool &&
+             data.micMuted is bool &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
 
     function isValidLiveComment(data) {
@@ -259,6 +269,108 @@ service cloud.firestore {
              data.avatarKey is string && data.avatarKey.size() >= 1 && data.avatarKey.size() <= 64 &&
              data.text is string && data.text.size() >= 1 && data.text.size() <= 300 &&
              data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidUserWallet(data, userId) {
+      return data.userId is string && data.userId == userId && isValidId(data.userId) &&
+             data.balance is int && data.balance >= 0 &&
+             data.totalEarned is int && data.totalEarned >= 0 &&
+             data.totalSpent is int && data.totalSpent >= 0 &&
+             data.totalPurchased is int && data.totalPurchased >= 0 &&
+             data.accountTier is string && data.accountTier in ['STANDARD', 'SUPPORTER', 'CREATOR_PRO', 'VIP'] &&
+             data.verificationTier is string && data.verificationTier in ['NONE', 'PENDING_PERK', 'CREATOR_PRO', 'VERIFIED'] &&
+             data.unlockedPerks is list && data.unlockedPerks.size() <= 20 &&
+             (data.unlockedPerks.size() == 0 || data.unlockedPerks[0] is string) &&
+             (!('lastTxId' in data) || data.lastTxId == null || (data.lastTxId is string && isValidId(data.lastTxId))) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
+    }
+
+    function isValidCreditTransaction(data, txId) {
+      return data.txId is string && data.txId == txId && isValidId(txId) &&
+             data.type is string && data.type in ['TOP_UP', 'GIFT', 'PERK_UNLOCK'] &&
+             data.senderUid is string && isValidId(data.senderUid) &&
+             data.senderUsername is string && data.senderUsername.size() >= 1 && data.senderUsername.size() <= 50 &&
+             data.recipientUid is string && isValidId(data.recipientUid) &&
+             data.recipientUsername is string && data.recipientUsername.size() >= 1 && data.recipientUsername.size() <= 50 &&
+             data.creditsAmount is int && data.creditsAmount >= 1 && data.creditsAmount <= 5000 &&
+             (data.priceUsd is int || data.priceUsd is float) && data.priceUsd >= 0 &&
+             data.paymentMethod is string && data.paymentMethod in ['GOOGLE_PLAY', 'DEBUG_SANDBOX', 'WALLET_CREDITS'] &&
+             (!('paymentRef' in data) || data.paymentRef == null || (data.paymentRef is string && data.paymentRef.size() <= 200)) &&
+             (!('giftKey' in data) || data.giftKey == null || (data.giftKey is string && data.giftKey.size() <= 64)) &&
+             (!('giftName' in data) || data.giftName == null || (data.giftName is string && data.giftName.size() <= 64)) &&
+             (!('streamId' in data) || data.streamId == null || (data.streamId is string && isValidId(data.streamId))) &&
+             (!('perkKey' in data) || data.perkKey == null || (data.perkKey is string && data.perkKey.size() <= 64)) &&
+             data.recipientClaimed is bool &&
+             data.status is string && data.status in ['COMPLETED', 'PENDING'] &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             (!('updatedAt' in data) || (data.updatedAt is timestamp && data.updatedAt <= request.time));
+    }
+
+    function isValidWalletTopUp(userId) {
+      let txId = incoming().lastTxId;
+      let txPath = /databases/$(database)/documents/creditTransactions/$(txId);
+      let tx = getAfter(txPath).data;
+      return txId is string && isValidId(txId) &&
+             !exists(txPath) && existsAfter(txPath) &&
+             tx.type == 'TOP_UP' &&
+             tx.senderUid == userId &&
+             tx.recipientUid == userId &&
+             tx.creditsAmount is int &&
+             tx.creditsAmount in [50, 200, 500, 1200, 3000] &&
+             incoming().diff(existing()).affectedKeys().hasOnly(['balance', 'totalPurchased', 'accountTier', 'lastTxId', 'updatedAt']) &&
+             incoming().balance == existing().balance + tx.creditsAmount &&
+             incoming().totalPurchased == existing().totalPurchased + tx.creditsAmount;
+    }
+
+    function isValidWalletGiftSend(userId) {
+      let txId = incoming().lastTxId;
+      let txPath = /databases/$(database)/documents/creditTransactions/$(txId);
+      let tx = getAfter(txPath).data;
+      return txId is string && isValidId(txId) &&
+             !exists(txPath) && existsAfter(txPath) &&
+             tx.type == 'GIFT' &&
+             tx.senderUid == userId &&
+             tx.recipientUid != userId &&
+             tx.creditsAmount is int &&
+             tx.creditsAmount > 0 && tx.creditsAmount <= 5000 &&
+             incoming().diff(existing()).affectedKeys().hasOnly(['balance', 'totalSpent', 'lastTxId', 'updatedAt']) &&
+             incoming().balance == existing().balance - tx.creditsAmount &&
+             incoming().totalSpent == existing().totalSpent + tx.creditsAmount;
+    }
+
+    function isValidWalletGiftClaim(userId) {
+      let txId = incoming().lastTxId;
+      let txPath = /databases/$(database)/documents/creditTransactions/$(txId);
+      let txBefore = get(txPath).data;
+      let txAfter = getAfter(txPath).data;
+      return txId is string && isValidId(txId) &&
+             exists(txPath) && existsAfter(txPath) &&
+             txBefore.type == 'GIFT' &&
+             txBefore.recipientUid == userId &&
+             txBefore.recipientClaimed == false &&
+             txAfter.recipientClaimed == true &&
+             incoming().diff(existing()).affectedKeys().hasOnly(['balance', 'totalEarned', 'lastTxId', 'updatedAt']) &&
+             incoming().balance == existing().balance + txBefore.creditsAmount &&
+             incoming().totalEarned == existing().totalEarned + txBefore.creditsAmount;
+    }
+
+    function isValidWalletPerkUnlock(userId) {
+      let txId = incoming().lastTxId;
+      let txPath = /databases/$(database)/documents/creditTransactions/$(txId);
+      let tx = getAfter(txPath).data;
+      return txId is string && isValidId(txId) &&
+             !exists(txPath) && existsAfter(txPath) &&
+             tx.type == 'PERK_UNLOCK' &&
+             tx.senderUid == userId &&
+             tx.recipientUid == userId &&
+             tx.creditsAmount is int &&
+             tx.creditsAmount in [100, 250, 500, 1000] &&
+             incoming().diff(existing()).affectedKeys().hasOnly(['balance', 'totalSpent', 'accountTier', 'verificationTier', 'unlockedPerks', 'lastTxId', 'updatedAt']) &&
+             incoming().balance == existing().balance - tx.creditsAmount &&
+             incoming().totalSpent == existing().totalSpent + tx.creditsAmount &&
+             incoming().unlockedPerks.size() >= existing().unlockedPerks.size() &&
+             incoming().unlockedPerks.size() <= existing().unlockedPerks.size() + 1;
     }
 
     function isValidMerchant(data, merchantId) {
@@ -630,7 +742,7 @@ service cloud.firestore {
       }
     }
 
-    // Shared Momi Live Broadcast Rooms & Live Chat
+    // Shared Momi Live Broadcast Rooms, Rolling Live Frames & Live Chat
     match /liveStreams/{streamId} {
       allow get: if isSignedIn() && isValidId(streamId);
       allow list: if isSignedIn();
@@ -640,7 +752,7 @@ service cloud.firestore {
                        streamId == request.auth.uid &&
                        incoming().userId == request.auth.uid &&
                        incoming().keys().hasAll(['userId', 'username', 'displayName', 'avatarKey', 'authorVerified', 'title', 'category', 'isLive', 'viewerCount', 'likesCount', 'createdAt']) &&
-                       incoming().keys().hasOnly(['userId', 'username', 'displayName', 'avatarKey', 'authorVerified', 'title', 'category', 'isLive', 'viewerCount', 'likesCount', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'username', 'displayName', 'avatarKey', 'authorVerified', 'title', 'category', 'isLive', 'viewerCount', 'likesCount', 'giftsCredits', 'createdAt', 'updatedAt']) &&
                        isValidLiveStream(incoming(), streamId);
 
       allow update: if isSignedIn() &&
@@ -649,16 +761,45 @@ service cloud.firestore {
                        incoming().userId == existing().userId &&
                        (
                          (existing().userId == request.auth.uid &&
-                           incoming().diff(existing()).affectedKeys().hasOnly(['username', 'displayName', 'avatarKey', 'authorVerified', 'title', 'category', 'isLive', 'viewerCount', 'likesCount', 'createdAt', 'updatedAt'])) ||
+                           incoming().diff(existing()).affectedKeys().hasOnly(['username', 'displayName', 'avatarKey', 'authorVerified', 'title', 'category', 'isLive', 'viewerCount', 'likesCount', 'giftsCredits', 'createdAt', 'updatedAt'])) ||
                          (incoming().createdAt == existing().createdAt &&
                            incoming().diff(existing()).affectedKeys().hasOnly(['viewerCount', 'updatedAt']) &&
                            (incoming().viewerCount == existing().viewerCount + 1 || incoming().viewerCount == existing().viewerCount - 1)) ||
                          (incoming().createdAt == existing().createdAt &&
                            incoming().diff(existing()).affectedKeys().hasOnly(['likesCount', 'updatedAt']) &&
-                           incoming().likesCount == existing().likesCount + 1)
+                           incoming().likesCount == existing().likesCount + 1) ||
+                         (incoming().createdAt == existing().createdAt &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['giftsCredits', 'updatedAt']) &&
+                           incoming().giftsCredits is int &&
+                           ((!('giftsCredits' in existing()) && incoming().giftsCredits > 0 && incoming().giftsCredits <= 5000) ||
+                            (('giftsCredits' in existing()) && existing().giftsCredits is int && incoming().giftsCredits > existing().giftsCredits && incoming().giftsCredits <= existing().giftsCredits + 5000)))
                        );
 
       allow delete: if isSignedIn() && isValidId(streamId) && existing().userId == request.auth.uid;
+
+      match /liveFrames/{frameId} {
+        allow get: if isSignedIn() && isValidId(streamId) && isValidId(frameId);
+        allow list: if isSignedIn() && isValidId(streamId);
+
+        allow create: if isSignedIn() &&
+                         isValidId(streamId) &&
+                         frameId == 'latest' &&
+                         streamId == request.auth.uid &&
+                         incoming().keys().hasAll(['userId', 'seq', 'frameData', 'cameraEnabled', 'micMuted', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'seq', 'frameData', 'cameraEnabled', 'micMuted', 'updatedAt']) &&
+                         isValidLiveFrame(incoming(), streamId) &&
+                         exists(/databases/$(database)/documents/liveStreams/$(streamId));
+
+        allow update: if isSignedIn() &&
+                         isValidId(streamId) &&
+                         frameId == 'latest' &&
+                         streamId == request.auth.uid &&
+                         isValidLiveFrame(incoming(), streamId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['userId', 'seq', 'frameData', 'cameraEnabled', 'micMuted', 'updatedAt']);
+
+        allow delete: if isSignedIn() && isValidId(streamId) && streamId == request.auth.uid;
+      }
 
       match /liveComments/{commentId} {
         allow get: if isSignedIn() && isValidId(streamId) && isValidId(commentId);
@@ -836,6 +977,97 @@ service cloud.firestore {
                        );
 
       allow delete: if isAdmin() && isValidId(reportId);
+    }
+
+    // Momi Account Wallets (strictly owner-private; all balance mutations require atomic CreditTransaction ledger)
+    match /wallets/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin() || (isSignedIn() && existing().userId == request.auth.uid);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().keys().hasAll(['userId', 'balance', 'totalEarned', 'totalSpent', 'totalPurchased', 'accountTier', 'verificationTier', 'unlockedPerks', 'createdAt']) &&
+                       incoming().keys().hasOnly(['userId', 'balance', 'totalEarned', 'totalSpent', 'totalPurchased', 'accountTier', 'verificationTier', 'unlockedPerks', 'lastTxId', 'createdAt', 'updatedAt']) &&
+                       isValidUserWallet(incoming(), userId) &&
+                       incoming().balance == 0 &&
+                       incoming().totalEarned == 0 &&
+                       incoming().totalSpent == 0 &&
+                       incoming().totalPurchased == 0 &&
+                       incoming().accountTier == 'STANDARD' &&
+                       incoming().verificationTier == 'NONE' &&
+                       incoming().unlockedPerks.size() == 0;
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       isValidUserWallet(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         isValidWalletTopUp(userId) ||
+                         isValidWalletGiftSend(userId) ||
+                         isValidWalletGiftClaim(userId) ||
+                         isValidWalletPerkUnlock(userId)
+                       );
+
+      allow delete: if false;
+    }
+
+    // Immutable Credit Ledger (visible only to sender, recipient, or admin)
+    match /creditTransactions/{txId} {
+      allow get: if isSignedIn() && isValidId(txId) && (
+        request.auth.uid == existing().senderUid ||
+        request.auth.uid == existing().recipientUid ||
+        isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        request.auth.uid == existing().senderUid ||
+        request.auth.uid == existing().recipientUid ||
+        isAdmin()
+      );
+
+      allow create: if isSignedIn() &&
+                       isValidId(txId) &&
+                       incoming().senderUid == request.auth.uid &&
+                       incoming().keys().hasAll(['txId', 'type', 'senderUid', 'senderUsername', 'recipientUid', 'recipientUsername', 'creditsAmount', 'priceUsd', 'paymentMethod', 'recipientClaimed', 'status', 'createdAt']) &&
+                       incoming().keys().hasOnly(['txId', 'type', 'senderUid', 'senderUsername', 'recipientUid', 'recipientUsername', 'creditsAmount', 'priceUsd', 'paymentMethod', 'paymentRef', 'giftKey', 'giftName', 'streamId', 'perkKey', 'recipientClaimed', 'status', 'createdAt', 'updatedAt']) &&
+                       isValidCreditTransaction(incoming(), txId) &&
+                       existsAfter(/databases/$(database)/documents/wallets/$(request.auth.uid)) &&
+                       getAfter(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.lastTxId == txId &&
+                       (
+                         (incoming().type == 'TOP_UP' &&
+                          incoming().senderUid == incoming().recipientUid &&
+                          incoming().recipientClaimed == true &&
+                          incoming().creditsAmount in [50, 200, 500, 1200, 3000] &&
+                          incoming().paymentMethod in ['GOOGLE_PLAY', 'DEBUG_SANDBOX'] &&
+                          ('paymentRef' in incoming()) && incoming().paymentRef is string && incoming().paymentRef.size() >= 6) ||
+                         (incoming().type == 'GIFT' &&
+                          incoming().senderUid != incoming().recipientUid &&
+                          incoming().recipientClaimed == false &&
+                          incoming().paymentMethod == 'WALLET_CREDITS') ||
+                         (incoming().type == 'PERK_UNLOCK' &&
+                          incoming().senderUid == incoming().recipientUid &&
+                          incoming().recipientClaimed == true &&
+                          incoming().paymentMethod == 'WALLET_CREDITS' &&
+                          incoming().creditsAmount in [100, 250, 500, 1000])
+                       );
+
+      allow update: if isSignedIn() &&
+                       isValidId(txId) &&
+                       isValidCreditTransaction(incoming(), txId) &&
+                       existing().type == 'GIFT' &&
+                       existing().recipientUid == request.auth.uid &&
+                       existing().recipientClaimed == false &&
+                       incoming().recipientClaimed == true &&
+                       incoming().senderUid == existing().senderUid &&
+                       incoming().recipientUid == existing().recipientUid &&
+                       incoming().creditsAmount == existing().creditsAmount &&
+                       incoming().type == existing().type &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['recipientClaimed', 'updatedAt']) &&
+                       existsAfter(/databases/$(database)/documents/wallets/$(request.auth.uid)) &&
+                       getAfter(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.lastTxId == txId;
+
+      allow delete: if false;
     }
   }
 }

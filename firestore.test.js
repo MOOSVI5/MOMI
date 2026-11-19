@@ -601,7 +601,54 @@ test("LiveStreams & LiveComments: host broadcasts, viewers join/leave/heart/comm
   // Alice starts her own live stream
   await assertSucceeds(aliceDb.collection("liveStreams").doc(ALICE_UID).set(streamPayload));
 
-  // Bob joins (+1 viewerCount), sends heart (+1 likesCount), and comments
+  // Alice publishes rolling LiveFrames ('latest') and toggles camera/mic; viewers read
+  await assertSucceeds(
+    aliceDb.collection("liveStreams").doc(ALICE_UID).collection("liveFrames").doc("latest").set({
+      userId: ALICE_UID,
+      seq: 1,
+      frameData: "JPEG_FRAME_B64",
+      cameraEnabled: true,
+      micMuted: false,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("liveStreams").doc(ALICE_UID).collection("liveFrames").doc("latest").get()
+  );
+
+  // Reject wrong docId, non-host frame overwrite, or oversized frameData
+  await assertFails(
+    aliceDb.collection("liveStreams").doc(ALICE_UID).collection("liveFrames").doc("frame_2").set({
+      userId: ALICE_UID,
+      seq: 2,
+      frameData: "JPEG_FRAME_B64",
+      cameraEnabled: true,
+      micMuted: false,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    bobDb.collection("liveStreams").doc(ALICE_UID).collection("liveFrames").doc("latest").set({
+      userId: ALICE_UID,
+      seq: 2,
+      frameData: "HIJACKED",
+      cameraEnabled: true,
+      micMuted: false,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    aliceDb.collection("liveStreams").doc(ALICE_UID).collection("liveFrames").doc("latest").set({
+      userId: ALICE_UID,
+      seq: 3,
+      frameData: "A".repeat(220001),
+      cameraEnabled: true,
+      micMuted: false,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Bob joins (+1 viewerCount), sends heart (+1 likesCount), increments giftsCredits (+50), and comments
   await assertSucceeds(
     bobDb.collection("liveStreams").doc(ALICE_UID).update({
       viewerCount: 1,
@@ -611,6 +658,18 @@ test("LiveStreams & LiveComments: host broadcasts, viewers join/leave/heart/comm
   await assertSucceeds(
     bobDb.collection("liveStreams").doc(ALICE_UID).update({
       likesCount: 1,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(
+    bobDb.collection("liveStreams").doc(ALICE_UID).update({
+      giftsCredits: 50,
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    bobDb.collection("liveStreams").doc(ALICE_UID).update({
+      giftsCredits: 5051,
       updatedAt: serverTimestamp(),
     })
   );
@@ -1135,3 +1194,256 @@ test("Team RBAC & Content Moderation: admin appoints scoped moderators/editors, 
     })
   );
 });
+
+// --- 11. Momi Wallets & Immutable Credit Transactions Ledger ---
+
+function zeroWalletPayload(uid) {
+  return {
+    userId: uid,
+    balance: 0,
+    totalEarned: 0,
+    totalSpent: 0,
+    totalPurchased: 0,
+    accountTier: "STANDARD",
+    verificationTier: "NONE",
+    unlockedPerks: [],
+    lastTxId: null,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+}
+
+test("Wallets & CreditTransactions: owner isolation, zero-init, atomic top-up, gift send+claim, perk unlock, and anti-replay", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, { email: "alice@example.com", email_verified: true }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, { email: "bob@example.com", email_verified: true }).firestore();
+  const charlieDb = testEnv.authenticatedContext(CHARLIE_UID, { email: "charlie@example.com", email_verified: true }).firestore();
+
+  // Cannot initialize wallet with free non-zero balance or hijack someone else's wallet
+  await assertFails(
+    aliceDb.collection("wallets").doc(ALICE_UID).set({
+      ...zeroWalletPayload(ALICE_UID),
+      balance: 500,
+    })
+  );
+  await assertFails(bobDb.collection("wallets").doc(ALICE_UID).set(zeroWalletPayload(ALICE_UID)));
+
+  // Both Alice & Bob initialize wallets at zero balance
+  await assertSucceeds(aliceDb.collection("wallets").doc(ALICE_UID).set(zeroWalletPayload(ALICE_UID)));
+  await assertSucceeds(bobDb.collection("wallets").doc(BOB_UID).set(zeroWalletPayload(BOB_UID)));
+
+  // Wallets are strictly owner-private
+  await assertSucceeds(aliceDb.collection("wallets").doc(ALICE_UID).get());
+  await assertFails(bobDb.collection("wallets").doc(ALICE_UID).get());
+  await assertFails(bobDb.collection("wallets").get());
+
+  // Arbitrary wallet balance inflation without matching CreditTransaction is denied
+  await assertFails(
+    aliceDb.collection("wallets").doc(ALICE_UID).update({
+      balance: 200,
+      totalPurchased: 200,
+      lastTxId: "tx_fake_missing",
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Atomic TOP_UP of 500 credits for Alice
+  const topUpBatch = aliceDb.batch();
+  topUpBatch.set(aliceDb.collection("creditTransactions").doc("tx_topup_1"), {
+    txId: "tx_topup_1",
+    type: "TOP_UP",
+    senderUid: ALICE_UID,
+    senderUsername: "aria.studio",
+    recipientUid: ALICE_UID,
+    recipientUsername: "aria.studio",
+    creditsAmount: 500,
+    priceUsd: 6.99,
+    paymentMethod: "GOOGLE_PLAY",
+    paymentRef: "GPA.3312-4411-9087",
+    recipientClaimed: true,
+    status: "COMPLETED",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  topUpBatch.update(aliceDb.collection("wallets").doc(ALICE_UID), {
+    balance: 500,
+    totalPurchased: 500,
+    accountTier: "SUPPORTER",
+    lastTxId: "tx_topup_1",
+    updatedAt: serverTimestamp(),
+  });
+  await assertSucceeds(topUpBatch.commit());
+
+  // Replaying the same tx_topup_1 fails (!exists(txPath) blocks replay)
+  const replayBatch = aliceDb.batch();
+  replayBatch.set(aliceDb.collection("creditTransactions").doc("tx_topup_1"), {
+    txId: "tx_topup_1",
+    type: "TOP_UP",
+    senderUid: ALICE_UID,
+    senderUsername: "aria.studio",
+    recipientUid: ALICE_UID,
+    recipientUsername: "aria.studio",
+    creditsAmount: 500,
+    priceUsd: 6.99,
+    paymentMethod: "GOOGLE_PLAY",
+    paymentRef: "GPA.3312-4411-9087",
+    recipientClaimed: true,
+    status: "COMPLETED",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  replayBatch.update(aliceDb.collection("wallets").doc(ALICE_UID), {
+    balance: 1000,
+    totalPurchased: 1000,
+    accountTier: "SUPPORTER",
+    lastTxId: "tx_topup_1",
+    updatedAt: serverTimestamp(),
+  });
+  await assertFails(replayBatch.commit());
+
+  // Bob starts a live stream and Alice sends a 50-credit gift atomically
+  await assertSucceeds(
+    bobDb.collection("liveStreams").doc(BOB_UID).set({
+      userId: BOB_UID,
+      username: "bob.lens",
+      displayName: "Bob Lens",
+      avatarKey: "avatar_kenji",
+      authorVerified: false,
+      title: "Night Studio",
+      category: "Live",
+      isLive: true,
+      viewerCount: 1,
+      likesCount: 0,
+      giftsCredits: 0,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Sending gift pre-marked recipientClaimed: true on create must fail
+  const spoofGiftBatch = aliceDb.batch();
+  spoofGiftBatch.set(aliceDb.collection("creditTransactions").doc("tx_gift_bad"), {
+    txId: "tx_gift_bad",
+    type: "GIFT",
+    senderUid: ALICE_UID,
+    senderUsername: "aria.studio",
+    recipientUid: BOB_UID,
+    recipientUsername: "bob.lens",
+    creditsAmount: 50,
+    priceUsd: 0.0,
+    paymentMethod: "WALLET_CREDITS",
+    giftKey: "spotlight",
+    giftName: "Spotlight",
+    streamId: BOB_UID,
+    recipientClaimed: true,
+    status: "COMPLETED",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  spoofGiftBatch.update(aliceDb.collection("wallets").doc(ALICE_UID), {
+    balance: 450,
+    totalSpent: 50,
+    lastTxId: "tx_gift_bad",
+    updatedAt: serverTimestamp(),
+  });
+  await assertFails(spoofGiftBatch.commit());
+
+  // Valid gift send (50 credits): Alice debited, tx created with recipientClaimed=false, liveStream.giftsCredits incremented
+  const giftBatch = aliceDb.batch();
+  giftBatch.set(aliceDb.collection("creditTransactions").doc("tx_gift_1"), {
+    txId: "tx_gift_1",
+    type: "GIFT",
+    senderUid: ALICE_UID,
+    senderUsername: "aria.studio",
+    recipientUid: BOB_UID,
+    recipientUsername: "bob.lens",
+    creditsAmount: 50,
+    priceUsd: 0.0,
+    paymentMethod: "WALLET_CREDITS",
+    giftKey: "spotlight",
+    giftName: "Spotlight",
+    streamId: BOB_UID,
+    recipientClaimed: false,
+    status: "COMPLETED",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  giftBatch.update(aliceDb.collection("wallets").doc(ALICE_UID), {
+    balance: 450,
+    totalSpent: 50,
+    lastTxId: "tx_gift_1",
+    updatedAt: serverTimestamp(),
+  });
+  giftBatch.update(aliceDb.collection("liveStreams").doc(BOB_UID), {
+    giftsCredits: 50,
+    updatedAt: serverTimestamp(),
+  });
+  await assertSucceeds(giftBatch.commit());
+
+  // Charlie cannot read, hijack, or claim Bob's gift
+  await assertFails(charlieDb.collection("creditTransactions").doc("tx_gift_1").get());
+  await assertFails(charlieDb.collection("creditTransactions").get());
+  await assertSucceeds(bobDb.collection("creditTransactions").where("recipientUid", "==", BOB_UID).where("recipientClaimed", "==", false).get());
+  await assertSucceeds(aliceDb.collection("creditTransactions").where("senderUid", "==", ALICE_UID).get());
+
+  // Bob claims the 50-credit gift into his own wallet atomically
+  const claimBatch = bobDb.batch();
+  claimBatch.update(bobDb.collection("creditTransactions").doc("tx_gift_1"), {
+    recipientClaimed: true,
+    updatedAt: serverTimestamp(),
+  });
+  claimBatch.update(bobDb.collection("wallets").doc(BOB_UID), {
+    balance: 50,
+    totalEarned: 50,
+    lastTxId: "tx_gift_1",
+    updatedAt: serverTimestamp(),
+  });
+  await assertSucceeds(claimBatch.commit());
+
+  // Double-claiming the same gift tx_gift_1 fails
+  const doubleClaimBatch = bobDb.batch();
+  doubleClaimBatch.update(bobDb.collection("creditTransactions").doc("tx_gift_1"), {
+    recipientClaimed: true,
+    updatedAt: serverTimestamp(),
+  });
+  doubleClaimBatch.update(bobDb.collection("wallets").doc(BOB_UID), {
+    balance: 100,
+    totalEarned: 100,
+    lastTxId: "tx_gift_1",
+    updatedAt: serverTimestamp(),
+  });
+  await assertFails(doubleClaimBatch.commit());
+
+  // Alice unlocks Supporter Frame perk (100 credits) from remaining 450 credits -> 350 balance
+  const perkBatch = aliceDb.batch();
+  perkBatch.set(aliceDb.collection("creditTransactions").doc("tx_perk_1"), {
+    txId: "tx_perk_1",
+    type: "PERK_UNLOCK",
+    senderUid: ALICE_UID,
+    senderUsername: "aria.studio",
+    recipientUid: ALICE_UID,
+    recipientUsername: "aria.studio",
+    creditsAmount: 100,
+    priceUsd: 0.0,
+    paymentMethod: "WALLET_CREDITS",
+    perkKey: "SUPPORTER_FRAME",
+    recipientClaimed: true,
+    status: "COMPLETED",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  perkBatch.update(aliceDb.collection("wallets").doc(ALICE_UID), {
+    balance: 350,
+    totalSpent: 150,
+    accountTier: "SUPPORTER",
+    verificationTier: "NONE",
+    unlockedPerks: ["SUPPORTER_FRAME"],
+    lastTxId: "tx_perk_1",
+    updatedAt: serverTimestamp(),
+  });
+  await assertSucceeds(perkBatch.commit());
+
+  // Deleting wallets or credit transactions is strictly forbidden
+  await assertFails(aliceDb.collection("wallets").doc(ALICE_UID).delete());
+  await assertFails(aliceDb.collection("creditTransactions").doc("tx_topup_1").delete());
+});
+

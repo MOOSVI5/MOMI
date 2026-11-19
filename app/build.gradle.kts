@@ -125,6 +125,7 @@ dependencies {
   implementation(libs.androidx.credentials.play.services)
   implementation(libs.googleid)
   implementation(libs.startapp.inapp.sdk)
+  implementation(libs.billing.ktx)
   implementation(libs.androidx.media3.exoplayer)
   implementation(libs.androidx.media3.ui.compose)
   implementation(libs.androidx.media3.transformer)

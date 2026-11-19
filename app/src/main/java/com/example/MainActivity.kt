@@ -1,6 +1,8 @@
 package com.example
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -52,6 +54,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -82,9 +85,13 @@ import androidx.navigation.navArgument
 import com.example.auth.authStateFlow
 import com.example.auth.configureAppCheck
 import com.example.auth.signOut
+import com.example.billing.PlayBillingManager
+import com.example.billing.PlayPurchaseEvent
+import com.example.data.model.CreditTransaction
 import com.example.data.model.Post
 import com.example.data.repository.MarketplaceRepository
 import com.example.data.repository.MomiFirestoreRepository
+import com.example.data.repository.WalletRepository
 import com.example.ui.components.CommentsBottomSheet
 import com.example.ui.components.FloatingMomiAssistantButton
 import com.example.ui.components.LocalRemoteVideoResolver
@@ -108,6 +115,7 @@ import com.example.ui.screens.ReportDraftTarget
 import com.example.ui.screens.SignInScreen
 import com.example.ui.screens.StoryViewerScreen
 import com.example.ui.screens.UserProfileScreen
+import com.example.ui.screens.WalletScreen
 import com.example.ui.theme.AppColorScheme
 import com.example.ui.theme.AppearancePrefs
 import com.example.ui.theme.LumaTheme
@@ -119,7 +127,6 @@ import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.PersistentCacheSettings
 import com.google.firebase.firestore.firestoreSettings
-import com.startapp.sdk.adsbase.StartAppAd
 import com.startapp.sdk.adsbase.StartAppSDK
 import kotlinx.coroutines.launch
 
@@ -129,6 +136,7 @@ private object LumaRoutes {
     const val CREATE = "create?story={story}"
     const val CLIPS = "clips"
     const val PROFILE = "profile"
+    const val WALLET = "wallet"
     const val MARKETPLACE = "marketplace"
     const val USER_PROFILE = "user/{userId}?username={username}&showcase={showcase}"
     const val NOTIFICATIONS = "notifications"
@@ -179,11 +187,9 @@ class MainActivity : ComponentActivity() {
                 .setReturnAdsEnabled(false)
                 .setCallback {
                     MomiStartIoSession.markInitialized("SDK initialized")
-                    MomiInterstitialController.preload(applicationContext)
                 }
                 .init()
             MomiStartIoSession.scheduleFallbackReady()
-            StartAppAd.disableSplash()
         }
 
         setContent {
@@ -237,6 +243,7 @@ private fun AppNavigation(
                         MomiViewModel(
                             repository = MomiFirestoreRepository(db),
                             marketplaceRepository = MarketplaceRepository(db),
+                            walletRepository = WalletRepository(db),
                             currentUserId = uid,
                             initialDisplayName = user.displayName,
                             initialEmail = user.email
@@ -244,13 +251,18 @@ private fun AppNavigation(
                     }
                 }
             )
+            val sdkReady by MomiStartIoSession.isInitialized.collectAsStateWithLifecycle()
             LaunchedEffect(viewModel) {
                 viewModel.loadAppearance(context)
-                MomiInterstitialController.preload(context)
                 viewModel.checkForUpdates(
                     manual = false,
                     isPlayStoreInstall = AppUpdateChecker.isInstalledFromGooglePlay(context)
                 )
+            }
+            LaunchedEffect(viewModel, sdkReady) {
+                if (sdkReady) {
+                    MomiInterstitialController.preload(context)
+                }
             }
             val vmThemePreference by viewModel.themePreference.collectAsStateWithLifecycle()
             val vmColorScheme by viewModel.colorScheme.collectAsStateWithLifecycle()
@@ -320,8 +332,44 @@ private fun LumaApp(
     val canCurateMarketplace by viewModel.canCurateMarketplace.collectAsStateWithLifecycle()
     val contentReports by viewModel.contentReports.collectAsStateWithLifecycle()
     val openReportsCount by viewModel.openReportsCount.collectAsStateWithLifecycle()
+    val wallet by viewModel.wallet.collectAsStateWithLifecycle()
+    val creditTransactions by viewModel.creditTransactions.collectAsStateWithLifecycle()
+    val isProcessingWalletAction by viewModel.isProcessingWalletAction.collectAsStateWithLifecycle()
     var showAiAssistantSheet by remember { mutableStateOf(false) }
     var pendingReportTarget by remember { mutableStateOf<ReportDraftTarget?>(null) }
+
+    val billingManager = remember(context) { PlayBillingManager(context) }
+    val billingState by billingManager.uiState.collectAsStateWithLifecycle()
+
+    DisposableEffect(billingManager) {
+        billingManager.start()
+        onDispose {
+            billingManager.release()
+        }
+    }
+
+    LaunchedEffect(billingManager, viewModel) {
+        billingManager.events.collect { event ->
+            when (event) {
+                is PlayPurchaseEvent.Credited -> {
+                    viewModel.handlePlayPurchaseCredited(
+                        productId = event.productId,
+                        orderId = event.orderId,
+                        purchaseToken = event.purchaseToken
+                    )
+                }
+                is PlayPurchaseEvent.Pending -> {
+                    viewModel.showInfoNotice("Google Play purchase pending confirmation for ${event.productId}.")
+                }
+                is PlayPurchaseEvent.Cancelled -> {
+                    viewModel.showInfoNotice(event.message)
+                }
+                is PlayPurchaseEvent.Failed -> {
+                    snackbarHostState.showSnackbar(event.message)
+                }
+            }
+        }
+    }
 
     val activeCommentPostId by viewModel.activeCommentPostId.collectAsStateWithLifecycle()
     val activeComments by viewModel.activeComments.collectAsStateWithLifecycle()
@@ -689,6 +737,7 @@ private fun LumaApp(
                                 follows = follows,
                                 followingUids = followingUids,
                                 allPosts = allPosts,
+                                wallet = wallet,
                                 themePreference = themePreference,
                                 appColorScheme = appColorScheme,
                                 isOwnerAccount = viewModel.isOwnerAccount,
@@ -707,6 +756,7 @@ private fun LumaApp(
                                 onThemeChange = { viewModel.setThemePreference(context, it) },
                                 onColorSchemeChange = { viewModel.setColorScheme(context, it) },
                                 onCreateClick = { navController.navigate(LumaRoutes.createRoute(false)) },
+                                onOpenWallet = { navController.navigate(LumaRoutes.WALLET) },
                                 onPostClick = { post ->
                                     navController.navigate(LumaRoutes.postDetailRoute(post.id))
                                 },
@@ -745,6 +795,44 @@ private fun LumaApp(
                                     )
                                 },
                                 onSignOut = onSignOut
+                            )
+                        }
+
+                        composable(LumaRoutes.WALLET) {
+                            WalletScreen(
+                                currentUserId = viewModel.currentUserId,
+                                profile = profile,
+                                wallet = wallet,
+                                transactions = creditTransactions,
+                                allCreators = allCreators,
+                                billingState = billingState,
+                                isProcessing = isProcessingWalletAction,
+                                onRefreshBilling = { billingManager.refreshCatalogAndPendingPurchases() },
+                                onBuyWithPlay = { pkg ->
+                                    billingManager.launchCreditPurchase(
+                                        activity = context.findActivity(),
+                                        productId = pkg.productId,
+                                        accountUid = viewModel.currentUserId
+                                    )
+                                },
+                                onSandboxTopUp = { pkg ->
+                                    if (BuildConfig.DEBUG) {
+                                        viewModel.completeCreditPurchase(
+                                            pkg = pkg,
+                                            paymentMethod = CreditTransaction.METHOD_DEBUG_SANDBOX,
+                                            paymentRef = "DEBUG_${System.currentTimeMillis()}"
+                                        )
+                                    }
+                                },
+                                onSendGiftToCreator = { recipientUid, recipientUsername, gift ->
+                                    viewModel.sendGift(
+                                        recipientUid = recipientUid,
+                                        recipientUsername = recipientUsername,
+                                        gift = gift
+                                    )
+                                },
+                                onUnlockPerk = { perk -> viewModel.unlockAccountPerk(perk) },
+                                onBack = { navController.popBackStack() }
                             )
                         }
 
@@ -842,6 +930,8 @@ private fun LumaApp(
                                 follows = follows,
                                 currentUserId = viewModel.currentUserId,
                                 followingUids = followingUids,
+                                wallet = wallet,
+                                isSendingGift = isProcessingWalletAction,
                                 onBack = { navController.popBackStack() },
                                 onPostClick = { post ->
                                     navController.navigate(LumaRoutes.postDetailRoute(post.id))
@@ -858,6 +948,14 @@ private fun LumaApp(
                                         navController.navigate(LumaRoutes.messagesRoute(thread.id))
                                     }
                                 },
+                                onSendGift = { creator, gift ->
+                                    viewModel.sendGift(
+                                        recipientUid = creator.userId,
+                                        recipientUsername = creator.username,
+                                        gift = gift
+                                    )
+                                },
+                                onOpenWallet = { navController.navigate(LumaRoutes.WALLET) },
                                 onShareProfile = { targetProfile ->
                                     shareText(
                                         context = context,
@@ -996,6 +1094,15 @@ private fun LumaApp(
                                 onEndLive = {
                                     viewModel.endLiveStream(streamId)
                                 },
+                                onPublishFrame = { seq, frameData, cameraEnabled, micMuted ->
+                                    viewModel.publishLiveFrame(
+                                        streamId = streamId,
+                                        seq = seq,
+                                        frameData = frameData,
+                                        cameraEnabled = cameraEnabled,
+                                        micMuted = micMuted
+                                    )
+                                },
                                 onSendComment = { text ->
                                     viewModel.sendLiveComment(streamId, text)
                                 },
@@ -1013,17 +1120,34 @@ private fun LumaApp(
                             }.collectAsStateWithLifecycle(
                                 initialValue = activeLiveStreams.firstOrNull { it.id == streamId }
                             )
+                            val liveFrame by remember(streamId) {
+                                viewModel.observeLiveFrame(streamId)
+                            }.collectAsStateWithLifecycle(initialValue = null)
                             val liveComments by remember(streamId) {
                                 viewModel.observeLiveComments(streamId)
                             }.collectAsStateWithLifecycle(initialValue = emptyList())
 
                             LiveViewerScreen(
                                 stream = liveStream,
+                                liveFrame = liveFrame,
                                 comments = liveComments,
-                                onJoin = { viewModel.joinLiveStream(streamId) },
+                                wallet = wallet,
+                                isSendingGift = isProcessingWalletAction,
+                                onJoin = { onJoined -> viewModel.joinLiveStream(streamId, onJoined) },
                                 onLeave = { viewModel.leaveLiveStream(streamId) },
                                 onSendComment = { text -> viewModel.sendLiveComment(streamId, text) },
                                 onSendHeart = { viewModel.sendLiveHeart(streamId) },
+                                onSendGift = { gift ->
+                                    liveStream?.let { s ->
+                                        viewModel.sendGift(
+                                            recipientUid = s.userId,
+                                            recipientUsername = s.username,
+                                            gift = gift,
+                                            streamId = s.id
+                                        )
+                                    }
+                                },
+                                onOpenWallet = { navController.navigate(LumaRoutes.WALLET) },
                                 onAuthorClick = { uid, username ->
                                     openUserProfile(uid, username, false)
                                 },
@@ -1145,6 +1269,12 @@ private fun LumaApp(
             }
         )
     }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 private fun shareText(context: Context, subject: String, text: String) {

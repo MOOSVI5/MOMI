@@ -1,11 +1,29 @@
 package com.example.ui.components
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
+import android.graphics.Bitmap
+import android.net.http.SslError
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.Message
 import android.util.Log
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
+import android.webkit.ClientCertRequest
+import android.webkit.HttpAuthHandler
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.SafeBrowsingResponse
+import android.webkit.SslErrorHandler
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -58,6 +76,7 @@ import coil.compose.AsyncImage
 import com.startapp.sdk.ads.banner.Banner
 import com.startapp.sdk.ads.banner.BannerListener
 import com.startapp.sdk.ads.banner.Mrec
+import com.startapp.sdk.ads.banner.bannerstandard.BannerStandard
 import com.startapp.sdk.ads.nativead.NativeAdDetails
 import com.startapp.sdk.ads.nativead.NativeAdPreferences
 import com.startapp.sdk.ads.nativead.StartAppNativeAd
@@ -71,6 +90,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
 private const val TAG = "MomiStartIo"
+private const val MAX_INLINE_WEBVIEW_MREC_SLOTS = 2
 
 data class StartIoDiagnostics(
     val sdkInitialized: Boolean = false,
@@ -117,6 +137,269 @@ object MomiStartIoSession {
     fun updateInterstitial(status: String) {
         _diagnostics.update { it.copy(interstitialStatus = status) }
     }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+/**
+ * Wraps Start.io's internal [WebViewClient] so that if Chromium's sandboxed renderer process
+ * terminates abnormally (code -1 / OOM / GPU teardown), [onRenderProcessGone] always returns true
+ * and destroys the dead [WebView] rather than letting Start.io's default client return false and
+ * crash the host app.
+ */
+private class MomiSafeWebViewClientWrapper(
+    private val delegate: WebViewClient?,
+    private val onRendererGone: () -> Unit
+) : WebViewClient() {
+
+    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+        return delegate?.shouldOverrideUrlLoading(view, request)
+            ?: super.shouldOverrideUrlLoading(view, request)
+    }
+
+    @Suppress("OVERRIDE_DEPRECATION")
+    override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+        @Suppress("DEPRECATION")
+        return delegate?.shouldOverrideUrlLoading(view, url)
+            ?: super.shouldOverrideUrlLoading(view, url)
+    }
+
+    override fun shouldInterceptRequest(
+        view: WebView?,
+        request: WebResourceRequest?
+    ): WebResourceResponse? {
+        return delegate?.shouldInterceptRequest(view, request)
+            ?: super.shouldInterceptRequest(view, request)
+    }
+
+    @Suppress("OVERRIDE_DEPRECATION")
+    override fun shouldInterceptRequest(view: WebView?, url: String?): WebResourceResponse? {
+        @Suppress("DEPRECATION")
+        return delegate?.shouldInterceptRequest(view, url)
+            ?: super.shouldInterceptRequest(view, url)
+    }
+
+    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+        if (delegate != null) delegate.onPageStarted(view, url, favicon)
+        else super.onPageStarted(view, url, favicon)
+    }
+
+    override fun onPageFinished(view: WebView?, url: String?) {
+        if (delegate != null) delegate.onPageFinished(view, url)
+        else super.onPageFinished(view, url)
+    }
+
+    override fun onLoadResource(view: WebView?, url: String?) {
+        if (delegate != null) delegate.onLoadResource(view, url)
+        else super.onLoadResource(view, url)
+    }
+
+    override fun onPageCommitVisible(view: WebView?, url: String?) {
+        if (delegate != null) delegate.onPageCommitVisible(view, url)
+        else super.onPageCommitVisible(view, url)
+    }
+
+    override fun onReceivedError(
+        view: WebView?,
+        request: WebResourceRequest?,
+        error: WebResourceError?
+    ) {
+        if (delegate != null) delegate.onReceivedError(view, request, error)
+        else super.onReceivedError(view, request, error)
+    }
+
+    @Suppress("OVERRIDE_DEPRECATION")
+    override fun onReceivedError(
+        view: WebView?,
+        errorCode: Int,
+        description: String?,
+        failingUrl: String?
+    ) {
+        @Suppress("DEPRECATION")
+        if (delegate != null) delegate.onReceivedError(view, errorCode, description, failingUrl)
+        else super.onReceivedError(view, errorCode, description, failingUrl)
+    }
+
+    override fun onReceivedHttpError(
+        view: WebView?,
+        request: WebResourceRequest?,
+        errorResponse: WebResourceResponse?
+    ) {
+        if (delegate != null) delegate.onReceivedHttpError(view, request, errorResponse)
+        else super.onReceivedHttpError(view, request, errorResponse)
+    }
+
+    override fun onReceivedSslError(
+        view: WebView?,
+        handler: SslErrorHandler?,
+        error: SslError?
+    ) {
+        if (delegate != null) delegate.onReceivedSslError(view, handler, error)
+        else super.onReceivedSslError(view, handler, error)
+    }
+
+    override fun onFormResubmission(view: WebView?, dontResend: Message?, resend: Message?) {
+        if (delegate != null) delegate.onFormResubmission(view, dontResend, resend)
+        else super.onFormResubmission(view, dontResend, resend)
+    }
+
+    override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+        if (delegate != null) delegate.doUpdateVisitedHistory(view, url, isReload)
+        else super.doUpdateVisitedHistory(view, url, isReload)
+    }
+
+    override fun onScaleChanged(view: WebView?, oldScale: Float, newScale: Float) {
+        if (delegate != null) delegate.onScaleChanged(view, oldScale, newScale)
+        else super.onScaleChanged(view, oldScale, newScale)
+    }
+
+    override fun shouldOverrideKeyEvent(view: WebView?, event: KeyEvent?): Boolean {
+        return delegate?.shouldOverrideKeyEvent(view, event)
+            ?: super.shouldOverrideKeyEvent(view, event)
+    }
+
+    override fun onUnhandledKeyEvent(view: WebView?, event: KeyEvent?) {
+        if (delegate != null) delegate.onUnhandledKeyEvent(view, event)
+        else super.onUnhandledKeyEvent(view, event)
+    }
+
+    override fun onReceivedHttpAuthRequest(
+        view: WebView?,
+        handler: HttpAuthHandler?,
+        host: String?,
+        realm: String?
+    ) {
+        if (delegate != null) delegate.onReceivedHttpAuthRequest(view, handler, host, realm)
+        else super.onReceivedHttpAuthRequest(view, handler, host, realm)
+    }
+
+    override fun onReceivedClientCertRequest(view: WebView?, request: ClientCertRequest?) {
+        if (delegate != null) delegate.onReceivedClientCertRequest(view, request)
+        else super.onReceivedClientCertRequest(view, request)
+    }
+
+    override fun onReceivedLoginRequest(
+        view: WebView?,
+        realm: String?,
+        account: String?,
+        args: String?
+    ) {
+        if (delegate != null) delegate.onReceivedLoginRequest(view, realm, account, args)
+        else super.onReceivedLoginRequest(view, realm, account, args)
+    }
+
+    override fun onSafeBrowsingHit(
+        view: WebView?,
+        request: WebResourceRequest?,
+        threatType: Int,
+        callback: SafeBrowsingResponse?
+    ) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1 && delegate != null) {
+            delegate.onSafeBrowsingHit(view, request, threatType, callback)
+        } else {
+            super.onSafeBrowsingHit(view, request, threatType, callback)
+        }
+    }
+
+    override fun onRenderProcessGone(
+        view: WebView?,
+        detail: RenderProcessGoneDetail?
+    ): Boolean {
+        val didCrash = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) detail?.didCrash() else null
+        Log.w(TAG, "Ad WebView renderer terminated (didCrash=$didCrash); recovering safely")
+        if (view != null) {
+            destroyWebViewSafely(view)
+        }
+        Handler(Looper.getMainLooper()).post { onRendererGone() }
+        return true
+    }
+}
+
+private fun wrapSingleWebViewClient(webView: WebView?, onRendererGone: () -> Unit) {
+    if (webView == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    runCatching {
+        val current = webView.webViewClient
+        if (current !is MomiSafeWebViewClientWrapper) {
+            webView.webViewClient = MomiSafeWebViewClientWrapper(current, onRendererGone)
+        }
+    }
+}
+
+internal fun wrapDescendantWebViews(view: View?, onRendererGone: () -> Unit) {
+    when (view) {
+        is WebView -> wrapSingleWebViewClient(view, onRendererGone)
+        is ViewGroup -> {
+            for (i in 0 until view.childCount) {
+                wrapDescendantWebViews(view.getChildAt(i), onRendererGone)
+            }
+        }
+    }
+}
+
+private fun protectBannerStandardWebViews(
+    bannerView: BannerStandard,
+    onRendererGone: () -> Unit
+) {
+    runCatching { wrapSingleWebViewClient(bannerView.webView, onRendererGone) }
+    runCatching { wrapSingleWebViewClient(bannerView.twoPartWebView, onRendererGone) }
+    wrapDescendantWebViews(bannerView, onRendererGone)
+}
+
+private fun attachBannerWebViewProtector(
+    bannerView: BannerStandard,
+    mainHandler: Handler,
+    onRendererGone: () -> Unit
+) {
+    protectBannerStandardWebViews(bannerView, onRendererGone)
+    bannerView.post { protectBannerStandardWebViews(bannerView, onRendererGone) }
+    bannerView.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+        override fun onViewAttachedToWindow(v: View) {
+            mainHandler.post { protectBannerStandardWebViews(bannerView, onRendererGone) }
+        }
+
+        override fun onViewDetachedFromWindow(v: View) = Unit
+    })
+}
+
+private fun destroyWebViewSafely(webView: WebView?) {
+    if (webView == null) return
+    runCatching {
+        webView.stopLoading()
+        webView.onPause()
+        webView.loadUrl("about:blank")
+        webView.clearHistory()
+        (webView.parent as? ViewGroup)?.removeView(webView)
+        webView.removeAllViews()
+        webView.destroy()
+    }
+}
+
+private fun destroyDescendantWebViews(view: View?) {
+    when (view) {
+        is WebView -> destroyWebViewSafely(view)
+        is ViewGroup -> {
+            val children = (0 until view.childCount).map { view.getChildAt(it) }
+            children.forEach { destroyDescendantWebViews(it) }
+        }
+    }
+}
+
+internal fun disposeStartIoBannerContainer(container: FrameLayout) {
+    for (i in container.childCount - 1 downTo 0) {
+        val child = container.getChildAt(i)
+        if (child is BannerStandard) {
+            runCatching { child.hideBanner() }
+            runCatching { child.setBannerListener(null) }
+            runCatching { destroyWebViewSafely(child.webView) }
+            runCatching { destroyWebViewSafely(child.twoPartWebView) }
+        }
+        destroyDescendantWebViews(child)
+    }
+    runCatching { container.removeAllViews() }
 }
 
 object MomiInterstitialController {
@@ -218,7 +501,7 @@ fun rememberStartIoNativeAds(count: Int = 3): StartIoNativeAdState {
                     setImageSize(NativeAdPreferences.NativeAdBitmapSize.SIZE340X340)
                     setSecondaryImageSize(2)
                 }
-                nativeLoader.loadAd(prefs, object : AdEventListener {
+                nativeLoader.load(prefs, object : AdEventListener {
                     override fun onReceiveAd(ad: Ad) {
                         val loaded = nativeLoader.nativeAds.orEmpty().toList()
                         Log.d(TAG, "Native ads received: ${loaded.size}")
@@ -275,7 +558,7 @@ fun MomiInlineFeedAdCard(
             nativeAd = nativeAd,
             modifier = modifier
         )
-    } else if (nativeAdState.finishedLoading) {
+    } else if (nativeAdState.finishedLoading && slotIndex < MAX_INLINE_WEBVIEW_MREC_SLOTS) {
         StartIoMrecSponsoredCard(modifier = modifier)
     }
 }
@@ -479,9 +762,10 @@ private fun StartIoNativeSponsoredPostCard(
 private fun StartIoMrecSponsoredCard(
     modifier: Modifier = Modifier
 ) {
-    var mrecFailed by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val activity = remember(context) { context.findActivity() }
+    var mrecFailed by remember { mutableStateOf(activity == null) }
     var bannerFallbackFailed by remember { mutableStateOf(false) }
-    var mrecRef by remember { mutableStateOf<Mrec?>(null) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
     if (mrecFailed && bannerFallbackFailed) return
@@ -494,11 +778,7 @@ private fun StartIoMrecSponsoredCard(
         return
     }
 
-    DisposableEffect(Unit) {
-        onDispose {
-            runCatching { mrecRef?.hideBanner() }
-        }
-    }
+    val hostActivity = activity ?: return
 
     Column(
         modifier = modifier
@@ -571,11 +851,18 @@ private fun StartIoMrecSponsoredCard(
                     AndroidView(
                         factory = { ctx ->
                             FrameLayout(ctx).apply {
-                                val mrec = Mrec(ctx, object : BannerListener {
+                                val onRendererGone = {
+                                    MomiStartIoSession.updateMrec("Renderer recovered (hidden)")
+                                    mrecFailed = true
+                                }
+                                val mrec = Mrec(hostActivity, object : BannerListener {
                                     override fun onReceiveAd(banner: View) {
                                         Log.d(TAG, "MREC ad received")
                                         MomiStartIoSession.updateMrec("Loaded (300x250)")
                                         mainHandler.post {
+                                            (banner as? BannerStandard)?.let {
+                                                protectBannerStandardWebViews(it, onRendererGone)
+                                            }
                                             mrecFailed = false
                                             runCatching { (banner as? Mrec)?.showBanner() }
                                         }
@@ -591,7 +878,7 @@ private fun StartIoMrecSponsoredCard(
 
                                     override fun onClick(banner: View?) = Unit
                                 })
-                                mrecRef = mrec
+                                attachBannerWebViewProtector(mrec, mainHandler, onRendererGone)
                                 addView(
                                     mrec,
                                     FrameLayout.LayoutParams(
@@ -605,6 +892,9 @@ private fun StartIoMrecSponsoredCard(
                                     runCatching { mrec.loadAd(300, 250) }
                                 }
                             }
+                        },
+                        onRelease = { container ->
+                            disposeStartIoBannerContainer(container)
                         },
                         modifier = Modifier
                             .width(300.dp)
@@ -627,16 +917,9 @@ fun MomiAnchoredExploreBanner(
 ) {
     val sdkReady by MomiStartIoSession.isInitialized.collectAsState()
     var adFailed by remember { mutableStateOf(false) }
-    var bannerRef by remember { mutableStateOf<Banner?>(null) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
     if (!sdkReady || adFailed) return
-
-    DisposableEffect(Unit) {
-        onDispose {
-            runCatching { bannerRef?.hideBanner() }
-        }
-    }
 
     Column(
         modifier = modifier
@@ -658,11 +941,19 @@ fun MomiAnchoredExploreBanner(
             AndroidView(
                 factory = { ctx ->
                     FrameLayout(ctx).apply {
-                        val banner = Banner(ctx, object : BannerListener {
+                        val onRendererGone = {
+                            MomiStartIoSession.updateBanner("Renderer recovered (hidden)")
+                            adFailed = true
+                        }
+                        val hostCtx = ctx.findActivity() ?: ctx
+                        val banner = Banner(hostCtx, object : BannerListener {
                             override fun onReceiveAd(banner: View) {
                                 Log.d(TAG, "Explore banner ad received")
                                 MomiStartIoSession.updateBanner("Loaded (320x50)")
                                 mainHandler.post {
+                                    (banner as? BannerStandard)?.let {
+                                        protectBannerStandardWebViews(it, onRendererGone)
+                                    }
                                     adFailed = false
                                     runCatching { (banner as? Banner)?.showBanner() }
                                 }
@@ -678,7 +969,7 @@ fun MomiAnchoredExploreBanner(
 
                             override fun onClick(banner: View?) = Unit
                         })
-                        bannerRef = banner
+                        attachBannerWebViewProtector(banner, mainHandler, onRendererGone)
                         addView(
                             banner,
                             FrameLayout.LayoutParams(
@@ -693,6 +984,9 @@ fun MomiAnchoredExploreBanner(
                         }
                     }
                 },
+                onRelease = { container ->
+                    disposeStartIoBannerContainer(container)
+                },
                 modifier = Modifier
                     .width(320.dp)
                     .height(50.dp)
@@ -706,14 +1000,7 @@ private fun StartIoStandardFeedBannerCard(
     onFailed: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var bannerRef by remember { mutableStateOf<Banner?>(null) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            runCatching { bannerRef?.hideBanner() }
-        }
-    }
 
     Column(
         modifier = modifier
@@ -767,11 +1054,19 @@ private fun StartIoStandardFeedBannerCard(
                     AndroidView(
                         factory = { ctx ->
                             FrameLayout(ctx).apply {
-                                val banner = Banner(ctx, object : BannerListener {
+                                val onRendererGone = {
+                                    MomiStartIoSession.updateBanner("Renderer recovered (hidden)")
+                                    onFailed()
+                                }
+                                val hostCtx = ctx.findActivity() ?: ctx
+                                val banner = Banner(hostCtx, object : BannerListener {
                                     override fun onReceiveAd(banner: View) {
                                         Log.d(TAG, "Feed fallback banner received")
                                         MomiStartIoSession.updateBanner("Loaded (Feed 320x50)")
                                         mainHandler.post {
+                                            (banner as? BannerStandard)?.let {
+                                                protectBannerStandardWebViews(it, onRendererGone)
+                                            }
                                             runCatching { (banner as? Banner)?.showBanner() }
                                         }
                                     }
@@ -785,7 +1080,7 @@ private fun StartIoStandardFeedBannerCard(
 
                                     override fun onClick(banner: View?) = Unit
                                 })
-                                bannerRef = banner
+                                attachBannerWebViewProtector(banner, mainHandler, onRendererGone)
                                 addView(
                                     banner,
                                     FrameLayout.LayoutParams(
@@ -799,6 +1094,9 @@ private fun StartIoStandardFeedBannerCard(
                                     runCatching { banner.loadAd(320, 50) }
                                 }
                             }
+                        },
+                        onRelease = { container ->
+                            disposeStartIoBannerContainer(container)
                         },
                         modifier = Modifier
                             .width(320.dp)
@@ -816,16 +1114,9 @@ fun MomiMarketplaceBanner(
 ) {
     val sdkReady by MomiStartIoSession.isInitialized.collectAsState()
     var adFailed by remember { mutableStateOf(false) }
-    var bannerRef by remember { mutableStateOf<Banner?>(null) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
     if (!sdkReady || adFailed) return
-
-    DisposableEffect(Unit) {
-        onDispose {
-            runCatching { bannerRef?.hideBanner() }
-        }
-    }
 
     Column(
         modifier = modifier
@@ -866,10 +1157,18 @@ fun MomiMarketplaceBanner(
             AndroidView(
                 factory = { ctx ->
                     FrameLayout(ctx).apply {
-                        val banner = Banner(ctx, object : BannerListener {
+                        val onRendererGone = {
+                            MomiStartIoSession.updateBanner("Renderer recovered (hidden)")
+                            adFailed = true
+                        }
+                        val hostCtx = ctx.findActivity() ?: ctx
+                        val banner = Banner(hostCtx, object : BannerListener {
                             override fun onReceiveAd(banner: View) {
                                 MomiStartIoSession.updateBanner("Loaded (Market 320x50)")
                                 mainHandler.post {
+                                    (banner as? BannerStandard)?.let {
+                                        protectBannerStandardWebViews(it, onRendererGone)
+                                    }
                                     adFailed = false
                                     runCatching { (banner as? Banner)?.showBanner() }
                                 }
@@ -884,7 +1183,7 @@ fun MomiMarketplaceBanner(
 
                             override fun onClick(banner: View?) = Unit
                         })
-                        bannerRef = banner
+                        attachBannerWebViewProtector(banner, mainHandler, onRendererGone)
                         addView(
                             banner,
                             FrameLayout.LayoutParams(
@@ -898,6 +1197,9 @@ fun MomiMarketplaceBanner(
                         }
                     }
                 },
+                onRelease = { container ->
+                    disposeStartIoBannerContainer(container)
+                },
                 modifier = Modifier
                     .width(320.dp)
                     .height(50.dp)
@@ -905,4 +1207,5 @@ fun MomiMarketplaceBanner(
         }
     }
 }
+
 

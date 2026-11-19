@@ -24,7 +24,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.outlined.Logout
+import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.AddBox
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.Bookmark
@@ -34,7 +36,6 @@ import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
@@ -42,6 +43,7 @@ import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.Toll
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.DarkMode
@@ -84,9 +86,11 @@ import com.example.BuildConfig
 import com.example.data.model.ContentReport
 import com.example.data.model.FollowEdge
 import com.example.data.model.ModerationScopes
+import com.example.data.model.MomiCreditCatalog
 import com.example.data.model.MomiRoles
 import com.example.data.model.Post
 import com.example.data.model.UserProfile
+import com.example.data.model.UserWallet
 import com.example.ui.components.EditProfileDialog
 import com.example.ui.components.FollowListBottomSheet
 import com.example.ui.components.LumaAvatar
@@ -116,6 +120,7 @@ fun ProfileScreen(
     follows: List<FollowEdge> = emptyList(),
     followingUids: Set<String>,
     allPosts: List<Post>,
+    wallet: UserWallet? = null,
     themePreference: ThemePreference,
     appColorScheme: AppColorScheme,
     isOwnerAccount: Boolean = false,
@@ -130,6 +135,7 @@ fun ProfileScreen(
     onThemeChange: (ThemePreference) -> Unit,
     onColorSchemeChange: (AppColorScheme) -> Unit,
     onCreateClick: () -> Unit,
+    onOpenWallet: () -> Unit = {},
     onPostClick: (Post) -> Unit,
     onShareProfile: () -> Unit,
     onUpdateProfile: (
@@ -600,6 +606,30 @@ fun ProfileScreen(
                 OutlinedButton(
                     onClick = {
                         showSettingsSheet = false
+                        onOpenWallet()
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("settings_wallet_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.AccountBalanceWallet,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Momi Pay & Credits (${wallet?.balance ?: 0L} cr)",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        showSettingsSheet = false
                         onCheckForUpdates()
                     },
                     shape = RoundedCornerShape(14.dp),
@@ -1024,6 +1054,83 @@ fun ProfileScreen(
                                 tint = MaterialTheme.colorScheme.onSurface,
                                 modifier = Modifier.size(18.dp)
                             )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Momi Pay, Credits, Gifts & Account Perks Card
+                    val creditBalance = wallet?.balance ?: 0L
+                    val tierName = MomiCreditCatalog.tierLabel(
+                        wallet?.accountTier ?: MomiCreditCatalog.TIER_STANDARD
+                    )
+                    val verifLabel = if (profile?.isVerified == true) {
+                        "Verified"
+                    } else {
+                        MomiCreditCatalog.verificationLabel(
+                            wallet?.verificationTier ?: MomiCreditCatalog.VERIFICATION_NONE
+                        )
+                    }
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.36f),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable(onClick = onOpenWallet)
+                            .testTag("profile_wallet_card")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Toll,
+                                    contentDescription = "Momi Credits",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "${MediaAssets.formatCompactCount(creditBalance)} Credits · $tierName",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "$verifLabel · Buy credits, send gifts & unlock perks",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(MaterialTheme.colorScheme.primary)
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = "Pay & Gifts",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                            }
                         }
                     }
 
@@ -1661,7 +1768,7 @@ private fun PortalLinkButton(
             }
             Spacer(modifier = Modifier.width(8.dp))
             Icon(
-                imageVector = Icons.Filled.OpenInNew,
+                imageVector = Icons.AutoMirrored.Filled.OpenInNew,
                 contentDescription = "Open external portal",
                 tint = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(18.dp)

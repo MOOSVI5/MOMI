@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.PlayArrow
@@ -51,11 +52,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.FollowEdge
+import com.example.data.model.LiveGiftItem
 import com.example.data.model.Post
 import com.example.data.model.UserProfile
+import com.example.data.model.UserWallet
 import com.example.ui.components.FollowListBottomSheet
 import com.example.ui.components.LumaAvatar
 import com.example.ui.components.PostMediaImage
+import com.example.ui.components.SendGiftBottomSheet
 import com.example.util.MediaAssets
 
 @Composable
@@ -68,10 +72,14 @@ fun UserProfileScreen(
     follows: List<FollowEdge>,
     currentUserId: String,
     followingUids: Set<String>,
+    wallet: UserWallet? = null,
+    isSendingGift: Boolean = false,
     onBack: () -> Unit,
     onPostClick: (Post) -> Unit,
     onFollowToggle: (UserProfile, Boolean) -> Unit,
     onMessageClick: (UserProfile) -> Unit,
+    onSendGift: (UserProfile, LiveGiftItem) -> Unit = { _, _ -> },
+    onOpenWallet: () -> Unit = {},
     onShareProfile: (UserProfile) -> Unit,
     onOpenUserProfile: (String) -> Unit,
     modifier: Modifier = Modifier
@@ -80,6 +88,7 @@ fun UserProfileScreen(
 
     var selectedTab by remember { mutableIntStateOf(0) }
     var followSheetTab by remember { mutableStateOf<Int?>(null) }
+    var showGiftSheet by remember { mutableStateOf(false) }
 
     val userPosts = remember(allPosts, targetUserId, targetUsernameHint, isShowcaseCreator) {
         if (isShowcaseCreator) {
@@ -140,6 +149,24 @@ fun UserProfileScreen(
             onFollowToggle = onFollowToggle,
             onUserClick = onOpenUserProfile,
             onDismiss = { followSheetTab = null }
+        )
+    }
+
+    if (showGiftSheet && !isOwnProfile && !isShowcaseCreator) {
+        SendGiftBottomSheet(
+            recipientUsername = resolvedProfile.username,
+            isLiveContext = false,
+            wallet = wallet,
+            isProcessing = isSendingGift,
+            onSendGift = { gift ->
+                onSendGift(resolvedProfile, gift)
+                showGiftSheet = false
+            },
+            onOpenWallet = {
+                showGiftSheet = false
+                onOpenWallet()
+            },
+            onDismiss = { showGiftSheet = false }
         )
     }
 
@@ -330,6 +357,31 @@ fun UserProfileScreen(
                                     style = MaterialTheme.typography.labelLarge,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .heightIn(min = 44.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0xFFF59E0B).copy(alpha = 0.16f))
+                                    .clickable { showGiftSheet = true }
+                                    .padding(horizontal = 14.dp)
+                                    .testTag("user_profile_gift_button"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.CardGiftcard,
+                                    contentDescription = "Send Gift",
+                                    tint = Color(0xFFD97706),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(
+                                    text = "Gift",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFB45309)
                                 )
                             }
                         }

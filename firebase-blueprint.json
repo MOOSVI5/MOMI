@@ -214,10 +214,25 @@
         "isLive": { "type": "boolean" },
         "viewerCount": { "type": "integer" },
         "likesCount": { "type": "integer" },
+        "giftsCredits": { "type": "integer" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
       "required": ["userId", "username", "displayName", "avatarKey", "authorVerified", "title", "category", "isLive", "viewerCount", "likesCount", "createdAt"]
+    },
+    "LiveFrame": {
+      "title": "LiveFrame",
+      "description": "Rolling live camera frame and broadcast A/V state published by the host for real-time viewer playback.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "seq": { "type": "integer" },
+        "frameData": { "type": "string" },
+        "cameraEnabled": { "type": "boolean" },
+        "micMuted": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["userId", "seq", "frameData", "cameraEnabled", "micMuted", "updatedAt"]
     },
     "LiveComment": {
       "title": "LiveComment",
@@ -325,6 +340,51 @@
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
       "required": ["reporterUid", "reporterUsername", "targetType", "targetId", "targetAuthorUsername", "targetPreviewText", "category", "reasonDetail", "status", "createdAt"]
+    },
+    "UserWallet": {
+      "title": "UserWallet",
+      "description": "Owner-private Momi account wallet storing spendable credits, gift earnings, and unlocked perk tiers.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "balance": { "type": "integer" },
+        "totalEarned": { "type": "integer" },
+        "totalSpent": { "type": "integer" },
+        "totalPurchased": { "type": "integer" },
+        "accountTier": { "type": "string", "enum": ["STANDARD", "SUPPORTER", "CREATOR_PRO", "VIP"] },
+        "verificationTier": { "type": "string", "enum": ["NONE", "PENDING_PERK", "CREATOR_PRO", "VERIFIED"] },
+        "unlockedPerks": { "type": "array", "items": { "type": "string" } },
+        "lastTxId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["userId", "balance", "totalEarned", "totalSpent", "totalPurchased", "accountTier", "verificationTier", "unlockedPerks", "createdAt"]
+    },
+    "CreditTransaction": {
+      "title": "CreditTransaction",
+      "description": "Immutable credit ledger record for Google Play top-ups, live streamer/creator gifts, and perk unlocks.",
+      "type": "object",
+      "properties": {
+        "txId": { "type": "string" },
+        "type": { "type": "string", "enum": ["TOP_UP", "GIFT", "PERK_UNLOCK"] },
+        "senderUid": { "type": "string" },
+        "senderUsername": { "type": "string" },
+        "recipientUid": { "type": "string" },
+        "recipientUsername": { "type": "string" },
+        "creditsAmount": { "type": "integer" },
+        "priceUsd": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["GOOGLE_PLAY", "DEBUG_SANDBOX", "WALLET_CREDITS"] },
+        "paymentRef": { "type": "string" },
+        "giftKey": { "type": "string" },
+        "giftName": { "type": "string" },
+        "streamId": { "type": "string" },
+        "perkKey": { "type": "string" },
+        "recipientClaimed": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["COMPLETED", "PENDING"] },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["txId", "type", "senderUid", "senderUsername", "recipientUid", "recipientUsername", "creditsAmount", "priceUsd", "paymentMethod", "recipientClaimed", "status", "createdAt"]
     }
   },
   "firestore": {
@@ -383,6 +443,18 @@
     "/liveStreams/{streamId}/liveComments/{commentId}": {
       "schema": { "$ref": "#/entities/LiveComment" },
       "description": "Real-time chat comments inside a Live broadcast."
+    },
+    "/liveStreams/{streamId}/liveFrames/{frameId}": {
+      "schema": { "$ref": "#/entities/LiveFrame" },
+      "description": "Latest live camera frame synced by the host for real-time viewer playback."
+    },
+    "/wallets/{userId}": {
+      "schema": { "$ref": "#/entities/UserWallet" },
+      "description": "Owner-private Momi credit wallet and perks state."
+    },
+    "/creditTransactions/{txId}": {
+      "schema": { "$ref": "#/entities/CreditTransaction" },
+      "description": "Atomic credit purchase, gift transfer, and perk unlock ledger."
     },
     "/merchants/{merchantId}": {
       "schema": { "$ref": "#/entities/MerchantAccount" },

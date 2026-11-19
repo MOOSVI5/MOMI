@@ -8,6 +8,7 @@ import com.example.data.model.ContentReport
 import com.example.data.model.FollowEdge
 import com.example.data.model.InteractionMarker
 import com.example.data.model.LiveComment
+import com.example.data.model.LiveFrame
 import com.example.data.model.LiveStream
 import com.example.data.model.MessageThread
 import com.example.data.model.ModerationScopes
@@ -1496,6 +1497,53 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             }
     }
 
+    fun observeLiveFrame(currentUid: String, streamId: String): Flow<LiveFrame?> {
+        val docRef = liveStreamsCol().document(streamId).collection("liveFrames").document("latest")
+        val path = docRef.path
+        return docRef.snapshots(MetadataChanges.EXCLUDE)
+            .map { snapshot ->
+                if (snapshot.exists()) {
+                    snapshot.toObject(LiveFrame::class.java, ServerTimestampBehavior.ESTIMATE)
+                } else {
+                    null
+                }
+            }
+            .catch { error ->
+                logFlowErrorIfSignedIn(currentUid, error, OperationType.GET, path)
+                throw error
+            }
+    }
+
+    suspend fun publishLiveFrame(
+        streamId: String,
+        seq: Long,
+        frameData: String,
+        cameraEnabled: Boolean,
+        micMuted: Boolean
+    ): Result<Unit> = runCatching {
+        val uid = requireUserId()
+        val targetId = streamId.ifBlank { uid }
+        if (targetId != uid) return@runCatching
+        val safeFrameData = if (cameraEnabled) frameData.take(215_000) else ""
+        val frameRef = liveStreamsCol().document(targetId).collection("liveFrames").document("latest")
+        val payload = mapOf(
+            "userId" to uid,
+            "seq" to seq.coerceAtLeast(0L),
+            "frameData" to safeFrameData,
+            "cameraEnabled" to cameraEnabled,
+            "micMuted" to micMuted,
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
+        try {
+            frameRef.set(payload).await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, frameRef.path)
+            throw e
+        }
+    }
+
     suspend fun startLiveStream(
         profile: UserProfile,
         title: String,
@@ -1515,11 +1563,24 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             "isLive" to true,
             "viewerCount" to 0L,
             "likesCount" to 0L,
+            "giftsCredits" to 0L,
             "createdAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp()
         )
         try {
             streamRef.set(payload).await()
+            runCatching {
+                streamRef.collection("liveFrames").document("latest").set(
+                    mapOf(
+                        "userId" to uid,
+                        "seq" to 0L,
+                        "frameData" to "",
+                        "cameraEnabled" to true,
+                        "micMuted" to false,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
             uid
         } catch (e: CancellationException) {
             throw e
@@ -1542,6 +1603,18 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
                 ).await()
+                runCatching {
+                    streamRef.collection("liveFrames").document("latest").set(
+                        mapOf(
+                            "userId" to uid,
+                            "seq" to 0L,
+                            "frameData" to "",
+                            "cameraEnabled" to false,
+                            "micMuted" to true,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
             }
         } catch (e: CancellationException) {
             throw e
@@ -1551,14 +1624,14 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         }
     }
 
-    suspend fun joinLiveStream(streamId: String): Result<Unit> = runCatching {
+    suspend fun joinLiveStream(streamId: String): Result<Boolean> = runCatching {
         val uid = requireUserId()
-        if (streamId.isBlank() || streamId == uid) return@runCatching
+        if (streamId.isBlank() || streamId == uid) return@runCatching false
         val streamRef = liveStreamsCol().document(streamId)
         try {
             db.runTransaction { transaction ->
                 val snap = transaction.get(streamRef)
-                if (!snap.exists() || snap.getBoolean("isLive") != true) return@runTransaction
+                if (!snap.exists() || snap.getBoolean("isLive") != true) return@runTransaction false
                 val current = (snap.getLong("viewerCount") ?: 0L).coerceAtLeast(0L)
                 transaction.update(
                     streamRef,
@@ -1567,6 +1640,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
                 )
+                true
             }.await()
         } catch (e: CancellationException) {
             throw e

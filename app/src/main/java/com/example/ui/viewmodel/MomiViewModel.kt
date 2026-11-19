@@ -6,24 +6,32 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.MomiAiAssistantRepository
+import com.example.data.model.AccountPerkItem
 import com.example.data.model.ChatMessage
 import com.example.data.model.Comment
 import com.example.data.model.ContentReport
+import com.example.data.model.CreditPackageOption
+import com.example.data.model.CreditTransaction
 import com.example.data.model.FollowEdge
 import com.example.data.model.LiveComment
+import com.example.data.model.LiveFrame
+import com.example.data.model.LiveGiftItem
 import com.example.data.model.LiveStream
 import com.example.data.model.MarketOrder
 import com.example.data.model.MarketProduct
 import com.example.data.model.MerchantAccount
 import com.example.data.model.MessageThread
 import com.example.data.model.ModerationScopes
+import com.example.data.model.MomiCreditCatalog
 import com.example.data.model.MomiRoles
 import com.example.data.model.NotificationItem
 import com.example.data.model.Post
 import com.example.data.model.Story
 import com.example.data.model.UserProfile
+import com.example.data.model.UserWallet
 import com.example.data.repository.MarketplaceRepository
 import com.example.data.repository.MomiFirestoreRepository
+import com.example.data.repository.WalletRepository
 import com.example.ui.components.AiAssistantTurn
 import com.example.ui.components.AiAssistantUiState
 import com.example.ui.theme.AppColorScheme
@@ -70,6 +78,7 @@ sealed interface StreamUiState<out T> {
 class MomiViewModel(
     private val repository: MomiFirestoreRepository,
     private val marketplaceRepository: MarketplaceRepository,
+    private val walletRepository: WalletRepository,
     val currentUserId: String,
     private val initialDisplayName: String?,
     private val initialEmail: String?,
@@ -124,10 +133,15 @@ class MomiViewModel(
     private val cachedProducts = MutableStateFlow<List<MarketProduct>>(emptyList())
     private val cachedOrders = MutableStateFlow<List<MarketOrder>>(emptyList())
     private val cachedContentReports = MutableStateFlow<List<ContentReport>>(emptyList())
+    private val cachedWallet = MutableStateFlow<UserWallet?>(null)
+    private val cachedCreditTransactions = MutableStateFlow<List<CreditTransaction>>(emptyList())
     private val cachedLikedPostIds = MutableStateFlow<Set<String>>(emptySet())
     private val cachedBookmarkedPostIds = MutableStateFlow<Set<String>>(emptySet())
     private val cachedSeenStoryIds = MutableStateFlow<Set<String>>(emptySet())
     private val cachedLikedCommentIds = MutableStateFlow<Set<String>>(emptySet())
+
+    private val _isProcessingWalletAction = MutableStateFlow(false)
+    val isProcessingWalletAction: StateFlow<Boolean> = _isProcessingWalletAction.asStateFlow()
 
     @Volatile private var hasNotifiedQuotaError = false
     @Volatile private var quotaCooldownUntilMs = 0L
@@ -150,6 +164,28 @@ class MomiViewModel(
             ).onFailure { error ->
                 _errorMessage.value = unwrapErrorMessage(error, "Failed to initialize Momi profile")
             }
+            walletRepository.ensureWalletInitialized().onFailure { error ->
+                Log.w(TAG, "Wallet initialization deferred", error)
+            }
+        }
+        viewModelScope.launch {
+            walletRepository.observeUnclaimedGifts(currentUserId)
+                .catch { error ->
+                    val root = unwrapOrRethrowCancellation(error)
+                    Log.w(TAG, "Error observing unclaimed gifts", root)
+                }
+                .collect { pendingGifts ->
+                    pendingGifts.forEach { giftTx ->
+                        walletRepository.claimGift(giftTx).onSuccess { claimedCredits ->
+                            if (claimedCredits > 0L) {
+                                _statusNotice.value =
+                                    "Received +$claimedCredits credits from @${giftTx.senderUsername}!"
+                            }
+                        }.onFailure { err ->
+                            Log.w(TAG, "Failed claiming gift ${giftTx.txId}", err)
+                        }
+                    }
+                }
         }
         checkForUpdates(manual = false)
     }
@@ -533,6 +569,14 @@ class MomiViewModel(
         .resilientWithCache(cachedOrders, "marketOrders")
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
+    val wallet: StateFlow<UserWallet?> = walletRepository.observeWallet(currentUserId)
+        .resilientWithCache(cachedWallet, "wallet")
+        .stateIn(viewModelScope, SharingStarted.Lazily, null)
+
+    val creditTransactions: StateFlow<List<CreditTransaction>> = walletRepository.observeTransactions(currentUserId)
+        .resilientWithCache(cachedCreditTransactions, "creditTransactions")
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
     private val _themePreference = MutableStateFlow(ThemePreference.SYSTEM)
     val themePreference: StateFlow<ThemePreference> = _themePreference.asStateFlow()
 
@@ -698,6 +742,13 @@ class MomiViewModel(
             val root = unwrapOrRethrowCancellation(error)
             Log.w(TAG, "Error observing live comments for $streamId", root)
             emit(emptyList())
+        }
+
+    fun observeLiveFrame(streamId: String): Flow<LiveFrame?> =
+        repository.observeLiveFrame(currentUserId, streamId).catch { error ->
+            val root = unwrapOrRethrowCancellation(error)
+            Log.w(TAG, "Error observing live frame for $streamId", root)
+            emit(null)
         }
 
     fun clearError() {
@@ -1607,10 +1658,38 @@ class MomiViewModel(
         }
     }
 
-    fun joinLiveStream(streamId: String) {
-        if (streamId.isBlank() || streamId == currentUserId) return
+    fun publishLiveFrame(
+        streamId: String,
+        seq: Long,
+        frameData: String,
+        cameraEnabled: Boolean,
+        micMuted: Boolean
+    ) {
+        if (System.currentTimeMillis() < quotaCooldownUntilMs) return
         viewModelScope.launch {
-            repository.joinLiveStream(streamId)
+            repository.publishLiveFrame(
+                streamId = streamId,
+                seq = seq,
+                frameData = frameData,
+                cameraEnabled = cameraEnabled,
+                micMuted = micMuted
+            ).onFailure { error ->
+                if (isQuotaExceeded(error)) {
+                    quotaCooldownUntilMs = System.currentTimeMillis() + QUOTA_RETRY_COOLDOWN_MS
+                }
+                Log.w(TAG, "Live frame publish skipped", error)
+            }
+        }
+    }
+
+    fun joinLiveStream(streamId: String, onJoined: (Boolean) -> Unit = {}) {
+        if (streamId.isBlank() || streamId == currentUserId) {
+            onJoined(false)
+            return
+        }
+        viewModelScope.launch {
+            val joined = repository.joinLiveStream(streamId).getOrDefault(false)
+            onJoined(joined)
         }
     }
 
@@ -1636,6 +1715,96 @@ class MomiViewModel(
                 _errorMessage.value = unwrapErrorMessage(error, "Could not send live comment")
             }
         }
+    }
+
+    fun completeCreditPurchase(
+        pkg: CreditPackageOption,
+        paymentMethod: String,
+        paymentRef: String,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        val currentProfile = fallbackProfile()
+        viewModelScope.launch {
+            _isProcessingWalletAction.value = true
+            walletRepository.recordCreditTopUp(
+                profile = currentProfile,
+                pkg = pkg,
+                paymentMethod = paymentMethod,
+                paymentRef = paymentRef
+            ).onSuccess {
+                _statusNotice.value = "Added +${pkg.credits} Momi credits to your account!"
+                onComplete(true)
+            }.onFailure { error ->
+                _errorMessage.value = unwrapErrorMessage(error, "Could not add credits to wallet")
+                onComplete(false)
+            }
+            _isProcessingWalletAction.value = false
+        }
+    }
+
+    fun handlePlayPurchaseCredited(
+        productId: String,
+        orderId: String,
+        purchaseToken: String
+    ) {
+        val pkg = MomiCreditCatalog.packageByProductId(productId) ?: return
+        completeCreditPurchase(
+            pkg = pkg,
+            paymentMethod = CreditTransaction.METHOD_GOOGLE_PLAY,
+            paymentRef = orderId.ifBlank { purchaseToken }
+        )
+    }
+
+    fun sendGift(
+        recipientUid: String,
+        recipientUsername: String,
+        gift: LiveGiftItem,
+        streamId: String? = null,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        val currentProfile = fallbackProfile()
+        viewModelScope.launch {
+            _isProcessingWalletAction.value = true
+            walletRepository.sendGift(
+                senderProfile = currentProfile,
+                recipientUid = recipientUid,
+                recipientUsername = recipientUsername,
+                gift = gift,
+                streamId = streamId
+            ).onSuccess {
+                _statusNotice.value =
+                    "Sent ${gift.emojiLabel} ${gift.name} (-${gift.creditsCost} cr) to @$recipientUsername!"
+                onComplete(true)
+            }.onFailure { error ->
+                _errorMessage.value = unwrapErrorMessage(error, "Could not send gift")
+                onComplete(false)
+            }
+            _isProcessingWalletAction.value = false
+        }
+    }
+
+    fun unlockAccountPerk(
+        perk: AccountPerkItem,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        val currentProfile = fallbackProfile()
+        viewModelScope.launch {
+            _isProcessingWalletAction.value = true
+            walletRepository.unlockPerk(currentProfile, perk)
+                .onSuccess {
+                    _statusNotice.value = "Unlocked ${perk.title}!"
+                    onComplete(true)
+                }
+                .onFailure { error ->
+                    _errorMessage.value = unwrapErrorMessage(error, "Could not unlock perk")
+                    onComplete(false)
+                }
+            _isProcessingWalletAction.value = false
+        }
+    }
+
+    fun showInfoNotice(message: String) {
+        _statusNotice.value = message
     }
 
     private fun fallbackProfile(): UserProfile {

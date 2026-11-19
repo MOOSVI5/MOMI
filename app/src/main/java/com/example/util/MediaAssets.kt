@@ -327,6 +327,59 @@ object MediaAssets {
         }.getOrNull()
     }
 
+    fun decodeBase64ToBitmap(frameData: String?): Bitmap? {
+        val bytes = decodeBase64ToBytes(frameData) ?: return null
+        if (bytes.isEmpty()) return null
+        return runCatching {
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        }.getOrNull()
+    }
+
+    fun encodeLiveFrameBitmapToBase64(source: Bitmap, rotationDegrees: Int): String? {
+        return runCatching {
+            var working = source
+            var ownsWorking = false
+            try {
+                if (rotationDegrees != 0) {
+                    val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
+                    val rotated = Bitmap.createBitmap(working, 0, 0, working.width, working.height, matrix, true)
+                    if (rotated !== working) {
+                        working = rotated
+                        ownsWorking = true
+                    }
+                }
+                val maxEdge = 420
+                if (working.width > maxEdge || working.height > maxEdge) {
+                    val scale = maxEdge.toFloat() / maxOf(working.width, working.height).toFloat()
+                    val targetW = (working.width * scale).toInt().coerceAtLeast(1)
+                    val targetH = (working.height * scale).toInt().coerceAtLeast(1)
+                    val scaled = Bitmap.createScaledBitmap(working, targetW, targetH, true)
+                    if (scaled !== working) {
+                        if (ownsWorking) working.recycle()
+                        working = scaled
+                        ownsWorking = true
+                    }
+                }
+                val out = ByteArrayOutputStream()
+                var quality = 46
+                while (quality >= 26) {
+                    out.reset()
+                    working.compress(Bitmap.CompressFormat.JPEG, quality, out)
+                    if (out.size() <= 125_000) break
+                    quality -= 10
+                }
+                val bytes = out.toByteArray()
+                if (bytes.isEmpty()) return null
+                val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                if (b64.length <= 200_000) b64 else null
+            } finally {
+                if (ownsWorking) {
+                    runCatching { working.recycle() }
+                }
+            }
+        }.getOrNull()
+    }
+
     fun copyPickedVideoToInternalStorage(context: Context, uri: Uri): ExtractedVideoMedia? {
         return runCatching {
             val dir = File(context.filesDir, "luma_media")

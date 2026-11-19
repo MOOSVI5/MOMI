@@ -1,11 +1,15 @@
 package com.example.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -31,10 +35,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -42,6 +49,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
@@ -50,6 +58,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,42 +66,70 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.LiveComment
+import com.example.data.model.LiveFrame
+import com.example.data.model.LiveGiftItem
 import com.example.data.model.LiveStream
+import com.example.data.model.UserWallet
 import com.example.ui.components.LumaAvatar
-import com.example.ui.theme.MaroonBright
+import com.example.ui.components.SendGiftBottomSheet
 import com.example.ui.theme.SilkBlueLight
 import com.example.util.MediaAssets
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 @Composable
 fun LiveViewerScreen(
     stream: LiveStream?,
+    liveFrame: LiveFrame?,
     comments: List<LiveComment>,
-    onJoin: () -> Unit,
+    wallet: UserWallet?,
+    isSendingGift: Boolean,
+    onJoin: (onJoined: (Boolean) -> Unit) -> Unit,
     onLeave: () -> Unit,
     onSendComment: (String) -> Unit,
     onSendHeart: () -> Unit,
+    onSendGift: (LiveGiftItem) -> Unit,
+    onOpenWallet: () -> Unit,
     onAuthorClick: (userId: String, username: String) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     BackHandler(onBack = onClose)
 
+    val streamId = stream?.id.orEmpty()
     var commentDraft by remember { mutableStateOf("") }
+    var showGiftSheet by remember { mutableStateOf(false) }
+    var joinedSuccessfully by remember(streamId) { mutableStateOf(false) }
+    var activeGiftBannerText by remember { mutableStateOf<String?>(null) }
+    var lastSeenGiftCommentId by remember(streamId) { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
 
-    LaunchedEffect(Unit) {
-        onJoin()
+    val latestOnJoin by rememberUpdatedState(onJoin)
+    val latestOnLeave by rememberUpdatedState(onLeave)
+
+    LaunchedEffect(streamId) {
+        if (streamId.isNotBlank()) {
+            latestOnJoin { joined ->
+                joinedSuccessfully = joined
+            }
+        }
     }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(streamId) {
         onDispose {
-            onLeave()
+            if (joinedSuccessfully) {
+                latestOnLeave()
+            }
         }
     }
 
@@ -100,6 +137,53 @@ fun LiveViewerScreen(
         if (comments.isNotEmpty()) {
             listState.animateScrollToItem(comments.lastIndex)
         }
+    }
+
+    val latestGiftComment = remember(comments) {
+        comments.lastOrNull { it.text.startsWith("[GIFT]") }
+    }
+    LaunchedEffect(latestGiftComment?.id) {
+        val giftComment = latestGiftComment ?: return@LaunchedEffect
+        if (lastSeenGiftCommentId != giftComment.id) {
+            lastSeenGiftCommentId = giftComment.id
+            activeGiftBannerText = "@${giftComment.username} ${giftComment.text.removePrefix("[GIFT]").trim()}"
+            delay(3500L)
+            activeGiftBannerText = null
+        }
+    }
+
+    var decodedFrameBitmap by remember(streamId) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(liveFrame?.seq, liveFrame?.frameData, liveFrame?.cameraEnabled) {
+        val camOn = liveFrame?.cameraEnabled != false
+        val encoded = liveFrame?.frameData.orEmpty()
+        if (!camOn) {
+            decodedFrameBitmap = null
+        } else if (encoded.isNotBlank()) {
+            val bitmap = withContext(Dispatchers.Default) {
+                MediaAssets.decodeBase64ToBitmap(encoded)?.asImageBitmap()
+            }
+            if (bitmap != null) {
+                decodedFrameBitmap = bitmap
+            }
+        }
+    }
+
+    if (showGiftSheet && stream != null) {
+        SendGiftBottomSheet(
+            recipientUsername = stream.username,
+            isLiveContext = true,
+            wallet = wallet,
+            isProcessing = isSendingGift,
+            onSendGift = { gift ->
+                onSendGift(gift)
+                showGiftSheet = false
+            },
+            onOpenWallet = {
+                showGiftSheet = false
+                onOpenWallet()
+            },
+            onDismiss = { showGiftSheet = false }
+        )
     }
 
     val pulseTransition = rememberInfiniteTransition(label = "viewerLivePulse")
@@ -112,6 +196,11 @@ fun LiveViewerScreen(
         ),
         label = "viewerPulse"
     )
+
+    val showingVideoFrame = stream != null &&
+        stream.isLive &&
+        liveFrame?.cameraEnabled != false &&
+        decodedFrameBitmap != null
 
     Box(
         modifier = modifier
@@ -126,183 +215,308 @@ fun LiveViewerScreen(
                 )
             )
     ) {
+        if (showingVideoFrame && decodedFrameBitmap != null) {
+            Image(
+                bitmap = decodedFrameBitmap!!,
+                contentDescription = "Live broadcast from @${stream?.username ?: "creator"}",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("live_viewer_video_frame")
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Black.copy(alpha = 0.6f),
+                                Color.Transparent,
+                                Color.Transparent,
+                                Color.Black.copy(alpha = 0.78f)
+                            )
+                        )
+                    )
+            )
+        }
+
+        // Center Stage (shown when broadcast ended, camera paused, or connecting first frame)
+        if (!showingVideoFrame) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(horizontal = 28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                if (stream == null || !stream.isLive) {
+                    Text(
+                        text = "Live broadcast ended",
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "This creator has finished their live session.",
+                        color = Color.White.copy(alpha = 0.72f),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Button(onClick = onClose, shape = RoundedCornerShape(14.dp)) {
+                        Text("Back to Feed", fontWeight = FontWeight.Bold)
+                    }
+                } else {
+                    val isCameraPaused = liveFrame?.cameraEnabled == false
+                    Box(
+                        modifier = Modifier
+                            .size(116.dp)
+                            .alpha(if (isCameraPaused) 0.9f else pulseAlpha)
+                            .clip(CircleShape)
+                            .border(3.dp, Color(0xFFD92D4E), CircleShape)
+                            .padding(6.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        LumaAvatar(
+                            username = stream.username,
+                            avatarKey = stream.avatarKey,
+                            avatarData = stream.avatarData,
+                            size = 100.dp
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = stream.title,
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.White.copy(alpha = 0.12f))
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = if (isCameraPaused) Icons.Filled.VideocamOff else Icons.Filled.Sensors,
+                            contentDescription = null,
+                            tint = SilkBlueLight,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (isCameraPaused) {
+                                "Broadcaster camera paused · Chat & gifts active"
+                            } else {
+                                "Connecting live camera feed..."
+                            },
+                            color = Color.White.copy(alpha = 0.88f),
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                }
+            }
+        }
+
         // Top Header
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .padding(horizontal = 12.dp, vertical = 10.dp)
         ) {
-            if (stream != null) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(12.dp))
-                        .clickable { onAuthorClick(stream.userId, stream.username) }
-                        .padding(vertical = 4.dp)
-                ) {
-                    LumaAvatar(
-                        username = stream.username,
-                        avatarKey = stream.avatarKey,
-                        avatarData = stream.avatarData,
-                        size = 40.dp,
-                        hasActiveStory = stream.isLive
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = stream.username,
-                                color = Color.White,
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            if (stream.authorVerified) {
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Icon(
-                                    imageVector = Icons.Filled.Verified,
-                                    contentDescription = "Verified",
-                                    tint = SilkBlueLight,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                            }
-                        }
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(if (stream.isLive) Color(0xFFD92D4E) else Color.Gray)
-                                    .padding(horizontal = 7.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = if (stream.isLive) "LIVE" else "ENDED",
-                                    color = Color.White,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.ExtraBold
-                                )
-                            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                if (stream != null) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onAuthorClick(stream.userId, stream.username) }
+                            .padding(vertical = 4.dp)
+                    ) {
+                        LumaAvatar(
+                            username = stream.username,
+                            avatarKey = stream.avatarKey,
+                            avatarData = stream.avatarData,
+                            size = 40.dp,
+                            hasActiveStory = stream.isLive
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Outlined.Visibility,
-                                    contentDescription = "Live viewers",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(13.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = MediaAssets.formatCompactCount(stream.viewerCount),
+                                    text = stream.username,
                                     color = Color.White,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
+                                if (stream.authorVerified) {
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Icon(
+                                        imageVector = Icons.Filled.Verified,
+                                        contentDescription = "Verified",
+                                        tint = SilkBlueLight,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(if (stream.isLive) Color(0xFFD92D4E) else Color.Gray)
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = if (stream.isLive) "LIVE" else "ENDED",
+                                        color = Color.White,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
+                                }
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(Color.Black.copy(alpha = 0.45f))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.Visibility,
+                                        contentDescription = "Live viewers",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text(
+                                        text = MediaAssets.formatCompactCount(stream.viewerCount),
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(Color(0xFFF59E0B).copy(alpha = 0.28f))
+                                        .border(1.dp, Color(0xFFF59E0B).copy(alpha = 0.65f), RoundedCornerShape(6.dp))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.CardGiftcard,
+                                        contentDescription = "Stream gifts credits",
+                                        tint = Color(0xFFFFD54F),
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text(
+                                        text = "${MediaAssets.formatCompactCount(stream.giftsCredits)} cr",
+                                        color = Color(0xFFFFE082),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
                         }
                     }
-                }
-            } else {
-                Text(
-                    text = "Momi Live",
-                    color = Color.White,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            IconButton(
-                onClick = onClose,
-                modifier = Modifier
-                    .minimumInteractiveComponentSize()
-                    .testTag("close_live_viewer_button")
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Close,
-                    contentDescription = "Close live room",
-                    tint = Color.White
-                )
-            }
-        }
-
-        // Center Stage
-        Column(
-            modifier = Modifier
-                .align(Alignment.Center)
-                .padding(horizontal = 28.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            if (stream == null || !stream.isLive) {
-                Text(
-                    text = "Live broadcast ended",
-                    color = Color.White,
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "This creator has finished their live session.",
-                    color = Color.White.copy(alpha = 0.72f),
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                Button(onClick = onClose, shape = RoundedCornerShape(14.dp)) {
-                    Text("Back to Feed", fontWeight = FontWeight.Bold)
-                }
-            } else {
-                Box(
-                    modifier = Modifier
-                        .size(116.dp)
-                        .alpha(pulseAlpha)
-                        .clip(CircleShape)
-                        .border(3.dp, Color(0xFFD92D4E), CircleShape)
-                        .padding(6.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    LumaAvatar(
-                        username = stream.username,
-                        avatarKey = stream.avatarKey,
-                        avatarData = stream.avatarData,
-                        size = 100.dp
+                } else {
+                    Text(
+                        text = "Momi Live",
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
                     )
                 }
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = stream.title,
-                    color = Color.White,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
+
+                IconButton(
+                    onClick = onClose,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color.White.copy(alpha = 0.1f))
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .minimumInteractiveComponentSize()
+                        .testTag("close_live_viewer_button")
                 ) {
                     Icon(
-                        imageVector = Icons.Filled.Sensors,
-                        contentDescription = null,
-                        tint = SilkBlueLight,
-                        modifier = Modifier.size(16.dp)
+                        imageVector = Icons.Filled.Close,
+                        contentDescription = "Close live room",
+                        tint = Color.White
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "Live Room · Real-time chat & hearts",
-                        color = Color.White.copy(alpha = 0.88f),
-                        style = MaterialTheme.typography.labelMedium
-                    )
+                }
+            }
+
+            if (stream != null && stream.isLive && liveFrame?.micMuted == true) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color.Black.copy(alpha = 0.55f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.MicOff,
+                            contentDescription = "Host mic muted",
+                            tint = Color(0xFFFCA5A5),
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = "Host mic muted",
+                            color = Color.White.copy(alpha = 0.9f),
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+            }
+
+            AnimatedVisibility(
+                visible = activeGiftBannerText != null,
+                enter = fadeIn(),
+                exit = fadeOut()
+            ) {
+                activeGiftBannerText?.let { banner ->
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color(0xFF9A3412).copy(alpha = 0.9f),
+                        modifier = Modifier
+                            .border(1.dp, Color(0xFFFBBF24), RoundedCornerShape(14.dp))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.CardGiftcard,
+                                contentDescription = null,
+                                tint = Color(0xFFFDE68A),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = banner,
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
                 }
             }
         }
 
-        // Bottom Chat & Heart Bar
+        // Bottom Chat, Gift & Heart Bar
         if (stream != null && stream.isLive) {
             Column(
                 modifier = Modifier
@@ -322,10 +536,21 @@ fun LiveViewerScreen(
                         contentPadding = PaddingValues(vertical = 4.dp)
                     ) {
                         items(comments, key = { it.id }) { comment ->
+                            val isGiftAlert = comment.text.startsWith("[GIFT]")
                             Row(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(12.dp))
-                                    .background(Color.Black.copy(alpha = 0.5f))
+                                    .background(
+                                        if (isGiftAlert) Color(0xFF7C2D12).copy(alpha = 0.78f)
+                                        else Color.Black.copy(alpha = 0.5f)
+                                    )
+                                    .then(
+                                        if (isGiftAlert) {
+                                            Modifier.border(1.dp, Color(0xFFFBBF24), RoundedCornerShape(12.dp))
+                                        } else {
+                                            Modifier
+                                        }
+                                    )
                                     .padding(horizontal = 10.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -337,14 +562,15 @@ fun LiveViewerScreen(
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
                                     text = "${comment.username}  ",
-                                    color = SilkBlueLight,
+                                    color = if (isGiftAlert) Color(0xFFFDE68A) else SilkBlueLight,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = comment.text,
+                                    text = if (isGiftAlert) comment.text.removePrefix("[GIFT]").trim() else comment.text,
                                     color = Color.White,
-                                    fontSize = 13.sp
+                                    fontSize = 13.sp,
+                                    fontWeight = if (isGiftAlert) FontWeight.SemiBold else FontWeight.Normal
                                 )
                             }
                         }
@@ -397,9 +623,32 @@ fun LiveViewerScreen(
                     Row(
                         modifier = Modifier
                             .clip(RoundedCornerShape(20.dp))
+                            .background(Color(0xFFF59E0B).copy(alpha = 0.9f))
+                            .clickable { showGiftSheet = true }
+                            .padding(horizontal = 11.dp, vertical = 10.dp)
+                            .testTag("open_live_gift_sheet_button"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.CardGiftcard,
+                            contentDescription = "Send credit gift",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Gift",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
                             .background(Color(0xFFD92D4E).copy(alpha = 0.85f))
                             .clickable(onClick = onSendHeart)
-                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                            .padding(horizontal = 11.dp, vertical = 10.dp)
                             .testTag("send_live_heart_button"),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
