@@ -744,6 +744,9 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         localAudioPath: String? = null,
         audioData: String? = null,
         filterTag: String,
+        aspectRatio: String = "1:1",
+        taggedUsernames: List<String> = emptyList(),
+        hashtags: List<String> = emptyList(),
         caption: String,
         location: String,
         category: String,
@@ -756,6 +759,15 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         }
         val safeExtraPaths = localExtraImagePaths.filter { it.isNotBlank() }.take(4).map { it.take(500) }
         val safeExtraDatas = extraImageDatas.filter { it.isNotBlank() }.take(4)
+        val safeAspectRatio = if (aspectRatio in setOf("1:1", "4:5", "16:9")) aspectRatio else "1:1"
+        val safeTagged = taggedUsernames.map { it.trim().removePrefix("@").lowercase() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(10)
+        val safeHashtags = hashtags.map { it.trim().removePrefix("#").lowercase() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(15)
         val payload = buildMap<String, Any> {
             put("userId", uid)
             put("authorUsername", profile.username)
@@ -776,6 +788,9 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             if (!localAudioPath.isNullOrBlank()) put("localAudioPath", localAudioPath.take(500))
             if (!audioData.isNullOrBlank()) put("audioData", audioData)
             put("filterTag", filterTag)
+            put("aspectRatio", safeAspectRatio)
+            if (safeTagged.isNotEmpty()) put("taggedUsernames", safeTagged)
+            if (safeHashtags.isNotEmpty()) put("hashtags", safeHashtags)
             put("caption", caption.trim().take(1000))
             put("likesCount", 0L)
             put("viewsCount", 0L)

@@ -3,7 +3,10 @@ package com.example.util
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
+import android.graphics.Paint
 import android.media.ExifInterface
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -112,36 +115,264 @@ object MediaAssets {
         }
     }
 
+    data class MomiFilterOption(val tag: String, val label: String)
+
+    val postFilterOptions: List<MomiFilterOption> = listOf(
+        MomiFilterOption("NONE", "Original"),
+        MomiFilterOption("BLUE", "Silk Blue"),
+        MomiFilterOption("MAROON", "Maroon"),
+        MomiFilterOption("WARM", "Golden"),
+        MomiFilterOption("VINTAGE", "Vintage"),
+        MomiFilterOption("VIVID", "Vivid"),
+        MomiFilterOption("CINEMA", "Cinema"),
+        MomiFilterOption("PASTEL", "Pastel"),
+        MomiFilterOption("MONO", "Mono"),
+        MomiFilterOption("NOIR", "Noir")
+    )
+
+    fun extractHashtags(caption: String, extraTags: List<String> = emptyList()): List<String> {
+        val parsed = Regex("#([a-zA-Z0-9_]+)")
+            .findAll(caption)
+            .map { it.groupValues[1].lowercase() }
+            .toList()
+        return (extraTags.map { it.trim().removePrefix("#").lowercase() } + parsed)
+            .map { it.replace(Regex("[^a-z0-9_]"), "") }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(15)
+    }
+
+    fun extractMentions(caption: String, extraMentions: List<String> = emptyList()): List<String> {
+        val parsed = Regex("@([a-zA-Z0-9._]+)")
+            .findAll(caption)
+            .map { it.groupValues[1].lowercase() }
+            .toList()
+        return (extraMentions.map { it.trim().removePrefix("@").lowercase() } + parsed)
+            .map { it.replace(Regex("[^a-z0-9._]"), "") }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(10)
+    }
+
+    private fun baseMatrixValuesForFilter(filterTag: String): FloatArray? = when (filterTag) {
+        "MONO" -> floatArrayOf(
+            0.299f, 0.587f, 0.114f, 0f, 0f,
+            0.299f, 0.587f, 0.114f, 0f, 0f,
+            0.299f, 0.587f, 0.114f, 0f, 0f,
+            0f, 0f, 0f, 1f, 0f
+        )
+        "BLUE" -> floatArrayOf(
+            0.88f, 0f, 0f, 0f, 0f,
+            0f, 0.96f, 0f, 0f, 4f,
+            0f, 0f, 1.15f, 0f, 14f,
+            0f, 0f, 0f, 1f, 0f
+        )
+        "MAROON" -> floatArrayOf(
+            1.14f, 0f, 0f, 0f, 12f,
+            0f, 0.88f, 0f, 0f, 0f,
+            0f, 0f, 0.96f, 0f, 6f,
+            0f, 0f, 0f, 1f, 0f
+        )
+        "WARM" -> floatArrayOf(
+            1.12f, 0f, 0f, 0f, 10f,
+            0f, 1.04f, 0f, 0f, 4f,
+            0f, 0f, 0.86f, 0f, -6f,
+            0f, 0f, 0f, 1f, 0f
+        )
+        "VINTAGE" -> floatArrayOf(
+            0.95f, 0.12f, 0.04f, 0f, 12f,
+            0.05f, 0.92f, 0.05f, 0f, 6f,
+            0.03f, 0.08f, 0.78f, 0f, 2f,
+            0f, 0f, 0f, 1f, 0f
+        )
+        "VIVID" -> floatArrayOf(
+            1.22f, -0.06f, -0.06f, 0f, 2f,
+            -0.06f, 1.22f, -0.06f, 0f, 2f,
+            -0.06f, -0.06f, 1.24f, 0f, 4f,
+            0f, 0f, 0f, 1f, 0f
+        )
+        "NOIR" -> floatArrayOf(
+            0.42f, 0.78f, 0.15f, 0f, -38f,
+            0.42f, 0.78f, 0.15f, 0f, -38f,
+            0.42f, 0.78f, 0.15f, 0f, -38f,
+            0f, 0f, 0f, 1f, 0f
+        )
+        "CINEMA" -> floatArrayOf(
+            1.08f, -0.04f, 0f, 0f, -4f,
+            0f, 1.02f, 0.04f, 0f, 2f,
+            0f, 0.08f, 1.12f, 0f, 6f,
+            0f, 0f, 0f, 1f, 0f
+        )
+        "PASTEL" -> floatArrayOf(
+            0.94f, 0.08f, 0.08f, 0f, 16f,
+            0.06f, 0.94f, 0.08f, 0f, 16f,
+            0.06f, 0.06f, 0.98f, 0f, 20f,
+            0f, 0f, 0f, 1f, 0f
+        )
+        else -> null
+    }
+
+    fun composeEditMatrixValues(
+        filterTag: String = "NONE",
+        brightness: Float = 0f,
+        contrast: Float = 1f,
+        warmth: Float = 0f
+    ): FloatArray {
+        val base = baseMatrixValuesForFilter(filterTag)?.copyOf() ?: floatArrayOf(
+            1f, 0f, 0f, 0f, 0f,
+            0f, 1f, 0f, 0f, 0f,
+            0f, 0f, 1f, 0f, 0f,
+            0f, 0f, 0f, 1f, 0f
+        )
+        val clampedContrast = contrast.coerceIn(0.6f, 1.5f)
+        val brightnessShift = brightness.coerceIn(-0.4f, 0.4f) * 255f
+        val contrastTranslate = 128f * (1f - clampedContrast)
+        val warmRed = 1f + (warmth.coerceIn(-0.4f, 0.4f) * 0.28f)
+        val warmBlue = 1f - (warmth.coerceIn(-0.4f, 0.4f) * 0.28f)
+
+        base[0] *= clampedContrast * warmRed
+        base[1] *= clampedContrast * warmRed
+        base[2] *= clampedContrast * warmRed
+        base[4] = base[4] * clampedContrast + contrastTranslate + brightnessShift
+
+        base[5] *= clampedContrast
+        base[6] *= clampedContrast
+        base[7] *= clampedContrast
+        base[9] = base[9] * clampedContrast + contrastTranslate + brightnessShift
+
+        base[10] *= clampedContrast * warmBlue
+        base[11] *= clampedContrast * warmBlue
+        base[12] *= clampedContrast * warmBlue
+        base[14] = base[14] * clampedContrast + contrastTranslate + brightnessShift
+        return base
+    }
+
+    fun colorFilterForEdit(
+        filterTag: String,
+        brightness: Float = 0f,
+        contrast: Float = 1f,
+        warmth: Float = 0f
+    ): ColorFilter? {
+        val isIdentity = filterTag == "NONE" &&
+            kotlin.math.abs(brightness) < 0.01f &&
+            kotlin.math.abs(contrast - 1f) < 0.01f &&
+            kotlin.math.abs(warmth) < 0.01f
+        if (isIdentity) return null
+        return ColorFilter.colorMatrix(
+            ColorMatrix(composeEditMatrixValues(filterTag, brightness, contrast, warmth))
+        )
+    }
+
     fun colorFilterForTag(filterTag: String): ColorFilter? {
-        return when (filterTag) {
-            "MONO" -> {
-                val matrix = ColorMatrix().apply { setToSaturation(0f) }
-                ColorFilter.colorMatrix(matrix)
-            }
-            "BLUE" -> {
-                val matrix = ColorMatrix(
-                    floatArrayOf(
-                        0.88f, 0f, 0f, 0f, 0f,
-                        0f, 0.96f, 0f, 0f, 4f,
-                        0f, 0f, 1.15f, 0f, 14f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                ColorFilter.colorMatrix(matrix)
-            }
-            "MAROON" -> {
-                val matrix = ColorMatrix(
-                    floatArrayOf(
-                        1.14f, 0f, 0f, 0f, 12f,
-                        0f, 0.88f, 0f, 0f, 0f,
-                        0f, 0f, 0.96f, 0f, 6f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                ColorFilter.colorMatrix(matrix)
-            }
-            else -> null
+        val values = baseMatrixValuesForFilter(filterTag) ?: return null
+        return ColorFilter.colorMatrix(ColorMatrix(values))
+    }
+
+    /**
+     * Bakes rotation, aspect crop (1:1, 4:5, 16:9), and tone sliders (brightness, contrast, warmth)
+     * into a new JPEG file under app internal storage while preserving [filterTag] as the non-destructive grade overlay.
+     */
+    fun renderEditedImageToFile(
+        context: Context,
+        sourcePath: String?,
+        brightness: Float = 0f,
+        contrast: Float = 1f,
+        warmth: Float = 0f,
+        rotationDegrees: Int = 0,
+        targetAspectRatio: String = "1:1"
+    ): String? {
+        if (sourcePath.isNullOrBlank()) return null
+        val normalizedRotation = ((rotationDegrees % 360) + 360) % 360
+        val hasToneEdit = kotlin.math.abs(brightness) >= 0.01f ||
+            kotlin.math.abs(contrast - 1f) >= 0.01f ||
+            kotlin.math.abs(warmth) >= 0.01f
+        if (!hasToneEdit && normalizedRotation == 0 && targetAspectRatio == "1:1") {
+            return sourcePath
         }
+        return runCatching {
+            val file = File(sourcePath)
+            if (!file.exists()) return sourcePath
+
+            val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(sourcePath, boundsOptions)
+            val srcW = boundsOptions.outWidth
+            val srcH = boundsOptions.outHeight
+            if (srcW <= 0 || srcH <= 0) return sourcePath
+
+            var sample = 1
+            while ((srcW / sample) > 1600 || (srcH / sample) > 1600) sample *= 2
+            var bitmap = BitmapFactory.decodeFile(
+                sourcePath,
+                BitmapFactory.Options().apply { inSampleSize = sample }
+            ) ?: return sourcePath
+
+            val exifOrientation = runCatching {
+                ExifInterface(sourcePath).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL
+                )
+            }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+            val exifDeg = when (exifOrientation) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                else -> 0
+            }
+            val totalDeg = (exifDeg + normalizedRotation) % 360
+            if (totalDeg != 0) {
+                val m = Matrix().apply { postRotate(totalDeg.toFloat()) }
+                val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, m, true)
+                if (rotated !== bitmap) bitmap.recycle()
+                bitmap = rotated
+            }
+
+            // Center crop to desired aspect ratio
+            val desiredRatio = when (targetAspectRatio) {
+                "4:5" -> 4f / 5f
+                "16:9" -> 16f / 9f
+                else -> 1f
+            }
+            val currentRatio = bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1).toFloat()
+            val (cropW, cropH) = if (currentRatio > desiredRatio) {
+                val h = bitmap.height
+                val w = (h * desiredRatio).toInt().coerceIn(1, bitmap.width)
+                w to h
+            } else {
+                val w = bitmap.width
+                val h = (w / desiredRatio).toInt().coerceIn(1, bitmap.height)
+                w to h
+            }
+            val cropX = ((bitmap.width - cropW) / 2).coerceAtLeast(0)
+            val cropY = ((bitmap.height - cropH) / 2).coerceAtLeast(0)
+            if (cropW < bitmap.width || cropH < bitmap.height) {
+                val cropped = Bitmap.createBitmap(bitmap, cropX, cropY, cropW, cropH)
+                if (cropped !== bitmap) bitmap.recycle()
+                bitmap = cropped
+            }
+
+            if (hasToneEdit) {
+                val styled = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(styled)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    colorFilter = ColorMatrixColorFilter(
+                        android.graphics.ColorMatrix(
+                            composeEditMatrixValues("NONE", brightness, contrast, warmth)
+                        )
+                    )
+                }
+                canvas.drawBitmap(bitmap, 0f, 0f, paint)
+                bitmap.recycle()
+                bitmap = styled
+            }
+
+            val dir = File(context.filesDir, "luma_media").apply { if (!exists()) mkdirs() }
+            val outFile = File(dir, "edited_${UUID.randomUUID()}.jpg")
+            outFile.outputStream().use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+            }
+            bitmap.recycle()
+            if (outFile.exists() && outFile.length() > 0L) outFile.absolutePath else sourcePath
+        }.getOrDefault(sourcePath)
     }
 
     fun copyPickedImageToInternalStorage(context: Context, uri: Uri): String? {

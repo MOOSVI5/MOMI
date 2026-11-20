@@ -104,6 +104,9 @@ data class Post(
     val videoChunksCount: Long = 0L,
     val videoDurationMs: Long = 0L,
     val filterTag: String = "NONE",
+    val aspectRatio: String = "1:1",
+    val taggedUsernames: List<String> = emptyList(),
+    val hashtags: List<String> = emptyList(),
     val caption: String = "",
     val likesCount: Long = 0L,
     val viewsCount: Long = 0L,
@@ -121,6 +124,41 @@ data class Post(
 ) {
     val isVideoPost: Boolean
         get() = mediaType == "VIDEO" || !localVideoPath.isNullOrBlank() || !videoData.isNullOrBlank() || videoChunksCount > 0L
+
+    @get:Exclude
+    val numericAspectRatio: Float
+        get() = when {
+            isVideoPost -> 0.85f
+            aspectRatio == "4:5" -> 0.8f
+            aspectRatio == "16:9" -> 1.777f
+            else -> 1f
+        }
+
+    @get:Exclude
+    val allHashtags: List<String>
+        get() {
+            val fromCaption = Regex("#([a-zA-Z0-9_]+)")
+                .findAll(caption)
+                .map { it.groupValues[1].lowercase() }
+                .toList()
+            return (hashtags.map { it.trim().removePrefix("#").lowercase() } + fromCaption)
+                .filter { it.isNotBlank() }
+                .distinct()
+                .take(15)
+        }
+
+    @get:Exclude
+    val allTaggedUsernames: List<String>
+        get() {
+            val fromCaption = Regex("@([a-zA-Z0-9._]+)")
+                .findAll(caption)
+                .map { it.groupValues[1].lowercase() }
+                .toList()
+            return (taggedUsernames.map { it.trim().removePrefix("@").lowercase() } + fromCaption)
+                .filter { it.isNotBlank() }
+                .distinct()
+                .take(10)
+        }
 
     @get:Exclude
     val allImageFrames: List<MediaFrame>

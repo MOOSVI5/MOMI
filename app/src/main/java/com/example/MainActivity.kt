@@ -1,14 +1,18 @@
 package com.example
 
+import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -122,6 +126,7 @@ import com.example.ui.theme.LumaTheme
 import com.example.ui.theme.ThemePreference
 import com.example.ui.viewmodel.MomiViewModel
 import com.example.util.AppUpdateChecker
+import com.example.util.MomiAlertNotifier
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
@@ -179,6 +184,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        MomiAlertNotifier.ensureChannel(this)
         configureAppCheck(this, intent)
 
         runCatching {
@@ -338,6 +344,128 @@ private fun LumaApp(
     val isProcessingWalletAction by viewModel.isProcessingWalletAction.collectAsStateWithLifecycle()
     var showAiAssistantSheet by remember { mutableStateOf(false) }
     var pendingReportTarget by remember { mutableStateOf<ReportDraftTarget?>(null) }
+    var notificationSoundsEnabled by remember(context) {
+        mutableStateOf(AppearancePrefs.isNotificationSoundsEnabled(context))
+    }
+    var canPostSystemNotifications by remember(context) {
+        mutableStateOf(MomiAlertNotifier.canPostNotifications(context))
+    }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        canPostSystemNotifications = granted || MomiAlertNotifier.canPostNotifications(context)
+    }
+
+    LaunchedEffect(context) {
+        MomiAlertNotifier.ensureChannel(context)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !MomiAlertNotifier.canPostNotifications(context) &&
+            !AppearancePrefs.hasPromptedNotificationPermission(context)
+        ) {
+            AppearancePrefs.markNotificationPermissionPrompted(context)
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    // Handle notification tap routing on launch
+    LaunchedEffect(Unit) {
+        val activity = context.findActivity()
+        val routeExtra = activity?.intent?.getStringExtra(MomiAlertNotifier.EXTRA_ALERT_ROUTE)
+        if (!routeExtra.isNullOrBlank()) {
+            activity.intent.removeExtra(MomiAlertNotifier.EXTRA_ALERT_ROUTE)
+            when (routeExtra) {
+                LumaRoutes.NOTIFICATIONS,
+                LumaRoutes.WALLET,
+                "messages" -> navController.navigate(
+                    if (routeExtra == "messages") LumaRoutes.messagesRoute() else routeExtra
+                )
+            }
+        }
+    }
+
+    // Real-time alert sounds & system notifications for new activity, DMs, and gifts
+    val baselineNotifIds = remember(viewModel.currentUserId) { mutableStateOf<Set<String>?>(null) }
+    LaunchedEffect(notifications, notificationSoundsEnabled) {
+        val currentIds = notifications.map { it.id }.toSet()
+        val prev = baselineNotifIds.value
+        if (prev == null) {
+            baselineNotifIds.value = currentIds
+            return@LaunchedEffect
+        }
+        val newlyArrived = notifications.filter {
+            it.id !in prev && it.isUnread && it.actorUid != viewModel.currentUserId
+        }
+        baselineNotifIds.value = prev + currentIds
+        val latest = newlyArrived.firstOrNull() ?: return@LaunchedEffect
+        MomiAlertNotifier.postAlertNotification(
+            context = context,
+            notificationId = latest.id.hashCode(),
+            title = "@${latest.actorUsername.ifBlank { "Momi" }}",
+            body = latest.message.ifBlank { "New activity on Momi" },
+            route = LumaRoutes.NOTIFICATIONS,
+            soundEnabled = notificationSoundsEnabled
+        )
+    }
+
+    val baselineThreadSignatures = remember(viewModel.currentUserId) { mutableStateOf<Map<String, String>?>(null) }
+    LaunchedEffect(messageThreads, currentRoute, notificationSoundsEnabled) {
+        val currentMap = messageThreads.associate { thread ->
+            thread.id to "${thread.lastSenderUid}|${thread.unreadCount}|${thread.lastMessage}"
+        }
+        val prev = baselineThreadSignatures.value
+        if (prev == null) {
+            baselineThreadSignatures.value = currentMap
+            return@LaunchedEffect
+        }
+        val newIncoming = messageThreads.firstOrNull { thread ->
+            val sig = currentMap[thread.id]
+            prev[thread.id] != sig &&
+                thread.isUnreadFor(viewModel.currentUserId) &&
+                thread.lastSenderUid.isNotBlank() &&
+                thread.lastSenderUid != viewModel.currentUserId &&
+                currentRoute?.startsWith("messages") != true
+        }
+        baselineThreadSignatures.value = currentMap
+        if (newIncoming != null) {
+            val senderHandle = newIncoming.peerUsernameFor(viewModel.currentUserId).ifBlank { "Creator" }
+            MomiAlertNotifier.postAlertNotification(
+                context = context,
+                notificationId = ("dm_" + newIncoming.id).hashCode(),
+                title = "Message from @$senderHandle",
+                body = newIncoming.lastMessage.ifBlank { "Sent a new message" },
+                route = "messages",
+                soundEnabled = notificationSoundsEnabled
+            )
+        }
+    }
+
+    val baselineGiftTxIds = remember(viewModel.currentUserId) { mutableStateOf<Set<String>?>(null) }
+    LaunchedEffect(creditTransactions, notificationSoundsEnabled) {
+        val incomingGiftIds = creditTransactions
+            .filter { it.type == CreditTransaction.TYPE_GIFT && it.recipientUid == viewModel.currentUserId && it.senderUid != viewModel.currentUserId }
+            .map { it.id }
+            .toSet()
+        val prev = baselineGiftTxIds.value
+        if (prev == null) {
+            baselineGiftTxIds.value = incomingGiftIds
+            return@LaunchedEffect
+        }
+        val newGift = creditTransactions.firstOrNull {
+            it.id in incomingGiftIds && it.id !in prev
+        }
+        baselineGiftTxIds.value = prev + incomingGiftIds
+        if (newGift != null) {
+            MomiAlertNotifier.postAlertNotification(
+                context = context,
+                notificationId = ("gift_" + newGift.id).hashCode(),
+                title = "Gift received from @${newGift.senderUsername.ifBlank { "Supporter" }}",
+                body = "${newGift.giftName ?: "Gift"} (+${newGift.creditsAmount} credits)",
+                route = LumaRoutes.WALLET,
+                soundEnabled = notificationSoundsEnabled
+            )
+        }
+    }
 
     val billingManager = remember(context) { PlayBillingManager(context) }
     val billingState by billingManager.uiState.collectAsStateWithLifecycle()
@@ -428,6 +556,36 @@ private fun LumaApp(
             navigatePrimaryTab(LumaRoutes.PROFILE)
         } else if (userId.isNotBlank() || username.isNotBlank()) {
             navController.navigate(LumaRoutes.userProfileRoute(userId, username, isShowcase))
+        }
+    }
+
+    fun openHashtagExplore(tag: String) {
+        val clean = tag.trim().removePrefix("#")
+        if (clean.isNotBlank()) {
+            viewModel.setExploreCategory("For You")
+            viewModel.setSearchQuery("#$clean")
+            navigatePrimaryTab(LumaRoutes.EXPLORE)
+        }
+    }
+
+    fun openMentionProfile(username: String) {
+        val clean = username.trim().removePrefix("@")
+        if (clean.isBlank()) return
+        val matched = allCreators.firstOrNull { it.username.equals(clean, ignoreCase = true) }
+        if (matched != null) {
+            openUserProfile(matched.userId, matched.username, false)
+        } else {
+            val showcasePost = allPosts.firstOrNull { it.authorUsername.equals(clean, ignoreCase = true) }
+            if (showcasePost != null) {
+                openUserProfile(
+                    showcasePost.userId,
+                    showcasePost.authorUsername,
+                    showcasePost.id.startsWith("showcase_")
+                )
+            } else {
+                viewModel.setSearchQuery("@$clean")
+                navigatePrimaryTab(LumaRoutes.EXPLORE)
+            }
         }
     }
 
@@ -556,6 +714,11 @@ private fun LumaApp(
                                     }
                                 },
                                 onPostViewed = { viewModel.recordPostView(it.id) },
+                                onPostClick = { post ->
+                                    navController.navigate(LumaRoutes.postDetailRoute(post.id))
+                                },
+                                onHashtagClick = { tag -> openHashtagExplore(tag) },
+                                onMentionClick = { username -> openMentionProfile(username) },
                                 onLikeToggle = { viewModel.toggleLike(it) },
                                 onDoubleTapLike = { viewModel.doubleTapLike(it) },
                                 onCommentClick = { viewModel.openComments(it.id) },
@@ -642,8 +805,10 @@ private fun LumaApp(
                             val startAsStory = backStackEntry.arguments?.getBoolean("story") ?: false
                             CreatePostScreen(
                                 initialModeStory = startAsStory,
+                                creators = allCreators,
+                                currentUserId = viewModel.currentUserId,
                                 onClose = { navController.popBackStack() },
-                                onPublishPost = { imageKey, localPath, extraImagePaths, mediaType, localVideoPath, videoDurationMs, audioTitle, localAudioPath, filter, caption, location, category, isReel, onFinished ->
+                                onPublishPost = { imageKey, localPath, extraImagePaths, mediaType, localVideoPath, videoDurationMs, audioTitle, localAudioPath, filter, aspectRatio, taggedUsernames, hashtags, caption, location, category, isReel, onFinished ->
                                     viewModel.createPost(
                                         context = context,
                                         imageKey = imageKey,
@@ -655,6 +820,9 @@ private fun LumaApp(
                                         audioTitle = audioTitle,
                                         localAudioPath = localAudioPath,
                                         filterTag = filter,
+                                        aspectRatio = aspectRatio,
+                                        taggedUsernames = taggedUsernames,
+                                        hashtags = hashtags,
                                         caption = caption,
                                         location = location,
                                         category = category,
@@ -789,6 +957,32 @@ private fun LumaApp(
                                     openUserProfile(targetUid)
                                 },
                                 appVersionName = BuildConfig.VERSION_NAME,
+                                notificationSoundsEnabled = notificationSoundsEnabled,
+                                canPostSystemNotifications = canPostSystemNotifications,
+                                onToggleNotificationSounds = { enabled ->
+                                    notificationSoundsEnabled = enabled
+                                    AppearancePrefs.setNotificationSoundsEnabled(context, enabled)
+                                    if (enabled) {
+                                        MomiAlertNotifier.playAlertSound(context)
+                                    }
+                                },
+                                onTestAlertSound = {
+                                    MomiAlertNotifier.postAlertNotification(
+                                        context = context,
+                                        notificationId = 9001,
+                                        title = "Momi Alert Sound Check",
+                                        body = "Notification sounds & chimes are active on your device.",
+                                        route = LumaRoutes.NOTIFICATIONS,
+                                        soundEnabled = true
+                                    )
+                                },
+                                onRequestNotificationPermission = {
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                    } else {
+                                        canPostSystemNotifications = MomiAlertNotifier.canPostNotifications(context)
+                                    }
+                                },
                                 onCheckForUpdates = {
                                     viewModel.checkForUpdates(
                                         context = context,
@@ -1041,7 +1235,13 @@ private fun LumaApp(
                             PostDetailScreen(
                                 post = post,
                                 currentUserId = viewModel.currentUserId,
+                                relatedPosts = allPosts.filter { it.id != postId }.take(12),
                                 onBack = { navController.popBackStack() },
+                                onPostClick = { nextPost ->
+                                    navController.navigate(LumaRoutes.postDetailRoute(nextPost.id))
+                                },
+                                onHashtagClick = { tag -> openHashtagExplore(tag) },
+                                onMentionClick = { username -> openMentionProfile(username) },
                                 onLikeToggle = { viewModel.toggleLike(it) },
                                 onDoubleTapLike = { viewModel.doubleTapLike(it) },
                                 onCommentClick = { viewModel.openComments(it.id) },

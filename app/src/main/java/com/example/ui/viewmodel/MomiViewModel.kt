@@ -622,12 +622,16 @@ class MomiViewModel(
                 else -> post.category.equals(category, ignoreCase = true)
             }
             val q = query.trim()
+            val cleanHash = q.removePrefix("#")
+            val cleanAt = q.removePrefix("@")
             val matchesQuery = q.isEmpty() ||
-                post.authorUsername.contains(q, ignoreCase = true) ||
+                post.authorUsername.contains(cleanAt, ignoreCase = true) ||
                 post.authorDisplayName.contains(q, ignoreCase = true) ||
                 post.caption.contains(q, ignoreCase = true) ||
                 post.location.contains(q, ignoreCase = true) ||
-                post.category.contains(q, ignoreCase = true)
+                post.category.contains(q, ignoreCase = true) ||
+                post.allHashtags.any { it.contains(cleanHash, ignoreCase = true) } ||
+                post.allTaggedUsernames.any { it.contains(cleanAt, ignoreCase = true) }
             matchesCategory && matchesQuery
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
@@ -1085,6 +1089,9 @@ class MomiViewModel(
         audioTitle: String,
         localAudioPath: String?,
         filterTag: String,
+        aspectRatio: String = "1:1",
+        taggedUsernames: List<String> = emptyList(),
+        hashtags: List<String> = emptyList(),
         caption: String,
         location: String,
         category: String,
@@ -1093,6 +1100,8 @@ class MomiViewModel(
     ) {
         val currentProfile = fallbackProfile()
         val extraPaths = localExtraImagePaths.filter { it.isNotBlank() }.take(4)
+        val mergedHashtags = MediaAssets.extractHashtags(caption, hashtags)
+        val mergedTags = MediaAssets.extractMentions(caption, taggedUsernames)
         viewModelScope.launch {
             val encodedImage = withContext(Dispatchers.IO) {
                 MediaAssets.encodePrimaryPostImage(localImagePath, hasExtraSlides = extraPaths.isNotEmpty())
@@ -1136,6 +1145,9 @@ class MomiViewModel(
                 localAudioPath = localAudioPath,
                 audioData = encodedAudio,
                 filterTag = filterTag,
+                aspectRatio = aspectRatio,
+                taggedUsernames = mergedTags,
+                hashtags = mergedHashtags,
                 caption = caption,
                 location = location,
                 category = category,

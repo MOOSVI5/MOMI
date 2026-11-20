@@ -1447,3 +1447,48 @@ test("Wallets & CreditTransactions: owner isolation, zero-init, atomic top-up, g
   await assertFails(aliceDb.collection("creditTransactions").doc("tx_topup_1").delete());
 });
 
+// --- 12. Expanded Post Filters, Aspect Ratio, Hashtags & Creator Tagging ---
+
+test("Posts: allows expanded color filters, aspectRatio, taggedUsernames, and hashtags while enforcing bounds", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+
+  await assertSucceeds(
+    aliceDb.collection("posts").doc("post_styled_1").set({
+      ...validPostPayload(ALICE_UID),
+      filterTag: "CINEMA",
+      aspectRatio: "4:5",
+      taggedUsernames: ["bob.lens", "charlie.art"],
+      hashtags: ["momi", "streetstyle", "night"],
+    })
+  );
+
+  // Reject unsupported filterTag or invalid aspectRatio
+  await assertFails(
+    aliceDb.collection("posts").doc("post_bad_filter").set({
+      ...validPostPayload(ALICE_UID),
+      filterTag: "UNKNOWN_FILTER",
+    })
+  );
+  await assertFails(
+    aliceDb.collection("posts").doc("post_bad_ratio").set({
+      ...validPostPayload(ALICE_UID),
+      aspectRatio: "99:1",
+    })
+  );
+
+  // Reject > 10 taggedUsernames or > 15 hashtags
+  await assertFails(
+    aliceDb.collection("posts").doc("post_too_many_tags").set({
+      ...validPostPayload(ALICE_UID),
+      taggedUsernames: Array.from({ length: 11 }, (_, i) => `user${i}`),
+    })
+  );
+  await assertFails(
+    aliceDb.collection("posts").doc("post_too_many_hashtags").set({
+      ...validPostPayload(ALICE_UID),
+      hashtags: Array.from({ length: 16 }, (_, i) => `tag${i}`),
+    })
+  );
+});
+
+

@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -10,6 +12,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -34,11 +38,16 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Collections
+import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Sensors
+import androidx.compose.material.icons.filled.Tag
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.LocationOn
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.VideoLibrary
@@ -51,12 +60,17 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -67,6 +81,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -75,6 +90,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.UserProfile
+import com.example.ui.components.LumaAvatar
 import com.example.ui.components.MomiMusicAudioPlayer
 import com.example.ui.components.MomiVideoPlayer
 import com.example.ui.components.PostMediaImage
@@ -83,19 +100,22 @@ import com.example.util.StudioMusicCatalog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-private val FilterOptions = listOf(
-    "NONE" to "Original",
-    "BLUE" to "Silk Blue",
-    "MAROON" to "Maroon",
-    "MONO" to "Mono"
-)
+import java.io.File
+import java.util.UUID
 
 private val PostCategories = listOf("Travel", "Architecture", "Coffee", "Night", "Minimal")
+private val AspectOptions = listOf("1:1" to 1f, "4:5" to 0.8f, "16:9" to 1.777f)
+private val TrendingHashtagSuggestions = listOf(
+    "momi", "ootd", "travel", "coffee", "streetstyle",
+    "minimal", "nightvibes", "architecture", "aesthetic", "portrait"
+)
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun CreatePostScreen(
     initialModeStory: Boolean = false,
+    creators: List<UserProfile> = emptyList(),
+    currentUserId: String = "",
     onClose: () -> Unit,
     onPublishPost: (
         imageKey: String,
@@ -107,6 +127,9 @@ fun CreatePostScreen(
         audioTitle: String,
         localAudioPath: String?,
         filterTag: String,
+        aspectRatio: String,
+        taggedUsernames: List<String>,
+        hashtags: List<String>,
         caption: String,
         location: String,
         category: String,
@@ -141,12 +164,38 @@ fun CreatePostScreen(
     var localAudioPath by remember { mutableStateOf<String?>(null) }
     var previewMuted by remember { mutableStateOf(false) }
     var selectedFilter by remember { mutableStateOf("NONE") }
+    var selectedAspectRatio by remember { mutableStateOf("1:1") }
+    var rotationDegrees by remember { mutableIntStateOf(0) }
+    var brightness by remember { mutableFloatStateOf(0f) }
+    var contrast by remember { mutableFloatStateOf(1f) }
+    var warmth by remember { mutableFloatStateOf(0f) }
+    var showAdjustSliders by remember { mutableStateOf(false) }
+    var taggedUsernames by remember { mutableStateOf<List<String>>(emptyList()) }
+    var tagSearchQuery by remember { mutableStateOf("") }
+    var selectedHashtags by remember { mutableStateOf<List<String>>(emptyList()) }
+    var customHashtagInput by remember { mutableStateOf("") }
     var caption by remember { mutableStateOf("") }
     var location by remember { mutableStateOf("") }
     var selectedCategory by remember { mutableStateOf("Travel") }
     var shareAsClip by remember { mutableStateOf(false) }
     var isProcessingMedia by remember { mutableStateOf(false) }
     var isPublishing by remember { mutableStateOf(false) }
+
+    val availableCreators = remember(creators, currentUserId) {
+        creators.filter { it.userId != currentUserId && it.username.isNotBlank() }
+    }
+    val liveColorFilter = remember(selectedFilter, brightness, contrast, warmth) {
+        MediaAssets.colorFilterForEdit(
+            filterTag = selectedFilter,
+            brightness = brightness,
+            contrast = contrast,
+            warmth = warmth
+        )
+    }
+    val previewAspectFloat = when {
+        !isStoryMode && mediaType == "IMAGE" -> AspectOptions.firstOrNull { it.first == selectedAspectRatio }?.second ?: 1f
+        else -> 1f
+    }
 
     val multiPhotoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia(5)
@@ -284,22 +333,93 @@ fun CreatePostScreen(
                             isPublishing = false
                         }
                     } else {
-                        onPublishPost(
-                            selectedImageKey,
-                            localImagePath,
-                            localExtraImagePaths,
-                            mediaType,
-                            localVideoPath,
-                            videoDurationMs,
-                            selectedAudioTitle,
-                            localAudioPath,
-                            selectedFilter,
-                            caption.ifBlank { "Captured on Momi #momi" },
-                            location,
-                            selectedCategory,
-                            shareAsClip
-                        ) { _ ->
-                            isPublishing = false
+                        val finalCaption = buildString {
+                            val base = caption.ifBlank { "Captured on Momi" }.trim()
+                            append(base)
+                            val missingTags = selectedHashtags.filter { tag ->
+                                !base.contains("#$tag", ignoreCase = true)
+                            }
+                            if (missingTags.isNotEmpty()) {
+                                append(" ")
+                                append(missingTags.joinToString(" ") { "#$it" })
+                            }
+                        }
+                        val mergedHashtags = MediaAssets.extractHashtags(finalCaption, selectedHashtags)
+                        val mergedMentions = MediaAssets.extractMentions(finalCaption, taggedUsernames)
+
+                        coroutineScope.launch {
+                            var bakedPrimary = localImagePath
+                            var bakedExtras = localExtraImagePaths
+                            if (mediaType == "IMAGE") {
+                                val hasPixelEdit = kotlin.math.abs(brightness) >= 0.01f ||
+                                    kotlin.math.abs(contrast - 1f) >= 0.01f ||
+                                    kotlin.math.abs(warmth) >= 0.01f ||
+                                    rotationDegrees != 0 ||
+                                    selectedAspectRatio != "1:1"
+                                if (hasPixelEdit) {
+                                    bakedPrimary = withContext(Dispatchers.IO) {
+                                        val sourceForEdit = localImagePath ?: run {
+                                            val bmp = BitmapFactory.decodeResource(
+                                                context.resources,
+                                                MediaAssets.drawableForKey(selectedImageKey)
+                                            )
+                                            if (bmp != null) {
+                                                val dir = File(context.cacheDir, "momi_edit_src").apply { mkdirs() }
+                                                val tmp = File(dir, "preset_${UUID.randomUUID()}.jpg")
+                                                tmp.outputStream().use { out ->
+                                                    bmp.compress(Bitmap.CompressFormat.JPEG, 92, out)
+                                                }
+                                                bmp.recycle()
+                                                tmp.absolutePath
+                                            } else null
+                                        }
+                                        MediaAssets.renderEditedImageToFile(
+                                            context = context,
+                                            sourcePath = sourceForEdit,
+                                            brightness = brightness,
+                                            contrast = contrast,
+                                            warmth = warmth,
+                                            rotationDegrees = rotationDegrees,
+                                            targetAspectRatio = selectedAspectRatio
+                                        )
+                                    }
+                                    if (localExtraImagePaths.isNotEmpty()) {
+                                        bakedExtras = withContext(Dispatchers.IO) {
+                                            localExtraImagePaths.map { extraPath ->
+                                                MediaAssets.renderEditedImageToFile(
+                                                    context = context,
+                                                    sourcePath = extraPath,
+                                                    brightness = brightness,
+                                                    contrast = contrast,
+                                                    warmth = warmth,
+                                                    rotationDegrees = rotationDegrees,
+                                                    targetAspectRatio = selectedAspectRatio
+                                                ) ?: extraPath
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            onPublishPost(
+                                selectedImageKey,
+                                bakedPrimary,
+                                bakedExtras,
+                                mediaType,
+                                localVideoPath,
+                                videoDurationMs,
+                                selectedAudioTitle,
+                                localAudioPath,
+                                selectedFilter,
+                                selectedAspectRatio,
+                                mergedMentions,
+                                mergedHashtags,
+                                finalCaption,
+                                location,
+                                selectedCategory,
+                                shareAsClip
+                            ) { _ ->
+                                isPublishing = false
+                            }
                         }
                     }
                 },
@@ -407,7 +527,7 @@ fun CreatePostScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(1f)
+                    .aspectRatio(previewAspectFloat)
                     .clipToBounds()
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center
@@ -442,8 +562,11 @@ fun CreatePostScreen(
                                 imageKey = selectedImageKey,
                                 localImagePath = allSelectedPhotoPaths[page],
                                 filterTag = selectedFilter,
+                                customColorFilter = liveColorFilter,
                                 contentDescription = "Selected photo ${page + 1}",
-                                modifier = Modifier.fillMaxSize()
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .graphicsLayer { rotationZ = rotationDegrees.toFloat() }
                             )
                         }
                         Row(
@@ -493,9 +616,38 @@ fun CreatePostScreen(
                         imageKey = selectedImageKey,
                         localImagePath = localImagePath,
                         filterTag = selectedFilter,
+                        customColorFilter = liveColorFilter,
                         contentDescription = "Selected post preview",
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer { rotationZ = rotationDegrees.toFloat() }
                     )
+                }
+
+                if (!isStoryMode && taggedUsernames.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(12.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.Black.copy(alpha = 0.62f))
+                            .padding(horizontal = 9.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.AlternateEmail,
+                            contentDescription = "Tagged creators",
+                            tint = Color.White,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "${taggedUsernames.size} tagged",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
 
                 if (mediaType != "VIDEO" && hasSelectedMusic) {
@@ -870,36 +1022,224 @@ fun CreatePostScreen(
             if (!isStoryMode && mediaType == "IMAGE") {
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Filter Strip
-                Text(
-                    text = "Color grade",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
-                Spacer(modifier = Modifier.height(8.dp))
+                // Photo Studio Toolbar: Aspect Ratio, Rotate, and Tone Adjustments
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Filled.Tune,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Filters & Photo Studio",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    TextButton(
+                        onClick = { showAdjustSliders = !showAdjustSliders },
+                        modifier = Modifier.testTag("toggle_photo_adjust_button")
+                    ) {
+                        Text(
+                            text = if (showAdjustSliders) "Hide Adjust" else "Adjust Tone",
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    items(FilterOptions) { (tag, label) ->
-                        val active = selectedFilter == tag
-                        Box(
+                    items(MediaAssets.postFilterOptions, key = { it.tag }) { option ->
+                        val active = selectedFilter == option.tag
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(12.dp))
+                                .clickable { selectedFilter = option.tag }
+                                .padding(2.dp)
+                                .testTag("filter_option_${option.tag}")
+                        ) {
+                            PostMediaImage(
+                                imageKey = selectedImageKey,
+                                localImagePath = localImagePath,
+                                filterTag = option.tag,
+                                contentDescription = "${option.label} filter preview",
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .then(
+                                        if (active) Modifier.border(
+                                            2.5.dp,
+                                            MaterialTheme.colorScheme.primary,
+                                            RoundedCornerShape(12.dp)
+                                        ) else Modifier
+                                    )
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = option.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                                color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    AspectOptions.forEach { (label, _) ->
+                        val active = selectedAspectRatio == label
+                        Row(
+                            modifier = Modifier
+                                .heightIn(min = 38.dp)
+                                .clip(RoundedCornerShape(10.dp))
                                 .background(
                                     if (active) MaterialTheme.colorScheme.primary
                                     else MaterialTheme.colorScheme.surfaceVariant
                                 )
-                                .clickable { selectedFilter = tag }
-                                .padding(horizontal = 14.dp, vertical = 8.dp)
+                                .clickable { selectedAspectRatio = label }
+                                .padding(horizontal = 11.dp, vertical = 7.dp)
+                                .testTag("aspect_ratio_$label"),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
+                            Icon(
+                                imageVector = Icons.Filled.Crop,
+                                contentDescription = null,
+                                tint = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
                             Text(
                                 text = label,
                                 style = MaterialTheme.typography.labelMedium,
-                                fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                                fontWeight = FontWeight.Bold,
                                 color = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier
+                            .heightIn(min = 38.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .clickable { rotationDegrees = (rotationDegrees + 90) % 360 }
+                            .padding(horizontal = 11.dp, vertical = 7.dp)
+                            .testTag("rotate_photo_button"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.RotateRight,
+                            contentDescription = "Rotate 90 degrees",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (rotationDegrees == 0) "Rotate" else "${rotationDegrees}°",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+
+                if (showAdjustSliders) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 10.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Brightness", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    text = "${(brightness * 100).toInt()}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            Slider(
+                                value = brightness,
+                                onValueChange = { brightness = it },
+                                valueRange = -0.25f..0.25f,
+                                modifier = Modifier.testTag("edit_brightness_slider")
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Contrast", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    text = "${(contrast * 100).toInt()}%",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            Slider(
+                                value = contrast,
+                                onValueChange = { contrast = it },
+                                valueRange = 0.75f..1.35f,
+                                modifier = Modifier.testTag("edit_contrast_slider")
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Warmth", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    text = "${(warmth * 100).toInt()}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            Slider(
+                                value = warmth,
+                                onValueChange = { warmth = it },
+                                valueRange = -0.30f..0.30f,
+                                modifier = Modifier.testTag("edit_warmth_slider")
+                            )
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                TextButton(
+                                    onClick = {
+                                        brightness = 0f
+                                        contrast = 1f
+                                        warmth = 0f
+                                        rotationDegrees = 0
+                                        selectedAspectRatio = "1:1"
+                                        selectedFilter = "NONE"
+                                    }
+                                ) {
+                                    Text("Reset Edits")
+                                }
+                            }
                         }
                     }
                 }
@@ -911,7 +1251,7 @@ fun CreatePostScreen(
             OutlinedTextField(
                 value = caption,
                 onValueChange = { caption = it },
-                placeholder = { Text(if (isStoryMode) "Add a story note..." else "Write a caption...") },
+                placeholder = { Text(if (isStoryMode) "Add a story note..." else "Write a note or caption (#hashtags @mentions work)...") },
                 minLines = 2,
                 maxLines = 4,
                 shape = RoundedCornerShape(14.dp),
@@ -920,6 +1260,203 @@ fun CreatePostScreen(
                     .padding(horizontal = 16.dp)
                     .testTag("caption_input_field")
             )
+
+            if (!isStoryMode) {
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Hashtags Section
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Tag,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Hashtags",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = customHashtagInput,
+                        onValueChange = { customHashtagInput = it },
+                        placeholder = { Text("Add #hashtag") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("hashtag_input_field")
+                    )
+                    Button(
+                        onClick = {
+                            val clean = customHashtagInput.trim().removePrefix("#").lowercase()
+                                .replace(Regex("[^a-z0-9_]"), "")
+                            if (clean.isNotBlank() && !selectedHashtags.contains(clean)) {
+                                selectedHashtags = (selectedHashtags + clean).take(15)
+                            }
+                            customHashtagInput = ""
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .testTag("add_hashtag_button")
+                    ) {
+                        Text("Add", fontWeight = FontWeight.Bold)
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val allChips = (selectedHashtags + TrendingHashtagSuggestions).distinct()
+                    items(allChips, key = { "hash_opt_$it" }) { tag ->
+                        val active = selectedHashtags.contains(tag)
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(
+                                    if (active) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.surfaceVariant
+                                )
+                                .clickable {
+                                    selectedHashtags = if (active) {
+                                        selectedHashtags - tag
+                                    } else {
+                                        (selectedHashtags + tag).take(15)
+                                    }
+                                }
+                                .padding(horizontal = 12.dp, vertical = 7.dp)
+                                .testTag("hashtag_chip_$tag")
+                        ) {
+                            Text(
+                                text = "#$tag",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                                color = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
+                // Tag Creators Section
+                if (availableCreators.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Filled.AlternateEmail,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Tag Creators",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        if (taggedUsernames.isNotEmpty()) {
+                            Text(
+                                text = "${taggedUsernames.size}/10 tagged",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                    if (availableCreators.size > 4) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        OutlinedTextField(
+                            value = tagSearchQuery,
+                            onValueChange = { tagSearchQuery = it },
+                            placeholder = { Text("Filter creators by @username") },
+                            singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp)
+                                .testTag("tag_creator_search")
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    val filteredCreators = remember(availableCreators, tagSearchQuery) {
+                        val q = tagSearchQuery.trim().removePrefix("@")
+                        if (q.isEmpty()) availableCreators else availableCreators.filter {
+                            it.username.contains(q, ignoreCase = true) ||
+                                it.displayName.contains(q, ignoreCase = true)
+                        }
+                    }
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(filteredCreators.take(20), key = { "tag_user_${it.userId}" }) { creator ->
+                            val handle = creator.username.lowercase()
+                            val active = taggedUsernames.contains(handle)
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        if (active) MaterialTheme.colorScheme.primaryContainer
+                                        else MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                    .border(
+                                        width = if (active) 1.5.dp else 0.dp,
+                                        color = if (active) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                        shape = RoundedCornerShape(12.dp)
+                                    )
+                                    .clickable {
+                                        taggedUsernames = if (active) {
+                                            taggedUsernames - handle
+                                        } else {
+                                            (taggedUsernames + handle).take(10)
+                                        }
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                                    .testTag("tag_creator_${creator.username}"),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                LumaAvatar(
+                                    username = creator.username,
+                                    avatarKey = creator.avatarKey,
+                                    avatarData = creator.avatarData,
+                                    size = 24.dp
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "@${creator.username}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
 
             if (!isStoryMode) {
                 Spacer(modifier = Modifier.height(12.dp))

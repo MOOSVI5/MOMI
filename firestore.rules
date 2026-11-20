@@ -109,7 +109,10 @@ service cloud.firestore {
              (!('videoData' in data) || data.videoData == null || (data.videoData is string && data.videoData.size() <= 700000)) &&
              (!('videoChunksCount' in data) || data.videoChunksCount == null || (data.videoChunksCount is int && data.videoChunksCount >= 0 && data.videoChunksCount <= 25)) &&
              (!('videoDurationMs' in data) || data.videoDurationMs == null || (data.videoDurationMs is int && data.videoDurationMs >= 0 && data.videoDurationMs <= 3600000)) &&
-             data.filterTag is string && data.filterTag in ['NONE', 'BLUE', 'MAROON', 'MONO'] &&
+             data.filterTag is string && data.filterTag in ['NONE', 'BLUE', 'MAROON', 'MONO', 'WARM', 'VINTAGE', 'VIVID', 'NOIR', 'CINEMA', 'PASTEL'] &&
+             (!('aspectRatio' in data) || data.aspectRatio == null || (data.aspectRatio is string && data.aspectRatio in ['1:1', '4:5', '16:9'])) &&
+             (!('taggedUsernames' in data) || data.taggedUsernames == null || (data.taggedUsernames is list && data.taggedUsernames.size() <= 10 && (data.taggedUsernames.size() == 0 || (data.taggedUsernames[0] is string && data.taggedUsernames[0].size() <= 50)))) &&
+             (!('hashtags' in data) || data.hashtags == null || (data.hashtags is list && data.hashtags.size() <= 15 && (data.hashtags.size() == 0 || (data.hashtags[0] is string && data.hashtags[0].size() <= 40)))) &&
              data.caption is string && data.caption.size() <= 1000 &&
              data.likesCount is int && data.likesCount >= 0 &&
              (!('viewsCount' in data) || data.viewsCount == null || (data.viewsCount is int && data.viewsCount >= 0)) &&
@@ -560,7 +563,7 @@ service cloud.firestore {
                        isValidId(postId) &&
                        incoming().userId == request.auth.uid &&
                        incoming().keys().hasAll(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'imageKey', 'filterTag', 'caption', 'likesCount', 'commentsCount', 'category', 'isReel', 'createdAt']) &&
-                       incoming().keys().hasOnly(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'location', 'imageKey', 'localImagePath', 'imageData', 'localExtraImagePaths', 'extraImageDatas', 'mediaType', 'localVideoPath', 'videoData', 'videoChunksCount', 'videoDurationMs', 'localAudioPath', 'audioData', 'filterTag', 'caption', 'likesCount', 'viewsCount', 'commentsCount', 'category', 'isReel', 'audioTitle', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'authorUsername', 'authorDisplayName', 'authorAvatarKey', 'authorVerified', 'location', 'imageKey', 'localImagePath', 'imageData', 'localExtraImagePaths', 'extraImageDatas', 'mediaType', 'localVideoPath', 'videoData', 'videoChunksCount', 'videoDurationMs', 'localAudioPath', 'audioData', 'filterTag', 'aspectRatio', 'taggedUsernames', 'hashtags', 'caption', 'likesCount', 'viewsCount', 'commentsCount', 'category', 'isReel', 'audioTitle', 'createdAt', 'updatedAt']) &&
                        isValidPost(incoming());
 
       allow update: if isSignedIn() &&
@@ -569,7 +572,7 @@ service cloud.firestore {
                        incoming().userId == existing().userId &&
                        incoming().createdAt == existing().createdAt &&
                        (
-                         (existing().userId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['caption', 'location', 'updatedAt'])) ||
+                         (existing().userId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['caption', 'location', 'taggedUsernames', 'hashtags', 'updatedAt'])) ||
                          (incoming().diff(existing()).affectedKeys().hasOnly(['likesCount', 'updatedAt']) &&
                            (incoming().likesCount == existing().likesCount + 1 || incoming().likesCount == existing().likesCount - 1)) ||
                          (incoming().diff(existing()).affectedKeys().hasOnly(['viewsCount', 'updatedAt']) &&

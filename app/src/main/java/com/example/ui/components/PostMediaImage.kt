@@ -4,6 +4,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import coil.compose.AsyncImage
@@ -18,9 +19,10 @@ fun PostMediaImage(
     contentDescription: String,
     modifier: Modifier = Modifier,
     imageData: String? = null,
-    contentScale: ContentScale = ContentScale.Crop
+    contentScale: ContentScale = ContentScale.Crop,
+    customColorFilter: ColorFilter? = null
 ) {
-    val colorFilter = MediaAssets.colorFilterForTag(filterTag)
+    val colorFilter = customColorFilter ?: MediaAssets.colorFilterForTag(filterTag)
     val decodedBytes = remember(imageData) { MediaAssets.decodeBase64ToBytes(imageData) }
 
     when {

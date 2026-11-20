@@ -55,6 +55,8 @@ object AppearancePrefs {
     private const val KEY_COLOR_SCHEME = "color_scheme"
     private const val KEY_ADMIN_VIEW_MODE = "owner_admin_view_mode"
     private const val KEY_AUTO_SIGN_IN = "stay_signed_in_auto"
+    private const val KEY_NOTIFICATION_SOUNDS = "notification_sounds_enabled"
+    private const val KEY_NOTIF_PERM_PROMPTED = "notification_permission_prompted"
 
     fun loadThemePreference(context: Context): ThemePreference {
         val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -105,6 +107,30 @@ object AppearancePrefs {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_AUTO_SIGN_IN, enabled)
+            .apply()
+    }
+
+    fun isNotificationSoundsEnabled(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_NOTIFICATION_SOUNDS, true)
+    }
+
+    fun setNotificationSoundsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_NOTIFICATION_SOUNDS, enabled)
+            .apply()
+    }
+
+    fun hasPromptedNotificationPermission(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_NOTIF_PERM_PROMPTED, false)
+    }
+
+    fun markNotificationPermissionPrompted(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_NOTIF_PERM_PROMPTED, true)
             .apply()
     }
 }

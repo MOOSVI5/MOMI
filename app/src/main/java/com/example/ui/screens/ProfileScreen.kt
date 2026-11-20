@@ -21,8 +21,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.outlined.Logout
@@ -36,6 +38,7 @@ import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
@@ -45,6 +48,7 @@ import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Toll
 import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.LightMode
@@ -152,6 +156,11 @@ fun ProfileScreen(
     onMessageCreator: (UserProfile) -> Unit,
     onOpenUserProfile: (String) -> Unit = {},
     appVersionName: String = "",
+    notificationSoundsEnabled: Boolean = true,
+    canPostSystemNotifications: Boolean = true,
+    onToggleNotificationSounds: (Boolean) -> Unit = {},
+    onTestAlertSound: () -> Unit = {},
+    onRequestNotificationPermission: () -> Unit = {},
     onCheckForUpdates: () -> Unit = {},
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier
@@ -344,6 +353,7 @@ fun ProfileScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
                     .padding(horizontal = 20.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
@@ -455,6 +465,83 @@ fun ProfileScreen(
                                             overflow = TextOverflow.Ellipsis
                                         )
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Alerts & Notification Sounds
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.NotificationsActive,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Alert Sounds & Chimes",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Play sound & vibration for new messages, activity & gifts",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = notificationSoundsEnabled,
+                                onCheckedChange = onToggleNotificationSounds,
+                                modifier = Modifier.testTag("notification_sounds_switch")
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = onTestAlertSound,
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = 48.dp)
+                                    .testTag("test_alert_sound_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Test Sound", fontWeight = FontWeight.SemiBold, maxLines = 1)
+                            }
+                            if (!canPostSystemNotifications) {
+                                OutlinedButton(
+                                    onClick = onRequestNotificationPermission,
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .heightIn(min = 48.dp)
+                                        .testTag("enable_system_alerts_button")
+                                ) {
+                                    Text("Enable Alerts", fontWeight = FontWeight.Bold, maxLines = 1)
                                 }
                             }
                         }

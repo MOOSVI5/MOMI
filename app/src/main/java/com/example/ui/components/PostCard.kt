@@ -14,6 +14,8 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -35,6 +37,7 @@ import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
@@ -63,10 +66,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -74,13 +80,18 @@ import com.example.data.model.Post
 import com.example.util.MediaAssets
 import kotlinx.coroutines.delay
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun PostCard(
     post: Post,
     isOwnPost: Boolean,
     isPlaybackActive: Boolean = false,
+    isDetailMode: Boolean = false,
     externalMuted: Boolean? = null,
     onMuteChange: ((Boolean) -> Unit)? = null,
+    onPostClick: () -> Unit = {},
+    onHashtagClick: (String) -> Unit = {},
+    onMentionClick: (String) -> Unit = {},
     onLikeToggle: () -> Unit,
     onDoubleTapLike: () -> Unit,
     onCommentClick: () -> Unit,
@@ -94,7 +105,7 @@ fun PostCard(
 ) {
     var showDoubleTapHeart by remember { mutableStateOf(false) }
     var menuExpanded by remember { mutableStateOf(false) }
-    var captionExpanded by remember { mutableStateOf(false) }
+    var captionExpanded by remember(post.id, isDetailMode) { mutableStateOf(isDetailMode) }
 
     LaunchedEffect(showDoubleTapHeart) {
         if (showDoubleTapHeart) {
@@ -268,8 +279,8 @@ fun PostCard(
             }
         }
 
-        // Edge-to-Edge Media with Double-Tap Coral Heart (Carousel HorizontalPager for multi-image posts, ExoPlayer for Videos, Audio for Photo+Music)
-        val mediaAspectRatio = if (post.isVideoPost) 0.85f else 1f
+        // Edge-to-Edge Media with Single-Tap Open Post, Double-Tap Coral Heart, Carousel Pager, ExoPlayer, Audio for Photo+Music
+        val mediaAspectRatio = post.numericAspectRatio
         val imageFrames = remember(post.id, post.imageKey, post.localImagePath, post.imageData, post.localExtraImagePaths, post.extraImageDatas) {
             post.allImageFrames
         }
@@ -298,12 +309,15 @@ fun PostCard(
                 .aspectRatio(mediaAspectRatio)
                 .clipToBounds()
                 .background(if (post.isVideoPost) Color.Black else MaterialTheme.colorScheme.surfaceVariant)
+                .testTag("post_media_${post.id}")
                 .let { base ->
                     if (!post.isVideoPost) {
-                        base.pointerInput(post.id, hasPhotoMusic, isPhotoMuted) {
+                        base.pointerInput(post.id, isDetailMode, hasPhotoMusic, isPhotoMuted) {
                             detectTapGestures(
                                 onTap = {
-                                    if (hasPhotoMusic) {
+                                    if (!isDetailMode) {
+                                        onPostClick()
+                                    } else if (hasPhotoMusic) {
                                         val nextMuted = !isPhotoMuted
                                         if (onMuteChange != null) onMuteChange(nextMuted) else localPhotoMuted = nextMuted
                                     }
@@ -443,7 +457,38 @@ fun PostCard(
                 }
             }
 
+            if (!isDetailMode && post.isVideoPost) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(12.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color.Black.copy(alpha = 0.62f))
+                        .clickable(onClick = onPostClick)
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .testTag("open_post_pill_${post.id}"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.OpenInFull,
+                        contentDescription = "Open post",
+                        tint = Color.White,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Text(
+                        text = "Open",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+
             if (post.filterTag != "NONE") {
+                val filterLabel = MediaAssets.postFilterOptions
+                    .firstOrNull { it.tag == post.filterTag }?.label
+                    ?: post.filterTag.lowercase().replaceFirstChar { it.uppercase() }
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -453,7 +498,7 @@ fun PostCard(
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
                     Text(
-                        text = post.filterTag.lowercase().replaceFirstChar { it.uppercase() },
+                        text = filterLabel,
                         color = Color.White,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold
@@ -585,20 +630,65 @@ fun PostCard(
 
             val primaryColor = MaterialTheme.colorScheme.primary
             val onBgColor = MaterialTheme.colorScheme.onBackground
-            val annotatedCaption = buildAnnotatedString {
-                withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = onBgColor)) {
-                    append(post.authorUsername)
-                    append("  ")
-                }
-                post.caption.split(" ").forEachIndexed { index, word ->
-                    if (index > 0) append(" ")
-                    if (word.startsWith("#") || word.startsWith("@")) {
-                        withStyle(SpanStyle(color = primaryColor, fontWeight = FontWeight.Medium)) {
-                            append(word)
+            val annotatedCaption = remember(post.id, post.authorUsername, post.caption, primaryColor, onBgColor) {
+                buildAnnotatedString {
+                    withLink(
+                        LinkAnnotation.Clickable(
+                            tag = "author_${post.authorUsername}",
+                            styles = TextLinkStyles(
+                                style = SpanStyle(fontWeight = FontWeight.Bold, color = onBgColor)
+                            )
+                        ) {
+                            onAuthorClick()
                         }
-                    } else {
+                    ) {
+                        append(post.authorUsername)
+                    }
+                    append("  ")
+
+                    val tokenRegex = Regex("(#\\w+|@[a-zA-Z0-9._]+)")
+                    var cursor = 0
+                    for (match in tokenRegex.findAll(post.caption)) {
+                        if (match.range.first > cursor) {
+                            withStyle(SpanStyle(color = onBgColor)) {
+                                append(post.caption.substring(cursor, match.range.first))
+                            }
+                        }
+                        val token = match.value
+                        if (token.startsWith("#")) {
+                            val tagValue = token.removePrefix("#")
+                            withLink(
+                                LinkAnnotation.Clickable(
+                                    tag = "hash_$tagValue",
+                                    styles = TextLinkStyles(
+                                        style = SpanStyle(color = primaryColor, fontWeight = FontWeight.SemiBold)
+                                    )
+                                ) {
+                                    onHashtagClick(tagValue)
+                                }
+                            ) {
+                                append(token)
+                            }
+                        } else {
+                            val mentionValue = token.removePrefix("@")
+                            withLink(
+                                LinkAnnotation.Clickable(
+                                    tag = "mention_$mentionValue",
+                                    styles = TextLinkStyles(
+                                        style = SpanStyle(color = primaryColor, fontWeight = FontWeight.SemiBold)
+                                    )
+                                ) {
+                                    onMentionClick(mentionValue)
+                                }
+                            ) {
+                                append(token)
+                            }
+                        }
+                        cursor = match.range.last + 1
+                    }
+                    if (cursor < post.caption.length) {
                         withStyle(SpanStyle(color = onBgColor)) {
-                            append(word)
+                            append(post.caption.substring(cursor))
                         }
                     }
                 }
@@ -609,8 +699,67 @@ fun PostCard(
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = if (captionExpanded) Int.MAX_VALUE else 2,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.clickable { captionExpanded = !captionExpanded }
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        if (!isDetailMode && !captionExpanded) {
+                            captionExpanded = true
+                        } else if (!isDetailMode) {
+                            onPostClick()
+                        }
+                    }
             )
+
+            val extraTaggedUsers = remember(post.taggedUsernames, post.caption) {
+                post.taggedUsernames
+                    .map { it.trim().removePrefix("@") }
+                    .filter { it.isNotBlank() && !post.caption.contains("@$it", ignoreCase = true) }
+            }
+            val extraHashtags = remember(post.hashtags, post.caption) {
+                post.hashtags
+                    .map { it.trim().removePrefix("#") }
+                    .filter { it.isNotBlank() && !post.caption.contains("#$it", ignoreCase = true) }
+            }
+            if (extraTaggedUsers.isNotEmpty() || extraHashtags.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    extraTaggedUsers.forEach { handle ->
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f))
+                                .clickable { onMentionClick(handle) }
+                                .padding(horizontal = 9.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = "@$handle",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                        }
+                    }
+                    extraHashtags.forEach { tag ->
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f))
+                                .clickable { onHashtagClick(tag) }
+                                .padding(horizontal = 9.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = "#$tag",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                }
+            }
 
             if (post.commentsCount > 0) {
                 Spacer(modifier = Modifier.height(4.dp))
