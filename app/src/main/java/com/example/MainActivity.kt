@@ -255,6 +255,7 @@ private fun AppNavigation(
             LaunchedEffect(viewModel) {
                 viewModel.loadAppearance(context)
                 viewModel.checkForUpdates(
+                    context = context,
                     manual = false,
                     isPlayStoreInstall = AppUpdateChecker.isInstalledFromGooglePlay(context)
                 )
@@ -790,6 +791,7 @@ private fun LumaApp(
                                 appVersionName = BuildConfig.VERSION_NAME,
                                 onCheckForUpdates = {
                                     viewModel.checkForUpdates(
+                                        context = context,
                                         manual = true,
                                         isPlayStoreInstall = AppUpdateChecker.isInstalledFromGooglePlay(context)
                                     )
@@ -1182,7 +1184,7 @@ private fun LumaApp(
 
     availableUpdate?.let { update ->
         AlertDialog(
-            onDismissRequest = viewModel::dismissAvailableUpdate,
+            onDismissRequest = { viewModel.dismissAvailableUpdate(context) },
             icon = {
                 Icon(
                     imageVector = Icons.Filled.SystemUpdate,
@@ -1220,7 +1222,7 @@ private fun LumaApp(
             confirmButton = {
                 Button(
                     onClick = {
-                        viewModel.dismissAvailableUpdate()
+                        viewModel.dismissAvailableUpdate(context)
                         runCatching {
                             context.startActivity(
                                 Intent(Intent.ACTION_VIEW, Uri.parse(update.downloadUrl))
@@ -1232,7 +1234,7 @@ private fun LumaApp(
                 }
             },
             dismissButton = {
-                TextButton(onClick = viewModel::dismissAvailableUpdate) {
+                TextButton(onClick = { viewModel.dismissAvailableUpdate(context) }) {
                     Text("Later")
                 }
             }

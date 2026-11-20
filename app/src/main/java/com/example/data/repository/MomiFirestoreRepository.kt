@@ -343,20 +343,19 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                 handleFirestoreError(e, OperationType.CREATE, profileRef.path)
                 throw e
             }
-        }
+            // Seed starter showcase posts only when onboarding a newly created profile
+            val existingAnyPost = try {
+                postsCol().limit(1).get().await()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.LIST, postsCol().path)
+                throw e
+            }
 
-        // Seed starter showcase posts only once if the global feed has zero posts yet
-        val existingAnyPost = try {
-            postsCol().limit(1).get().await()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.LIST, postsCol().path)
-            throw e
-        }
-
-        if (existingAnyPost.isEmpty) {
-            seedGlobalShowcasePosts(uid)
+            if (existingAnyPost.isEmpty) {
+                seedGlobalShowcasePosts(uid)
+            }
         }
     }
 
@@ -1788,17 +1787,17 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     }
 
     companion object {
-        const val POSTS_LIMIT = 40L
-        const val STORIES_LIMIT = 30L
-        const val PROFILES_LIMIT = 80L
-        const val FOLLOWS_LIMIT = 250L
-        const val MARKERS_LIMIT = 200L
-        const val NOTIFICATIONS_LIMIT = 40L
-        const val THREADS_LIMIT = 30L
-        const val MESSAGES_LIMIT = 100L
-        const val REPORTS_LIMIT = 50L
-        const val COMMENTS_LIMIT = 80L
-        const val LIVE_STREAMS_LIMIT = 20L
-        const val LIVE_COMMENTS_LIMIT = 80L
+        const val POSTS_LIMIT = 20L
+        const val STORIES_LIMIT = 15L
+        const val PROFILES_LIMIT = 30L
+        const val FOLLOWS_LIMIT = 100L
+        const val MARKERS_LIMIT = 80L
+        const val NOTIFICATIONS_LIMIT = 20L
+        const val THREADS_LIMIT = 20L
+        const val MESSAGES_LIMIT = 50L
+        const val REPORTS_LIMIT = 25L
+        const val COMMENTS_LIMIT = 40L
+        const val LIVE_STREAMS_LIMIT = 10L
+        const val LIVE_COMMENTS_LIMIT = 40L
     }
 }

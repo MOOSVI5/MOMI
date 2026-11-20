@@ -122,6 +122,7 @@ class MomiViewModel(
 
     // In-memory stream caches so quota/transient errors NEVER wipe visible posts, profiles, or orders
     private val cachedFollows = MutableStateFlow<List<FollowEdge>>(emptyList())
+    private val cachedProfile = MutableStateFlow<UserProfile?>(null)
     private val cachedProfiles = MutableStateFlow<List<UserProfile>>(emptyList())
     private val cachedRawPosts = MutableStateFlow<List<Post>>(emptyList())
     private val lastKnownEnrichedPosts = MutableStateFlow<List<Post>>(emptyList())
@@ -145,6 +146,7 @@ class MomiViewModel(
 
     @Volatile private var hasNotifiedQuotaError = false
     @Volatile private var quotaCooldownUntilMs = 0L
+    @Volatile private var hasAutoCheckedUpdatesInSession = false
 
     // Optimistic UI overlays so likes, bookmarks, follows, and comments respond in 0ms
     private val optimisticPostLikes = MutableStateFlow<Map<String, Boolean>>(emptyMap())
@@ -162,7 +164,15 @@ class MomiViewModel(
                 displayNameHint = initialDisplayName,
                 emailHint = initialEmail
             ).onFailure { error ->
-                _errorMessage.value = unwrapErrorMessage(error, "Failed to initialize Momi profile")
+                if (isQuotaExceeded(error)) {
+                    quotaCooldownUntilMs = System.currentTimeMillis() + QUOTA_RETRY_COOLDOWN_MS
+                    if (!hasNotifiedQuotaError) {
+                        hasNotifiedQuotaError = true
+                        _statusNotice.value = QUOTA_FRIENDLY_MESSAGE
+                    }
+                } else {
+                    _errorMessage.value = unwrapErrorMessage(error, "Failed to initialize Momi profile")
+                }
             }
             walletRepository.ensureWalletInitialized().onFailure { error ->
                 Log.w(TAG, "Wallet initialization deferred", error)
@@ -172,6 +182,9 @@ class MomiViewModel(
             walletRepository.observeUnclaimedGifts(currentUserId)
                 .catch { error ->
                     val root = unwrapOrRethrowCancellation(error)
+                    if (isQuotaExceeded(root)) {
+                        quotaCooldownUntilMs = System.currentTimeMillis() + QUOTA_RETRY_COOLDOWN_MS
+                    }
                     Log.w(TAG, "Error observing unclaimed gifts", root)
                 }
                 .collect { pendingGifts ->
@@ -187,7 +200,6 @@ class MomiViewModel(
                     }
                 }
         }
-        checkForUpdates(manual = false)
     }
 
     private fun <T> Flow<T>.resilientWithCache(
@@ -211,7 +223,7 @@ class MomiViewModel(
 
     private val rawFollows: StateFlow<List<FollowEdge>> = repository.observeFollows(currentUserId)
         .resilientWithCache(cachedFollows, "follows")
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val follows: StateFlow<List<FollowEdge>> = combine(
         rawFollows,
@@ -241,13 +253,13 @@ class MomiViewModel(
             }
             baseList
         }
-    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val followingUids: StateFlow<Set<String>> = follows
         .map { edges ->
             edges.filter { it.followerUid == currentUserId }.map { it.targetUid }.toSet()
         }
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptySet())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
 
     val allProfiles: StateFlow<List<UserProfile>> = combine(
         repository.observeAllProfiles(currentUserId)
@@ -266,30 +278,39 @@ class MomiViewModel(
             Log.w(TAG, "Error combining creators", root)
             emit(cachedProfiles.value)
         }
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val profileState: StateFlow<StreamUiState<UserProfile?>> = combine(
-        repository.observeProfile(currentUserId),
+        repository.observeProfile(currentUserId)
+            .resilientWithCache(cachedProfile, "profile"),
         follows
     ) { rawProfile, allFollows ->
-        val hydrated = rawProfile?.let { p ->
-            p.copy(
-                followersCount = allFollows.count { it.targetUid == currentUserId }.toLong(),
-                followingCount = allFollows.count { it.followerUid == currentUserId }.toLong()
-            )
-        }
+        val resolved = rawProfile ?: cachedProfile.value ?: fallbackProfileBase()
+        val hydrated = resolved.copy(
+            followersCount = allFollows.count { it.targetUid == currentUserId }.toLong(),
+            followingCount = allFollows.count { it.followerUid == currentUserId }.toLong()
+        )
         StreamUiState.Success(hydrated) as StreamUiState<UserProfile?>
     }
         .catch { error ->
             val root = unwrapOrRethrowCancellation(error)
             Log.w(TAG, "Error observing profile", root)
-            emit(StreamUiState.Error(unwrapErrorMessage(root, "Failed to load profile")))
+            val recovered = cachedProfile.value ?: fallbackProfileBase()
+            emit(StreamUiState.Success(recovered))
         }
-        .stateIn(viewModelScope, SharingStarted.Lazily, StreamUiState.Loading)
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+            StreamUiState.Success(fallbackProfileBase())
+        )
 
     val profile: StateFlow<UserProfile?> = profileState
-        .map { (it as? StreamUiState.Success)?.data }
-        .stateIn(viewModelScope, SharingStarted.Lazily, null)
+        .map { (it as? StreamUiState.Success)?.data ?: cachedProfile.value ?: fallbackProfileBase() }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+            fallbackProfileBase()
+        )
 
     val currentUserRole: StateFlow<String> = combine(profile, isAdminModeActive) { prof, adminActive ->
         when {
@@ -301,7 +322,7 @@ class MomiViewModel(
         }
     }.stateIn(
         viewModelScope,
-        SharingStarted.Lazily,
+        SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
         if (isOwnerAccount) MomiRoles.ADMIN else MomiRoles.USER
     )
 
@@ -315,7 +336,7 @@ class MomiViewModel(
         }
     }.stateIn(
         viewModelScope,
-        SharingStarted.Lazily,
+        SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
         if (isOwnerAccount) ModerationScopes.ALL_SCOPES.toSet() else emptySet()
     )
 
@@ -326,7 +347,7 @@ class MomiViewModel(
     ) { adminActive, role, scopes ->
         adminActive || (role in setOf(MomiRoles.MODERATOR, MomiRoles.EDITOR) &&
             scopes.any { it in ModerationScopes.SURVEILLANCE_SCOPES })
-    }.stateIn(viewModelScope, SharingStarted.Lazily, isOwnerAccount)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), isOwnerAccount)
 
     val canCurateMarketplace: StateFlow<Boolean> = combine(
         isAdminModeActive,
@@ -334,7 +355,7 @@ class MomiViewModel(
         currentModerationScopes
     ) { adminActive, role, scopes ->
         adminActive || (role == MomiRoles.EDITOR && scopes.contains(ModerationScopes.EDITORIAL_CURATION))
-    }.stateIn(viewModelScope, SharingStarted.Lazily, isOwnerAccount)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), isOwnerAccount)
 
     val contentReports: StateFlow<List<ContentReport>> = canAccessModerationQueue
         .flatMapLatest { canView ->
@@ -345,7 +366,7 @@ class MomiViewModel(
                     .resilientWithCache(cachedContentReports, "contentReports")
             }
         }
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val openReportsCount: StateFlow<Int> = combine(
         contentReports,
@@ -355,23 +376,23 @@ class MomiViewModel(
         reports.count { report ->
             report.status == "OPEN" && (adminActive || scopes.contains(report.category))
         }
-    }.stateIn(viewModelScope, SharingStarted.Lazily, 0)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), 0)
 
     private val likedPostIds: StateFlow<Set<String>> = repository.observeLikedPostIds(currentUserId)
         .resilientWithCache(cachedLikedPostIds, "likedPosts")
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptySet())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
 
     private val bookmarkedPostIds: StateFlow<Set<String>> = repository.observeBookmarkedPostIds(currentUserId)
         .resilientWithCache(cachedBookmarkedPostIds, "bookmarks")
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptySet())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
 
     private val seenStoryIds: StateFlow<Set<String>> = repository.observeSeenStoryIds(currentUserId)
         .resilientWithCache(cachedSeenStoryIds, "seenStories")
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptySet())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
 
     private val likedCommentIds: StateFlow<Set<String>> = repository.observeLikedCommentIds(currentUserId)
         .resilientWithCache(cachedLikedCommentIds, "likedComments")
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptySet())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
 
     private val postBaseStreams = combine(
         repository.observeAllPosts(currentUserId)
@@ -444,7 +465,7 @@ class MomiViewModel(
                 emit(StreamUiState.Error(fallbackMsg))
             }
         }
-        .stateIn(viewModelScope, SharingStarted.Lazily, StreamUiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), StreamUiState.Loading)
 
     val allPosts: StateFlow<List<Post>> = allPostsState
         .map { state ->
@@ -453,11 +474,11 @@ class MomiViewModel(
                 is StreamUiState.Loading, is StreamUiState.Error -> lastKnownEnrichedPosts.value
             }
         }
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val reels: StateFlow<List<Post>> = allPosts
         .map { list -> list.filter { it.isReel } }
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val stories: StateFlow<List<Story>> = combine(
         repository.observeStories(currentUserId)
@@ -486,7 +507,7 @@ class MomiViewModel(
             Log.w(TAG, "Error combining stories", root)
             emit(cachedStories.value)
         }
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val activeLiveStreams: StateFlow<List<LiveStream>> = combine(
         repository.observeActiveLiveStreams(currentUserId)
@@ -507,7 +528,7 @@ class MomiViewModel(
             Log.w(TAG, "Error combining live streams", root)
             emit(cachedLiveStreams.value)
         }
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val notifications: StateFlow<List<NotificationItem>> = combine(
         repository.observeNotifications(currentUserId)
@@ -527,25 +548,25 @@ class MomiViewModel(
             Log.w(TAG, "Error combining notifications", root)
             emit(cachedNotifications.value)
         }
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val unreadNotificationCount: StateFlow<Int> = notifications
         .map { list -> list.count { it.isUnread } }
-        .stateIn(viewModelScope, SharingStarted.Lazily, 0)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), 0)
 
     val messageThreads: StateFlow<List<MessageThread>> = repository.observeMessageThreads(currentUserId)
         .resilientWithCache(cachedThreads, "messageThreads")
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val unreadMessageCount: StateFlow<Int> = messageThreads
         .map { list ->
             list.filter { it.isUnreadFor(currentUserId) }.sumOf { it.unreadCount.toInt() }
         }
-        .stateIn(viewModelScope, SharingStarted.Lazily, 0)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), 0)
 
     val merchants: StateFlow<List<MerchantAccount>> = marketplaceRepository.observeMerchants(currentUserId)
         .resilientWithCache(cachedMerchants, "merchants")
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val marketProducts: StateFlow<List<MarketProduct>> = combine(
         marketplaceRepository.observeProducts(currentUserId)
@@ -563,19 +584,19 @@ class MomiViewModel(
             Log.w(TAG, "Error combining marketplace products", root)
             emit(cachedProducts.value)
         }
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val marketOrders: StateFlow<List<MarketOrder>> = marketplaceRepository.observeOrdersForUser(currentUserId)
         .resilientWithCache(cachedOrders, "marketOrders")
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val wallet: StateFlow<UserWallet?> = walletRepository.observeWallet(currentUserId)
         .resilientWithCache(cachedWallet, "wallet")
-        .stateIn(viewModelScope, SharingStarted.Lazily, null)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), null)
 
     val creditTransactions: StateFlow<List<CreditTransaction>> = walletRepository.observeTransactions(currentUserId)
         .resilientWithCache(cachedCreditTransactions, "creditTransactions")
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     private val _themePreference = MutableStateFlow(ThemePreference.SYSTEM)
     val themePreference: StateFlow<ThemePreference> = _themePreference.asStateFlow()
@@ -759,16 +780,40 @@ class MomiViewModel(
         _statusNotice.value = null
     }
 
-    fun dismissAvailableUpdate() {
+    fun dismissAvailableUpdate(context: Context? = null) {
+        val current = _availableUpdate.value
+        if (context != null && current != null) {
+            AppUpdateChecker.dismissVersion(context, current.latestVersionName)
+        }
         _availableUpdate.value = null
     }
 
-    fun checkForUpdates(manual: Boolean = false, isPlayStoreInstall: Boolean = false) {
+    fun checkForUpdates(
+        context: Context? = null,
+        manual: Boolean = false,
+        isPlayStoreInstall: Boolean = false
+    ) {
+        if (!manual) {
+            if (hasAutoCheckedUpdatesInSession) return
+            if (context != null && !AppUpdateChecker.shouldRunAutoCheck(context)) return
+            hasAutoCheckedUpdatesInSession = true
+            if (context != null) {
+                AppUpdateChecker.recordAutoCheck(context)
+            }
+        } else if (context != null) {
+            AppUpdateChecker.clearDismissedVersion(context)
+        }
+
         viewModelScope.launch {
             AppUpdateChecker.checkForUpdate(isPlayStoreInstall = isPlayStoreInstall)
                 .onSuccess { result ->
-                    if (result.availableUpdate != null) {
-                        _availableUpdate.value = result.availableUpdate
+                    val candidate = result.availableUpdate
+                    if (candidate != null) {
+                        val isDismissed = context != null &&
+                            AppUpdateChecker.isVersionDismissed(context, candidate.latestVersionName)
+                        if (manual || !isDismissed) {
+                            _availableUpdate.value = candidate
+                        }
                     } else if (manual) {
                         _statusNotice.value = if (isPlayStoreInstall) {
                             "Momi v${result.currentVersionName} is managed and updated automatically through Google Play."
@@ -1809,6 +1854,11 @@ class MomiViewModel(
 
     private fun fallbackProfile(): UserProfile {
         profile.value?.let { return it }
+        cachedProfile.value?.let { return it }
+        return fallbackProfileBase()
+    }
+
+    private fun fallbackProfileBase(): UserProfile {
         val fallbackName = initialDisplayName?.trim()?.takeIf { it.isNotBlank() } ?: "Momi Creator"
         val fallbackUsername = initialEmail?.substringBefore("@")
             ?.lowercase()

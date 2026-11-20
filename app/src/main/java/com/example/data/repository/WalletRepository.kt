@@ -473,7 +473,7 @@ class WalletRepository(private val db: FirebaseFirestore) {
     }
 
     companion object {
-        const val TRANSACTIONS_LIMIT = 60L
-        const val UNCLAIMED_GIFTS_LIMIT = 20L
+        const val TRANSACTIONS_LIMIT = 25L
+        const val UNCLAIMED_GIFTS_LIMIT = 10L
     }
 }

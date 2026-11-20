@@ -895,9 +895,14 @@ fun ProfileScreen(
             }
         }
 
+        HorizontalDivider(
+            thickness = 0.5.dp,
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+        )
+
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = 16.dp)
+            contentPadding = PaddingValues(top = 4.dp, bottom = 16.dp)
         ) {
             item(key = "profile_header") {
                 Column(
@@ -915,13 +920,13 @@ fun ProfileScreen(
                                 username = profile?.username ?: "momi",
                                 avatarKey = profile?.avatarKey ?: "avatar_aria",
                                 avatarData = profile?.avatarData,
-                                size = 86.dp,
+                                size = 76.dp,
                                 hasActiveStory = true,
                                 onClick = { showEditDialog = true }
                             )
                             Box(
                                 modifier = Modifier
-                                    .size(26.dp)
+                                    .size(24.dp)
                                     .clip(CircleShape)
                                     .background(MaterialTheme.colorScheme.surface)
                                     .padding(2.dp)
@@ -934,31 +939,35 @@ fun ProfileScreen(
                                     imageVector = Icons.Filled.PhotoCamera,
                                     contentDescription = "Change profile photo",
                                     tint = MaterialTheme.colorScheme.onPrimary,
-                                    modifier = Modifier.size(14.dp)
+                                    modifier = Modifier.size(13.dp)
                                 )
                             }
                         }
-                        Spacer(modifier = Modifier.width(20.dp))
+                        Spacer(modifier = Modifier.width(10.dp))
                         Row(
                             modifier = Modifier.weight(1f),
-                            horizontalArrangement = Arrangement.SpaceEvenly
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             ProfileStatColumn(
                                 count = ownPosts.size.toString(),
                                 label = "posts",
-                                onClick = { selectedTab = 0 }
+                                onClick = { selectedTab = 0 },
+                                modifier = Modifier.weight(1f)
                             )
                             ProfileStatColumn(
                                 count = MediaAssets.formatCompactCount(profile?.followersCount ?: 0L),
                                 label = "followers",
                                 testTag = "profile_followers_stat",
-                                onClick = { followSheetTab = 0 }
+                                onClick = { followSheetTab = 0 },
+                                modifier = Modifier.weight(1f)
                             )
                             ProfileStatColumn(
                                 count = MediaAssets.formatCompactCount(profile?.followingCount ?: 0L),
                                 label = "following",
                                 testTag = "profile_following_stat",
-                                onClick = { followSheetTab = 1 }
+                                onClick = { followSheetTab = 1 },
+                                modifier = Modifier.weight(1f)
                             )
                         }
                     }
@@ -1103,17 +1112,25 @@ fun ProfileScreen(
                             Spacer(modifier = Modifier.width(10.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "${MediaAssets.formatCompactCount(creditBalance)} Credits · $tierName",
+                                    text = "${MediaAssets.formatCompactCount(creditBalance)} Credits",
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
-                                    text = "$verifLabel · Buy credits, send gifts & unlock perks",
+                                    text = "$tierName · $verifLabel",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "Top up, send gifts & unlock perks",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
+                                    maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
@@ -1125,9 +1142,11 @@ fun ProfileScreen(
                                     .padding(horizontal = 10.dp, vertical = 6.dp)
                             ) {
                                 Text(
-                                    text = "Pay & Gifts",
+                                    text = "Wallet",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    softWrap = false,
                                     color = MaterialTheme.colorScheme.onPrimary
                                 )
                             }
@@ -1531,27 +1550,35 @@ fun ProfileScreen(
 private fun ProfileStatColumn(
     count: String,
     label: String,
+    modifier: Modifier = Modifier,
     testTag: String? = null,
     onClick: (() -> Unit)? = null
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
+        modifier = modifier
             .clip(RoundedCornerShape(10.dp))
             .let { base -> if (testTag != null) base.testTag(testTag) else base }
             .let { base -> if (onClick != null) base.clickable(onClick = onClick) else base }
-            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .padding(horizontal = 2.dp, vertical = 6.dp)
     ) {
         Text(
             text = count,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
-            fontSize = 18.sp,
+            fontSize = 17.sp,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
             color = MaterialTheme.colorScheme.onBackground
         )
         Text(
             text = label,
             style = MaterialTheme.typography.bodySmall,
+            fontSize = 11.sp,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }

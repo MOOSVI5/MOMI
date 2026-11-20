@@ -133,7 +133,63 @@ object AppUpdateChecker {
             }
         }
 
+    private const val PREFS_NAME = "momi_update_prefs"
+    private const val KEY_DISMISSED_VERSION = "dismissed_update_version"
+    private const val KEY_LAST_AUTO_CHECK_AT_MS = "last_auto_check_at_ms"
+    internal const val AUTO_CHECK_COOLDOWN_MS = 6L * 60L * 60L * 1000L
+
     fun playStoreListingUrl(): String = PLAY_STORE_URL
+
+    fun isVersionDismissed(context: Context, versionName: String): Boolean {
+        val clean = versionName.trim()
+        if (clean.isEmpty()) return false
+        val dismissed = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_DISMISSED_VERSION, null)
+            ?.trim()
+            ?: return false
+        return compareSemanticVersions(clean, dismissed) <= 0
+    }
+
+    fun dismissVersion(context: Context, versionName: String) {
+        val clean = versionName.trim()
+        if (clean.isEmpty()) return
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_DISMISSED_VERSION, clean)
+            .apply()
+    }
+
+    fun clearDismissedVersion(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_DISMISSED_VERSION)
+            .apply()
+    }
+
+    fun shouldRunAutoCheck(context: Context, nowMs: Long = System.currentTimeMillis()): Boolean {
+        val last = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(KEY_LAST_AUTO_CHECK_AT_MS, 0L)
+        return nowMs - last >= AUTO_CHECK_COOLDOWN_MS
+    }
+
+    fun recordAutoCheck(context: Context, nowMs: Long = System.currentTimeMillis()) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_LAST_AUTO_CHECK_AT_MS, nowMs)
+            .apply()
+    }
+
+    internal fun shouldSurfaceUpdate(
+        latestVersionName: String,
+        dismissedVersionName: String?,
+        manual: Boolean
+    ): Boolean {
+        if (manual) return true
+        val cleanLatest = latestVersionName.trim()
+        val cleanDismissed = dismissedVersionName?.trim().orEmpty()
+        if (cleanDismissed.isEmpty()) return true
+        return compareSemanticVersions(cleanLatest, cleanDismissed) > 0
+    }
 
     internal fun compareSemanticVersions(candidate: String, current: String): Int {
         val leftParts = candidate.split(".", "-", "_").mapNotNull { it.filter(Char::isDigit).toIntOrNull() }

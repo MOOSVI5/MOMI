@@ -39,7 +39,7 @@ class MarketplaceRepository(private val db: FirebaseFirestore) {
     fun observeMerchants(currentUid: String): Flow<List<MerchantAccount>> {
         val colRef = merchantsCol()
         return colRef
-            .limit(50L)
+            .limit(25L)
             .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(MerchantAccount::class.java, ServerTimestampBehavior.ESTIMATE)
@@ -59,7 +59,7 @@ class MarketplaceRepository(private val db: FirebaseFirestore) {
         val colRef = productsCol()
         return colRef
             .orderBy("createdAt", Query.Direction.DESCENDING)
-            .limit(50L)
+            .limit(25L)
             .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(MarketProduct::class.java, ServerTimestampBehavior.ESTIMATE)
@@ -84,7 +84,7 @@ class MarketplaceRepository(private val db: FirebaseFirestore) {
                     Filter.equalTo("sellerUid", currentUid)
                 )
             )
-            .limit(50L)
+            .limit(25L)
             .snapshots(MetadataChanges.EXCLUDE)
             .map { snapshot ->
                 snapshot.toObjects(MarketOrder::class.java, ServerTimestampBehavior.ESTIMATE)

@@ -296,7 +296,7 @@ fun GoLiveScreen(
                                         }
                                         val now = System.currentTimeMillis()
                                         val prev = lastSentAtRef.get()
-                                        if (now - prev < 1250L) {
+                                        if (now - prev < 1500L) {
                                             return@setAnalyzer
                                         }
                                         if (!lastSentAtRef.compareAndSet(prev, now)) {
