@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -31,31 +31,57 @@ jobs:
         run: |
           echo "Repository private=${{ github.event.repository.private }}"
           if [ "${{ github.event.repository.private }}" = "true" ]; then
-            echo "::error::This repository is PRIVATE. GitHub Free accounts cannot host GitHub Pages from a private repo. Make MOOSVI5/MOMI Public in Settings -> General -> Danger Zone, OR open Settings -> Pages -> Source: GitHub Actions (GitHub Pro)."
+            echo "::error::This repository is PRIVATE. GitHub Free accounts cannot host GitHub Pages from a private repo. Make MOOSVI5/MOMI Public in Settings -> General -> Danger Zone."
             exit 1
           fi
 
       - name: Setup Pages
         id: pages
+        continue-on-error: true
         uses: actions/configure-pages@v5
         with:
           enablement: true
 
       - name: Upload Web App Artifact
+        if: steps.pages.outcome == 'success'
         uses: actions/upload-pages-artifact@v3
         with:
           path: './web'
 
       - name: Deploy to GitHub Pages
+        if: steps.pages.outcome == 'success'
         id: deployment
         uses: actions/deploy-pages@v4
 
-      - name: Publish Web App Link Summary
+      - name: Fallback Publish to gh-pages Branch
+        if: steps.pages.outcome != 'success'
         shell: bash
         run: |
+          TMP_DIR="$(mktemp -d)"
+          cp -R web/. "$TMP_DIR/"
+          touch "$TMP_DIR/.nojekyll"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan gh-pages
+          git rm -rf . >/dev/null 2>&1 || true
+          cp -R "$TMP_DIR"/. .
+          git add -A
+          git commit -m "Deploy Momi Web App"
+          git push --force origin gh-pages
+          echo "::notice::Published ./web to the gh-pages branch. In GitHub Settings -> Pages -> Source, choose 'Deploy from a branch' -> 'gh-pages' -> '/ (root)'."
+
+      - name: Publish Web App Link Summary
+        if: always()
+        shell: bash
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          URL="${{ steps.deployment.outputs.page_url }}"
+          if [ -z "$URL" ]; then
+            URL="https://${{ github.repository_owner }}.github.io/${REPO_NAME}/"
+          fi
           {
-            echo "### Momi Web App Live URL"
-            echo "Open on desktop or mobile: ${{ steps.deployment.outputs.page_url }}"
+            echo "### Momi Web App Live URL (Case-Sensitive)"
+            echo "$URL"
             echo ""
             echo "If Google Sign-In asks for domain authorization, add \`${{ github.repository_owner }}.github.io\` in Firebase Console -> Authentication -> Settings -> Authorized domains."
           } >> "$GITHUB_STEP_SUMMARY"

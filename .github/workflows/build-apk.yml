@@ -153,3 +153,14 @@ jobs:
             ### How to install on Android
             1. Tap **${{ steps.release_meta.outputs.apk_file }}** under Assets below to download directly (no GitHub login needed).
             2. Open the downloaded `.apk` file and tap **Install** (allow installation from your browser if prompted).
+
+      - name: Print Direct APK Link
+        shell: bash
+        run: |
+          {
+            echo "### Direct Signed Release APK Link"
+            echo "https://github.com/${{ github.repository }}/releases/latest/download/${{ steps.release_meta.outputs.apk_file }}"
+            echo ""
+            echo "### GitHub Releases Page"
+            echo "https://github.com/${{ github.repository }}/releases/latest"
+          } >> "$GITHUB_STEP_SUMMARY"
