@@ -25,6 +25,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountBalanceWallet
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.History
@@ -44,6 +46,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
@@ -69,9 +72,12 @@ import com.example.data.model.CreditPackageOption
 import com.example.data.model.CreditTransaction
 import com.example.data.model.LiveGiftItem
 import com.example.data.model.MomiCreditCatalog
+import com.example.data.model.Post
+import com.example.data.model.PostBoostOption
 import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
 import com.example.ui.components.LumaAvatar
+import com.example.ui.components.PostBoostBottomSheet
 import com.example.ui.components.SendGiftBottomSheet
 import com.example.ui.theme.MaroonVibrant
 import com.example.ui.theme.SilkBlueDeep
@@ -92,6 +98,9 @@ fun WalletScreen(
     onSandboxTopUp: (CreditPackageOption) -> Unit,
     onSendGiftToCreator: (recipientUid: String, recipientUsername: String, gift: LiveGiftItem) -> Unit,
     onUnlockPerk: (AccountPerkItem) -> Unit,
+    ownPosts: List<Post> = emptyList(),
+    onUpdatePartnerConsent: (Boolean) -> Unit = {},
+    onBoostPostWithCredits: (Post, PostBoostOption) -> Unit = { _, _ -> },
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -99,6 +108,7 @@ fun WalletScreen(
 
     var selectedTab by remember { mutableIntStateOf(0) }
     var giftTargetCreator by remember { mutableStateOf<UserProfile?>(null) }
+    var boostTargetPost by remember { mutableStateOf<Post?>(null) }
 
     val balance = wallet?.balance ?: 0L
     val totalPurchased = wallet?.totalPurchased ?: 0L
@@ -128,6 +138,23 @@ fun WalletScreen(
             },
             onOpenWallet = { selectedTab = 0 },
             onDismiss = { giftTargetCreator = null }
+        )
+    }
+
+    boostTargetPost?.let { post ->
+        PostBoostBottomSheet(
+            post = post,
+            wallet = wallet,
+            isProcessing = isProcessing,
+            onSelectBoost = { option ->
+                onBoostPostWithCredits(post, option)
+                boostTargetPost = null
+            },
+            onOpenWallet = {
+                boostTargetPost = null
+                selectedTab = 0
+            },
+            onDismiss = { boostTargetPost = null }
         )
     }
 
@@ -434,6 +461,138 @@ fun WalletScreen(
                 }
 
                 2 -> {
+                    item(key = "partner_consent_card") {
+                        val consented = profile?.partnerConsent == true
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(14.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(end = 10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                                ) {
+                                    Text(
+                                        text = "Partner Boost & Perks Consent",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = if (consented) {
+                                            "Opted In — eligible to receive free owner-granted credits, featured recommendations, and VIP perks."
+                                        } else {
+                                            "Enable consent so the Momi owner can grant bonus credits, verified status, or featured post recommendations."
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = consented,
+                                    onCheckedChange = { onUpdatePartnerConsent(it) },
+                                    modifier = Modifier.testTag("wallet_partner_consent_switch")
+                                )
+                            }
+                        }
+                    }
+
+                    if (ownPosts.isNotEmpty()) {
+                        item(key = "boost_own_posts_panel") {
+                            Card(
+                                shape = RoundedCornerShape(16.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Filled.Bolt,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Boost Your Posts",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    Text(
+                                        text = "Promote any of your Momi posts to the top of Home For You & Explore using wallet credits.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    ownPosts.take(4).forEach { post ->
+                                        Surface(
+                                            shape = RoundedCornerShape(12.dp),
+                                            color = MaterialTheme.colorScheme.surface,
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = post.caption.ifBlank { "${post.category} post" },
+                                                        style = MaterialTheme.typography.labelLarge,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    Text(
+                                                        text = if (post.isBoosted) {
+                                                            post.recommendedLabel.ifBlank { "Boosted" }
+                                                        } else {
+                                                            "${post.likesCount} likes · ${post.viewsCount} views"
+                                                        },
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = if (post.isBoosted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                OutlinedButton(
+                                                    onClick = { boostTargetPost = post },
+                                                    shape = RoundedCornerShape(10.dp),
+                                                    modifier = Modifier
+                                                        .heightIn(min = 44.dp)
+                                                        .testTag("wallet_boost_post_${post.id}")
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Filled.AutoAwesome,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(14.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Text(
+                                                        text = if (post.isBoosted) "Boosted" else "Boost",
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     item(key = "perks_roadmap_banner") {
                         Surface(
                             shape = RoundedCornerShape(14.dp),
@@ -710,6 +869,7 @@ private fun TransactionRowCard(
 ) {
     val isInbound = when (tx.type) {
         CreditTransaction.TYPE_TOP_UP -> true
+        CreditTransaction.TYPE_OWNER_GRANT -> true
         CreditTransaction.TYPE_GIFT -> tx.recipientUid == currentUserId
         else -> false
     }
@@ -722,11 +882,17 @@ private fun TransactionRowCard(
         } else {
             "Sent ${tx.giftName ?: "Gift"} to @${tx.recipientUsername}"
         }
+        CreditTransaction.TYPE_POST_BOOST -> "Post Boost Activated"
+        CreditTransaction.TYPE_OWNER_GRANT -> {
+            val perkName = tx.perkKey?.let { MomiCreditCatalog.perkByKey(it) }?.title
+            if (perkName != null) "Owner Grant · $perkName" else "Owner Bonus Credits"
+        }
         else -> "Perk Unlocked (${tx.perkKey ?: "Perk"})"
     }
     val methodLabel = when (tx.paymentMethod) {
         CreditTransaction.METHOD_GOOGLE_PLAY -> "Google Play"
         CreditTransaction.METHOD_DEBUG_SANDBOX -> "Dev Sandbox"
+        CreditTransaction.METHOD_OWNER_ADMIN -> "Momi Owner"
         else -> "Momi Credits"
     }
 

@@ -79,6 +79,8 @@ data class UserProfile(
     val role: String = MomiRoles.USER,
     val moderationScopes: List<String> = emptyList(),
     val assignedByEmail: String? = null,
+    @get:PropertyName("partnerConsent") val partnerConsent: Boolean = false,
+    val consentUpdatedAt: Timestamp? = null,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -119,6 +121,11 @@ data class Post(
     val audioTitle: String = "",
     val localAudioPath: String? = null,
     val audioData: String? = null,
+    @get:PropertyName("isBoosted") val isBoosted: Boolean = false,
+    val boostTier: String = "",
+    val recommendedLabel: String = "",
+    val boostedByUid: String? = null,
+    val boostedAt: Timestamp? = null,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
@@ -392,6 +399,7 @@ data class CreditTransaction(
     val giftName: String? = null,
     val streamId: String? = null,
     val perkKey: String? = null,
+    val postId: String? = null,
     val recipientClaimed: Boolean = true,
     val status: String = "COMPLETED",
     @ServerTimestamp val createdAt: Timestamp? = null,
@@ -401,12 +409,42 @@ data class CreditTransaction(
         const val TYPE_TOP_UP = "TOP_UP"
         const val TYPE_GIFT = "GIFT"
         const val TYPE_PERK_UNLOCK = "PERK_UNLOCK"
+        const val TYPE_POST_BOOST = "POST_BOOST"
+        const val TYPE_OWNER_GRANT = "OWNER_GRANT"
 
         const val METHOD_GOOGLE_PLAY = "GOOGLE_PLAY"
         const val METHOD_DEBUG_SANDBOX = "DEBUG_SANDBOX"
         const val METHOD_WALLET_CREDITS = "WALLET_CREDITS"
+        const val METHOD_OWNER_ADMIN = "OWNER_ADMIN"
     }
 }
+
+@IgnoreExtraProperties
+data class AdMonetizationConfig(
+    @DocumentId val id: String = "monetization",
+    val admobEnabled: Boolean = true,
+    val admobBannerUnitId: String = "",
+    val admobMrecUnitId: String = "",
+    val admobInterstitialUnitId: String = "",
+    val startIoEnabled: Boolean = true,
+    val monetagEnabled: Boolean = true,
+    val monetagDirectLinkUrl: String = "",
+    val monetagWebZoneId: String = "",
+    val monetagWebMetaTag: String = "",
+    val partnerPromoTitle: String = "Featured Creator Deals & Partner Showcase",
+    val partnerPromoSubtitle: String = "Explore verified creator collections, partner offers & exclusive community perks.",
+    val partnerPromoCta: String = "Explore Partner",
+    val updatedByEmail: String = "",
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+data class PostBoostOption(
+    val tier: String,
+    val title: String,
+    val badgeLabel: String,
+    val subtitle: String,
+    val creditsCost: Long
+)
 
 data class CreditPackageOption(
     val productId: String,
@@ -532,8 +570,28 @@ object MomiCreditCatalog {
         )
     )
 
+    val boostOptions: List<PostBoostOption> = listOf(
+        PostBoostOption(
+            tier = "SPOTLIGHT",
+            title = "Spotlight Boost",
+            badgeLabel = "Boosted Spotlight",
+            subtitle = "Elevate your post higher in For You & Search discovery",
+            creditsCost = 100L
+        ),
+        PostBoostOption(
+            tier = "SUPER_BOOST",
+            title = "Super Boost",
+            badgeLabel = "Super Boosted",
+            subtitle = "Priority placement across Home Feed, Explore & Creator Spotlight",
+            creditsCost = 250L
+        )
+    )
+
     fun packageByProductId(productId: String): CreditPackageOption? =
         packages.firstOrNull { it.productId == productId }
+
+    fun perkByKey(key: String): AccountPerkItem? =
+        perks.firstOrNull { it.key == key }
 
     fun tierForTotalPurchased(totalPurchased: Long, unlockedPerks: List<String>): String {
         return when {
@@ -665,3 +723,23 @@ data class ContentReport(
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
+
+fun sortFeedWithBoostPriority(posts: List<Post>): List<Post> {
+    if (posts.size <= 1) return posts
+    return posts.withIndex()
+        .sortedWith(
+            compareByDescending<IndexedValue<Post>> { (it.value.isBoosted || it.value.recommendedLabel.isNotBlank()) && !it.value.id.startsWith("showcase_") }
+                .thenByDescending { it.value.boostTier == "OWNER_RECOMMENDED" }
+                .thenByDescending { it.value.boostTier == "SUPER_BOOST" }
+                .thenByDescending { it.value.boostTier == "SPOTLIGHT" }
+                .thenBy { it.index }
+        )
+        .map { it.value }
+}
+
+fun normalizeMonetagDirectUrl(raw: String?): String {
+    val trimmed = raw?.trim().orEmpty()
+    if (!trimmed.startsWith("https://", ignoreCase = false)) return ""
+    return trimmed.take(300)
+}
+

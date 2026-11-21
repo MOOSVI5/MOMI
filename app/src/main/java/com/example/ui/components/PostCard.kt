@@ -33,6 +33,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.automirrored.outlined.Send
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.MoreVert
@@ -85,6 +86,7 @@ import kotlinx.coroutines.delay
 fun PostCard(
     post: Post,
     isOwnPost: Boolean,
+    isAdminViewActive: Boolean = false,
     isPlaybackActive: Boolean = false,
     isDetailMode: Boolean = false,
     externalMuted: Boolean? = null,
@@ -98,6 +100,8 @@ fun PostCard(
     onShareClick: () -> Unit,
     onBookmarkToggle: () -> Unit,
     onFollowToggle: () -> Unit,
+    onBoostPost: (() -> Unit)? = null,
+    onToggleRecommended: ((Boolean) -> Unit)? = null,
     onDeletePost: (() -> Unit)? = null,
     onReportPost: (() -> Unit)? = null,
     onAuthorClick: () -> Unit = {},
@@ -197,6 +201,36 @@ fun PostCard(
                             )
                         }
                     }
+                    if (post.isBoosted || post.recommendedLabel.isNotBlank()) {
+                        val badgeLabel = post.recommendedLabel.ifBlank {
+                            if (post.boostTier == "OWNER_RECOMMENDED") "Recommended by Momi" else "Boosted"
+                        }
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f))
+                                .padding(horizontal = 7.dp, vertical = 2.dp)
+                                .testTag("post_boost_badge_${post.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.AutoAwesome,
+                                contentDescription = badgeLabel,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(11.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = badgeLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
                 }
             }
 
@@ -265,6 +299,35 @@ fun PostCard(
                                 }
                             )
                         }
+                    }
+                    if (isOwnPost && onBoostPost != null && !post.id.startsWith("showcase_")) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = if (post.isBoosted) "Upgrade post boost" else "Boost post with credits",
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onBoostPost()
+                            }
+                        )
+                    }
+                    if (isAdminViewActive && onToggleRecommended != null && !post.id.startsWith("showcase_")) {
+                        val isRecommended = post.boostTier == "OWNER_RECOMMENDED"
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = if (isRecommended) "Remove Momi recommendation" else "Recommend post (Owner)",
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onToggleRecommended(!isRecommended)
+                            }
+                        )
                     }
                     if (isOwnPost && onDeletePost != null) {
                         DropdownMenuItem(

@@ -34,3 +34,7 @@
     @android.webkit.JavascriptInterface <methods>;
 }
 
+# Google Mobile Ads (AdMob) Release AAB keep rules
+-keep class com.google.android.gms.ads.** { *; }
+-dontwarn com.google.android.gms.ads.**
+

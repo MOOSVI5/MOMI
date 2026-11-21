@@ -2,6 +2,7 @@ package com.example.data.repository
 
 import android.content.Context
 import com.example.R
+import com.example.data.model.AdMonetizationConfig
 import com.example.data.model.ChatMessage
 import com.example.data.model.Comment
 import com.example.data.model.ContentReport
@@ -59,6 +60,7 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
     private fun threadsCol() = db.collection("threads")
     private fun liveStreamsCol() = db.collection("liveStreams")
     private fun reportsCol() = db.collection("contentReports")
+    private fun monetizationDoc() = db.collection("appConfig").document("monetization")
 
     fun observeProfile(userId: String): Flow<UserProfile?> {
         val docRef = userDoc(userId)
@@ -1244,6 +1246,118 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            throw e
+        }
+    }
+
+    fun observeAdMonetizationConfig(currentUid: String): Flow<AdMonetizationConfig> {
+        val docRef = monetizationDoc()
+        val path = docRef.path
+        return docRef.snapshots(MetadataChanges.EXCLUDE)
+            .map { snapshot ->
+                if (snapshot.exists()) {
+                    snapshot.toObject(AdMonetizationConfig::class.java, ServerTimestampBehavior.ESTIMATE)
+                        ?: AdMonetizationConfig()
+                } else {
+                    AdMonetizationConfig()
+                }
+            }
+            .catch { error ->
+                logFlowErrorIfSignedIn(currentUid, error, OperationType.GET, path)
+                throw error
+            }
+    }
+
+    suspend fun saveAdMonetizationConfig(
+        config: AdMonetizationConfig,
+        adminEmail: String = "syali6511@gmail.com"
+    ): Result<Unit> = runCatching {
+        requireUserId()
+        val cleanDirectLink = config.monetagDirectLinkUrl.trim().take(300)
+        require(cleanDirectLink.isEmpty() || cleanDirectLink.startsWith("https://")) {
+            "Monetag Direct Link URL must start with https://"
+        }
+        val docRef = monetizationDoc()
+        val payload = mapOf(
+            "admobEnabled" to config.admobEnabled,
+            "admobBannerUnitId" to config.admobBannerUnitId.trim().take(120),
+            "admobMrecUnitId" to config.admobMrecUnitId.trim().take(120),
+            "admobInterstitialUnitId" to config.admobInterstitialUnitId.trim().take(120),
+            "startIoEnabled" to config.startIoEnabled,
+            "monetagEnabled" to config.monetagEnabled,
+            "monetagDirectLinkUrl" to cleanDirectLink,
+            "monetagWebZoneId" to config.monetagWebZoneId.trim().take(40),
+            "monetagWebMetaTag" to config.monetagWebMetaTag.trim().take(120),
+            "partnerPromoTitle" to config.partnerPromoTitle.trim().ifBlank { "Featured Creator Deals & Partner Showcase" }.take(80),
+            "partnerPromoSubtitle" to config.partnerPromoSubtitle.trim().ifBlank { "Explore verified creator collections & partner perks." }.take(180),
+            "partnerPromoCta" to config.partnerPromoCta.trim().ifBlank { "Explore Partner" }.take(40),
+            "updatedByEmail" to adminEmail.trim().take(120),
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
+        try {
+            docRef.set(payload).await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, docRef.path)
+            throw e
+        }
+    }
+
+    suspend fun updatePartnerConsent(consented: Boolean): Result<Unit> = runCatching {
+        val uid = requireUserId()
+        val docRef = userDoc(uid)
+        try {
+            docRef.update(
+                mapOf(
+                    "partnerConsent" to consented,
+                    "consentUpdatedAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docRef.path)
+            throw e
+        }
+    }
+
+    suspend fun adminSetPostRecommended(
+        post: Post,
+        recommended: Boolean,
+        actorProfile: UserProfile?,
+        label: String = "Recommended by Momi"
+    ): Result<Unit> = runCatching {
+        val uid = requireUserId()
+        require(post.id.isNotBlank() && !post.id.startsWith("showcase_")) {
+            "Select a synced Momi post to recommend."
+        }
+        val docRef = postsCol().document(post.id)
+        val cleanLabel = if (recommended) label.trim().ifBlank { "Recommended by Momi" }.take(40) else ""
+        val updates = mapOf(
+            "isBoosted" to recommended,
+            "boostTier" to if (recommended) "OWNER_RECOMMENDED" else "",
+            "recommendedLabel" to cleanLabel,
+            "boostedByUid" to if (recommended) uid else null,
+            "boostedAt" to if (recommended) FieldValue.serverTimestamp() else null,
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
+        try {
+            docRef.update(updates).await()
+            if (recommended && post.userId.isNotBlank() && post.userId != uid && actorProfile != null) {
+                sendNotificationSafe(
+                    targetUid = post.userId,
+                    actorProfile = actorProfile,
+                    message = "featured your post under $cleanLabel!",
+                    previewImageKey = post.imageKey,
+                    isFollowAction = false
+                )
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

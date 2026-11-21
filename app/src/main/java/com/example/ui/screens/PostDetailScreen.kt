@@ -70,6 +70,9 @@ fun PostDetailScreen(
     onReportPost: (Post) -> Unit = {},
     onPostViewed: (Post) -> Unit = {},
     onAuthorClick: (Post) -> Unit = {},
+    isAdminViewActive: Boolean = false,
+    onBoostPost: (Post) -> Unit = {},
+    onToggleRecommendedPost: (Post, Boolean) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     BackHandler(onBack = onBack)
@@ -144,6 +147,7 @@ fun PostDetailScreen(
                     PostCard(
                         post = post,
                         isOwnPost = post.userId == currentUserId && !post.id.startsWith("showcase_"),
+                        isAdminViewActive = isAdminViewActive,
                         isPlaybackActive = true,
                         isDetailMode = true,
                         onPostClick = {},
@@ -155,6 +159,8 @@ fun PostDetailScreen(
                         onShareClick = { onShareClick(post) },
                         onBookmarkToggle = { onBookmarkToggle(post) },
                         onFollowToggle = { onFollowToggle(post) },
+                        onBoostPost = { onBoostPost(post) },
+                        onToggleRecommended = { recommended -> onToggleRecommendedPost(post, recommended) },
                         onAuthorClick = { onAuthorClick(post) },
                         onReportPost = { onReportPost(post) },
                         onDeletePost = {

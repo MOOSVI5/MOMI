@@ -1491,4 +1491,193 @@ test("Posts: allows expanded color filters, aspectRatio, taggedUsernames, and ha
   );
 });
 
+// --- 13. Multi-Monetizer Config, Partner Consent, Post Boosts & Owner Grants ---
+
+test("AppConfig, Partner Consent, Post Boosts & Owner Grants: zero-trust enforcement", async () => {
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, { email: "alice@example.com", email_verified: true }).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID, { email: "bob@example.com", email_verified: true }).firestore();
+  const adminDb = testEnv.authenticatedContext("admin_momi", {
+    email: "syali6511@gmail.com",
+    email_verified: true,
+  }).firestore();
+
+  const monetizationConfig = {
+    admobEnabled: true,
+    admobBannerUnitId: "ca-app-pub-3940256099942544/6300978111",
+    admobMrecUnitId: "ca-app-pub-3940256099942544/6300978111",
+    admobInterstitialUnitId: "ca-app-pub-3940256099942544/1033173712",
+    startIoEnabled: true,
+    monetagEnabled: true,
+    monetagDirectLinkUrl: "https://otieu.com/4/1234567",
+    monetagWebZoneId: "1234567",
+    monetagWebMetaTag: "monetag-verify-token",
+    partnerPromoTitle: "Featured Partner Drop",
+    partnerPromoSubtitle: "Support Momi creators and browse curated partner deals.",
+    partnerPromoCta: "Visit Partner",
+    updatedByEmail: "syali6511@gmail.com",
+    updatedAt: serverTimestamp(),
+  };
+
+  // Only owner admin can write appConfig/monetization; signed-in users can read; unauth denied
+  await assertFails(unauthDb.collection("appConfig").doc("monetization").get());
+  await assertFails(aliceDb.collection("appConfig").doc("monetization").set(monetizationConfig));
+  await assertSucceeds(adminDb.collection("appConfig").doc("monetization").set(monetizationConfig));
+  await assertSucceeds(aliceDb.collection("appConfig").doc("monetization").get());
+
+  // Reject http:// (insecure) monetagDirectLinkUrl
+  await assertFails(
+    adminDb.collection("appConfig").doc("monetization").set({
+      ...monetizationConfig,
+      monetagDirectLinkUrl: "http://insecure.example.com",
+    })
+  );
+
+  // Alice creates profile, opts into partnerConsent, and creates a post
+  await assertSucceeds(aliceDb.collection("users").doc(ALICE_UID).set(validProfilePayload(ALICE_UID)));
+  await assertSucceeds(
+    aliceDb.collection("users").doc(ALICE_UID).update({
+      partnerConsent: true,
+      consentUpdatedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  // Bob cannot toggle Alice's consent
+  await assertFails(
+    bobDb.collection("users").doc(ALICE_UID).update({
+      partnerConsent: false,
+      consentUpdatedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  await assertSucceeds(aliceDb.collection("posts").doc("p_boost").set(validPostPayload(ALICE_UID)));
+
+  // Alice cannot self-boost without spending Wallet credits
+  await assertFails(
+    aliceDb.collection("posts").doc("p_boost").update({
+      isBoosted: true,
+      boostTier: "SPOTLIGHT",
+      recommendedLabel: "Boosted",
+      boostedByUid: ALICE_UID,
+      boostedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Owner grants Alice +200 credits + CREATOR_BOOST perk (even before Alice opens Wallet)
+  const grantBatch = adminDb.batch();
+  grantBatch.set(adminDb.collection("creditTransactions").doc("tx_owner_grant_1"), {
+    txId: "tx_owner_grant_1",
+    type: "OWNER_GRANT",
+    senderUid: "admin_momi",
+    senderUsername: "syali6511",
+    recipientUid: ALICE_UID,
+    recipientUsername: "aria.studio",
+    creditsAmount: 200,
+    priceUsd: 0.0,
+    paymentMethod: "OWNER_ADMIN",
+    perkKey: "CREATOR_BOOST",
+    recipientClaimed: true,
+    status: "COMPLETED",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  grantBatch.set(adminDb.collection("wallets").doc(ALICE_UID), {
+    userId: ALICE_UID,
+    balance: 200,
+    totalEarned: 200,
+    totalSpent: 0,
+    totalPurchased: 0,
+    accountTier: "CREATOR_PRO",
+    verificationTier: "CREATOR_PRO",
+    unlockedPerks: ["CREATOR_BOOST"],
+    lastTxId: "tx_owner_grant_1",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  await assertSucceeds(grantBatch.commit());
+
+  // Non-admin Bob cannot forge OWNER_GRANT
+  const forgedGrantBatch = bobDb.batch();
+  forgedGrantBatch.set(bobDb.collection("creditTransactions").doc("tx_forged_grant"), {
+    txId: "tx_forged_grant",
+    type: "OWNER_GRANT",
+    senderUid: BOB_UID,
+    senderUsername: "bob.lens",
+    recipientUid: BOB_UID,
+    recipientUsername: "bob.lens",
+    creditsAmount: 500,
+    priceUsd: 0.0,
+    paymentMethod: "OWNER_ADMIN",
+    recipientClaimed: true,
+    status: "COMPLETED",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  forgedGrantBatch.set(bobDb.collection("wallets").doc(BOB_UID), {
+    ...zeroWalletPayload(BOB_UID),
+    balance: 500,
+    totalEarned: 500,
+    lastTxId: "tx_forged_grant",
+  });
+  await assertFails(forgedGrantBatch.commit());
+
+  // Alice atomically spends 100 credits to boost her own post
+  const boostBatch = aliceDb.batch();
+  boostBatch.set(aliceDb.collection("creditTransactions").doc("tx_boost_1"), {
+    txId: "tx_boost_1",
+    type: "POST_BOOST",
+    senderUid: ALICE_UID,
+    senderUsername: "aria.studio",
+    recipientUid: ALICE_UID,
+    recipientUsername: "aria.studio",
+    creditsAmount: 100,
+    priceUsd: 0.0,
+    paymentMethod: "WALLET_CREDITS",
+    postId: "p_boost",
+    recipientClaimed: true,
+    status: "COMPLETED",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  boostBatch.update(aliceDb.collection("wallets").doc(ALICE_UID), {
+    balance: 100,
+    totalSpent: 100,
+    lastTxId: "tx_boost_1",
+    updatedAt: serverTimestamp(),
+  });
+  boostBatch.update(aliceDb.collection("posts").doc("p_boost"), {
+    isBoosted: true,
+    boostTier: "SPOTLIGHT",
+    recommendedLabel: "Boosted Spotlight",
+    boostedByUid: ALICE_UID,
+    boostedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  await assertSucceeds(boostBatch.commit());
+
+  // Admin can also recommend any post directly
+  await assertSucceeds(
+    adminDb.collection("posts").doc("p_boost").update({
+      isBoosted: true,
+      boostTier: "OWNER_RECOMMENDED",
+      recommendedLabel: "Recommended by Momi",
+      boostedByUid: "admin_momi",
+      boostedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  // Regular user Bob cannot mark Alice's post as recommended
+  await assertFails(
+    bobDb.collection("posts").doc("p_boost").update({
+      isBoosted: true,
+      boostTier: "OWNER_RECOMMENDED",
+      recommendedLabel: "Hacked",
+      updatedAt: serverTimestamp(),
+    })
+  );
+});
+
+
 

@@ -103,6 +103,7 @@ import com.example.ui.components.LumaAvatar
 import com.example.ui.components.MomiAiAssistantBottomSheet
 import com.example.ui.components.MomiInterstitialController
 import com.example.ui.components.MomiStartIoSession
+import com.example.ui.components.PostBoostBottomSheet
 import com.example.ui.screens.CreatePostScreen
 import com.example.ui.screens.ExploreScreen
 import com.example.ui.screens.GoLiveScreen
@@ -129,6 +130,7 @@ import com.example.util.AppUpdateChecker
 import com.example.util.MomiAlertNotifier
 import com.example.util.MomiDeepLink
 import com.example.util.MomiLinks
+import com.google.android.gms.ads.MobileAds
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
@@ -191,6 +193,14 @@ class MainActivity : ComponentActivity() {
         MomiAlertNotifier.ensureChannel(this)
         configureAppCheck(this, intent)
         latestIncomingIntent.value = intent
+
+        runCatching {
+            MobileAds.initialize(this) {
+                MomiStartIoSession.updateAdMob("SDK initialized")
+            }
+        }.onFailure { err ->
+            MomiStartIoSession.updateAdMob("Init skipped: ${err.message ?: "error"}")
+        }
 
         runCatching {
             StartAppSDK.setTestAdsEnabled(BuildConfig.DEBUG)
@@ -281,9 +291,10 @@ private fun AppNavigation(
                     isPlayStoreInstall = AppUpdateChecker.isInstalledFromGooglePlay(context)
                 )
             }
-            LaunchedEffect(viewModel, sdkReady) {
-                if (sdkReady) {
-                    MomiInterstitialController.preload(context)
+            val monetizationConfig by viewModel.monetizationConfig.collectAsStateWithLifecycle()
+            LaunchedEffect(viewModel, sdkReady, monetizationConfig) {
+                if (sdkReady || monetizationConfig.admobEnabled) {
+                    MomiInterstitialController.preload(context, monetizationConfig)
                 }
             }
             val vmThemePreference by viewModel.themePreference.collectAsStateWithLifecycle()
@@ -360,9 +371,11 @@ private fun LumaApp(
     val openReportsCount by viewModel.openReportsCount.collectAsStateWithLifecycle()
     val wallet by viewModel.wallet.collectAsStateWithLifecycle()
     val creditTransactions by viewModel.creditTransactions.collectAsStateWithLifecycle()
+    val monetizationConfig by viewModel.monetizationConfig.collectAsStateWithLifecycle()
     val isProcessingWalletAction by viewModel.isProcessingWalletAction.collectAsStateWithLifecycle()
     var showAiAssistantSheet by remember { mutableStateOf(false) }
     var pendingReportTarget by remember { mutableStateOf<ReportDraftTarget?>(null) }
+    var pendingBoostPost by remember { mutableStateOf<Post?>(null) }
     var notificationSoundsEnabled by remember(context) {
         mutableStateOf(AppearancePrefs.isNotificationSoundsEnabled(context))
     }
@@ -802,6 +815,12 @@ private fun LumaApp(
                                         previewText = post.caption.ifBlank { "Shared post by @${post.authorUsername}" }
                                     )
                                 },
+                                isAdminViewActive = isAdminViewActive,
+                                monetizationConfig = monetizationConfig,
+                                onBoostPost = { post -> pendingBoostPost = post },
+                                onToggleRecommendedPost = { post, recommended ->
+                                    viewModel.adminSetPostRecommended(post, recommended)
+                                },
                                 onAuthorClick = { userId, username, isShowcase ->
                                     openUserProfile(userId, username, isShowcase)
                                 }
@@ -835,7 +854,8 @@ private fun LumaApp(
                                     viewModel.startDirectChat(creator) { thread ->
                                         navController.navigate(LumaRoutes.messagesRoute(thread.id))
                                     }
-                                }
+                                },
+                                monetizationConfig = monetizationConfig
                             )
                         }
 
@@ -878,7 +898,7 @@ private fun LumaApp(
                                         if (succeeded) {
                                             navController.popBackStack()
                                             navigatePrimaryTab(LumaRoutes.HOME)
-                                            MomiInterstitialController.maybeShowOnMilestone(context)
+                                            MomiInterstitialController.maybeShowOnMilestone(context, monetizationConfig)
                                         }
                                     }
                                 },
@@ -898,7 +918,7 @@ private fun LumaApp(
                                         if (succeeded) {
                                             navController.popBackStack()
                                             navigatePrimaryTab(LumaRoutes.HOME)
-                                            MomiInterstitialController.maybeShowOnMilestone(context)
+                                            MomiInterstitialController.maybeShowOnMilestone(context, monetizationConfig)
                                         }
                                     }
                                 },
@@ -1045,6 +1065,21 @@ private fun LumaApp(
                                 onPublishShowcaseBurst = viewModel::publishShowcaseActivityBurst,
                                 onEngageWithShowcase = viewModel::engageRecentPostsWithShowcase,
                                 onRemoveAllShowcase = viewModel::removeAllShowcaseContent,
+                                monetizationConfig = monetizationConfig,
+                                isSavingMonetization = isProcessingWalletAction,
+                                onSaveMonetizationConfig = viewModel::saveAdMonetizationConfig,
+                                onUpdatePartnerConsent = { consented -> viewModel.updatePartnerConsent(consented) },
+                                onGrantConsentingUser = { creator, credits, perk, grantVerified ->
+                                    viewModel.adminGrantConsentingUser(
+                                        targetUser = creator,
+                                        creditsAmount = credits,
+                                        perk = perk,
+                                        grantVerified = grantVerified
+                                    )
+                                },
+                                onAdminSetPostRecommended = { post, recommended, label ->
+                                    viewModel.adminSetPostRecommended(post, recommended, label)
+                                },
                                 onSignOut = onSignOut
                             )
                         }
@@ -1083,6 +1118,13 @@ private fun LumaApp(
                                     )
                                 },
                                 onUnlockPerk = { perk -> viewModel.unlockAccountPerk(perk) },
+                                ownPosts = allPosts.filter {
+                                    it.userId == viewModel.currentUserId && !it.id.startsWith("showcase_")
+                                },
+                                onUpdatePartnerConsent = { consented -> viewModel.updatePartnerConsent(consented) },
+                                onBoostPostWithCredits = { post, option ->
+                                    viewModel.boostPostWithCredits(post, option)
+                                },
                                 onBack = { navController.popBackStack() }
                             )
                         }
@@ -1150,6 +1192,7 @@ private fun LumaApp(
                                         previewText = product.title
                                     )
                                 },
+                                monetizationConfig = monetizationConfig,
                                 modifier = Modifier.navigationBarsPadding()
                             )
                         }
@@ -1326,7 +1369,12 @@ private fun LumaApp(
                                         previewText = reportedPost.caption.ifBlank { "Shared post by @${reportedPost.authorUsername}" }
                                     )
                                 },
-                                onPostViewed = { viewModel.recordPostView(it.id) }
+                                onPostViewed = { viewModel.recordPostView(it.id) },
+                                isAdminViewActive = isAdminViewActive,
+                                onBoostPost = { p -> pendingBoostPost = p },
+                                onToggleRecommendedPost = { p, recommended ->
+                                    viewModel.adminSetPostRecommended(p, recommended)
+                                }
                             )
                         }
 
@@ -1524,6 +1572,24 @@ private fun LumaApp(
                     reasonDetail = detail
                 )
             }
+        )
+    }
+
+    pendingBoostPost?.let { postToBoost ->
+        PostBoostBottomSheet(
+            post = postToBoost,
+            wallet = wallet,
+            isProcessing = isProcessingWalletAction,
+            onSelectBoost = { option ->
+                viewModel.boostPostWithCredits(postToBoost, option) { ok ->
+                    if (ok) pendingBoostPost = null
+                }
+            },
+            onOpenWallet = {
+                pendingBoostPost = null
+                navController.navigate(LumaRoutes.WALLET)
+            },
+            onDismiss = { pendingBoostPost = null }
         )
     }
 }

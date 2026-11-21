@@ -58,6 +58,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.AdMonetizationConfig
 import com.example.data.model.LiveStream
 import com.example.data.model.Post
 import com.example.data.model.Story
@@ -100,6 +101,10 @@ fun HomeScreen(
     onFollowCreator: (UserProfile, Boolean) -> Unit = { _, _ -> },
     onDeletePost: (Post) -> Unit,
     onReportPost: (Post) -> Unit = {},
+    isAdminViewActive: Boolean = false,
+    monetizationConfig: AdMonetizationConfig = AdMonetizationConfig(),
+    onBoostPost: (Post) -> Unit = {},
+    onToggleRecommendedPost: (Post, Boolean) -> Unit = { _, _ -> },
     onAuthorClick: (userId: String, username: String, isShowcase: Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -107,7 +112,10 @@ fun HomeScreen(
     var filterMenuOpen by remember { mutableStateOf(false) }
     var feedMuted by remember { mutableStateOf(true) }
     val listState = rememberLazyListState()
-    val nativeAdState = rememberStartIoNativeAds(count = 3)
+    val nativeAdState = rememberStartIoNativeAds(
+        count = 3,
+        enabled = monetizationConfig.startIoEnabled
+    )
 
     val displayedPosts = remember(posts, feedFilter, profile?.username) {
         when (feedFilter) {
@@ -525,6 +533,7 @@ fun HomeScreen(
                     PostCard(
                         post = post,
                         isOwnPost = post.userId == profile?.userId && !post.id.startsWith("showcase_"),
+                        isAdminViewActive = isAdminViewActive,
                         isPlaybackActive = post.id == activePlayablePostId,
                         externalMuted = feedMuted,
                         onMuteChange = { feedMuted = it },
@@ -537,6 +546,8 @@ fun HomeScreen(
                         onShareClick = { onShareClick(post) },
                         onBookmarkToggle = { onBookmarkToggle(post) },
                         onFollowToggle = { onFollowToggle(post) },
+                        onBoostPost = { onBoostPost(post) },
+                        onToggleRecommended = { recommended -> onToggleRecommendedPost(post, recommended) },
                         onDeletePost = { onDeletePost(post) },
                         onReportPost = { onReportPost(post) },
                         onAuthorClick = {
@@ -563,7 +574,8 @@ fun HomeScreen(
                     if (index % 3 == 0) {
                         MomiInlineFeedAdCard(
                             slotIndex = index / 3,
-                            nativeAdState = nativeAdState
+                            nativeAdState = nativeAdState,
+                            monetizationConfig = monetizationConfig
                         )
                     }
                 }

@@ -118,6 +118,7 @@ fun MarketplaceScreen(
     onMessageSeller: (String) -> Unit,
     onToggleProductFeatured: (String, Boolean) -> Unit = { _, _ -> },
     onReportProduct: (MarketProduct) -> Unit = {},
+    monetizationConfig: com.example.data.model.AdMonetizationConfig = com.example.data.model.AdMonetizationConfig(),
     modifier: Modifier = Modifier
 ) {
     var selectedCategory by remember { mutableStateOf("All Deals") }
@@ -625,7 +626,7 @@ fun MarketplaceScreen(
             }
 
             item(key = "market_sponsored_banner") {
-                MomiMarketplaceBanner()
+                MomiMarketplaceBanner(monetizationConfig = monetizationConfig)
             }
 
             // Section Header: "Featured Deals"

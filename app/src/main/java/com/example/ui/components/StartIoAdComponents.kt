@@ -28,6 +28,7 @@ import android.widget.FrameLayout
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,12 +38,14 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.Campaign
 import androidx.compose.material3.Button
@@ -62,17 +65,30 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
+import com.example.BuildConfig
+import com.example.data.model.AdMonetizationConfig
+import com.example.data.model.normalizeMonetagDirectUrl
+import com.google.android.gms.ads.AdListener
+import com.google.android.gms.ads.AdRequest
+import com.google.android.gms.ads.AdSize
+import com.google.android.gms.ads.AdView
+import com.google.android.gms.ads.LoadAdError
+import com.google.android.gms.ads.interstitial.InterstitialAd
+import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback
 import com.startapp.sdk.ads.banner.Banner
 import com.startapp.sdk.ads.banner.BannerListener
 import com.startapp.sdk.ads.banner.Mrec
@@ -84,20 +100,25 @@ import com.startapp.sdk.adsbase.Ad
 import com.startapp.sdk.adsbase.StartAppAd
 import com.startapp.sdk.adsbase.adlisteners.AdDisplayListener
 import com.startapp.sdk.adsbase.adlisteners.AdEventListener
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import java.util.Locale
 
-private const val TAG = "MomiStartIo"
-private const val MAX_INLINE_WEBVIEW_MREC_SLOTS = 2
+private const val TAG = "MomiMonetization"
+private const val MAX_INLINE_MREC_SLOTS = 2
+private const val STARTIO_FILL_TIMEOUT_MS = 7500L
 
 data class StartIoDiagnostics(
     val sdkInitialized: Boolean = false,
     val sdkStatus: String = "Initializing SDK...",
+    val admobStatus: String = "Initializing...",
     val nativeStatus: String = "Waiting for SDK",
     val mrecStatus: String = "Standby",
     val bannerStatus: String = "Waiting for SDK",
+    val monetagStatus: String = "Standby",
     val interstitialStatus: String = "Waiting for SDK"
 )
 
@@ -122,6 +143,10 @@ object MomiStartIoSession {
         }, delayMs)
     }
 
+    fun updateAdMob(status: String) {
+        _diagnostics.update { it.copy(admobStatus = status) }
+    }
+
     fun updateNative(status: String) {
         _diagnostics.update { it.copy(nativeStatus = status) }
     }
@@ -132,6 +157,10 @@ object MomiStartIoSession {
 
     fun updateBanner(status: String) {
         _diagnostics.update { it.copy(bannerStatus = status) }
+    }
+
+    fun updateMonetag(status: String) {
+        _diagnostics.update { it.copy(monetagStatus = status) }
     }
 
     fun updateInterstitial(status: String) {
@@ -145,21 +174,60 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     else -> null
 }
 
+private fun resolveMonetagDirectUrl(config: AdMonetizationConfig): String {
+    if (!config.monetagEnabled) return ""
+    val remote = normalizeMonetagDirectUrl(config.monetagDirectLinkUrl)
+    if (remote.isNotEmpty()) return remote
+    return normalizeMonetagDirectUrl(BuildConfig.MONETAG_DIRECT_LINK_URL)
+}
+
+private fun resolveAdMobBannerUnitId(config: AdMonetizationConfig): String =
+    config.admobBannerUnitId.trim().ifBlank { BuildConfig.ADMOB_BANNER_UNIT_ID }
+
+private fun resolveAdMobMrecUnitId(config: AdMonetizationConfig): String =
+    config.admobMrecUnitId.trim().ifBlank { BuildConfig.ADMOB_MREC_UNIT_ID }
+
+private fun resolveAdMobInterstitialUnitId(config: AdMonetizationConfig): String =
+    config.admobInterstitialUnitId.trim().ifBlank { BuildConfig.ADMOB_INTERSTITIAL_UNIT_ID }
+
 /**
- * Wraps Start.io's internal [WebViewClient] so that if Chromium's sandboxed renderer process
- * terminates abnormally (code -1 / OOM / GPU teardown), [onRenderProcessGone] always returns true
- * and destroys the dead [WebView] rather than letting Start.io's default client return false and
- * crash the host app.
+ * Measures its child with full requested constraints (so ad SDKs see non-zero dimensions
+ * and actually request/render ads), while collapsing visible layout height to 0px until
+ * [isVisible] flips true once an ad is actually loaded. Prevents blank dark placeholder boxes.
+ */
+@Composable
+private fun CollapsibleMeasuredAdWrapper(
+    isVisible: Boolean,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    Layout(
+        content = content,
+        modifier = modifier.alpha(if (isVisible) 1f else 0f)
+    ) { measurables, constraints ->
+        val placeables = measurables.map { it.measure(constraints) }
+        val width = placeables.maxOfOrNull { it.width } ?: 0
+        val height = if (isVisible) (placeables.maxOfOrNull { it.height } ?: 0) else 0
+        layout(width, height) {
+            if (isVisible) {
+                placeables.forEach { it.placeRelative(0, 0) }
+            }
+        }
+    }
+}
+
+/**
+ * Wraps Start.io's internal [WebViewClient] so if Chromium's renderer exits unexpectedly,
+ * [onRenderProcessGone] recovers cleanly instead of crashing the host app.
  */
 private class MomiSafeWebViewClientWrapper(
     private val delegate: WebViewClient?,
     private val onRendererGone: () -> Unit
 ) : WebViewClient() {
 
-    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-        return delegate?.shouldOverrideUrlLoading(view, request)
+    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean =
+        delegate?.shouldOverrideUrlLoading(view, request)
             ?: super.shouldOverrideUrlLoading(view, request)
-    }
 
     @Suppress("OVERRIDE_DEPRECATION")
     override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
@@ -171,10 +239,9 @@ private class MomiSafeWebViewClientWrapper(
     override fun shouldInterceptRequest(
         view: WebView?,
         request: WebResourceRequest?
-    ): WebResourceResponse? {
-        return delegate?.shouldInterceptRequest(view, request)
+    ): WebResourceResponse? =
+        delegate?.shouldInterceptRequest(view, request)
             ?: super.shouldInterceptRequest(view, request)
-    }
 
     @Suppress("OVERRIDE_DEPRECATION")
     override fun shouldInterceptRequest(view: WebView?, url: String?): WebResourceResponse? {
@@ -257,10 +324,9 @@ private class MomiSafeWebViewClientWrapper(
         else super.onScaleChanged(view, oldScale, newScale)
     }
 
-    override fun shouldOverrideKeyEvent(view: WebView?, event: KeyEvent?): Boolean {
-        return delegate?.shouldOverrideKeyEvent(view, event)
+    override fun shouldOverrideKeyEvent(view: WebView?, event: KeyEvent?): Boolean =
+        delegate?.shouldOverrideKeyEvent(view, event)
             ?: super.shouldOverrideKeyEvent(view, event)
-    }
 
     override fun onUnhandledKeyEvent(view: WebView?, event: KeyEvent?) {
         if (delegate != null) delegate.onUnhandledKeyEvent(view, event)
@@ -402,75 +468,132 @@ internal fun disposeStartIoBannerContainer(container: FrameLayout) {
     runCatching { container.removeAllViews() }
 }
 
+private fun disposeAdMobContainer(container: FrameLayout) {
+    for (i in container.childCount - 1 downTo 0) {
+        val child = container.getChildAt(i)
+        if (child is AdView) {
+            runCatching { child.destroy() }
+        }
+    }
+    runCatching { container.removeAllViews() }
+}
+
 object MomiInterstitialController {
     private const val MIN_COOLDOWN_MS = 4 * 60_000L
 
     @Volatile private var lastShownAtMs = 0L
-    @Volatile private var isAdReady = false
-    @Volatile private var isLoading = false
-    private var cachedAd: StartAppAd? = null
+    @Volatile private var isStartIoReady = false
+    @Volatile private var isStartIoLoading = false
+    @Volatile private var isAdMobLoading = false
+    private var cachedAdMob: InterstitialAd? = null
+    private var cachedStartIo: StartAppAd? = null
 
-    fun preload(context: Context) {
-        if (isLoading || isAdReady) return
+    fun preload(
+        context: Context,
+        config: AdMonetizationConfig = AdMonetizationConfig()
+    ) {
         val appContext = context.applicationContext
-        if (!MomiStartIoSession.isInitialized.value) {
-            MomiStartIoSession.updateInterstitial("Waiting for SDK")
-            return
+        if (config.admobEnabled && cachedAdMob == null && !isAdMobLoading) {
+            val unitId = resolveAdMobInterstitialUnitId(config)
+            if (unitId.isNotBlank()) {
+                isAdMobLoading = true
+                MomiStartIoSession.updateInterstitial("Loading AdMob...")
+                runCatching {
+                    InterstitialAd.load(
+                        appContext,
+                        unitId,
+                        AdRequest.Builder().build(),
+                        object : InterstitialAdLoadCallback() {
+                            override fun onAdLoaded(ad: InterstitialAd) {
+                                isAdMobLoading = false
+                                cachedAdMob = ad
+                                MomiStartIoSession.updateInterstitial("AdMob Ready")
+                            }
+
+                            override fun onAdFailedToLoad(error: LoadAdError) {
+                                isAdMobLoading = false
+                                cachedAdMob = null
+                                MomiStartIoSession.updateInterstitial("AdMob no fill (${error.code}) — Start.io standby")
+                            }
+                        }
+                    )
+                }.onFailure {
+                    isAdMobLoading = false
+                }
+            }
         }
-        isLoading = true
-        MomiStartIoSession.updateInterstitial("Loading...")
+
+        if (!config.startIoEnabled) return
+        if (isStartIoLoading || isStartIoReady) return
+        if (!MomiStartIoSession.isInitialized.value) return
+
+        isStartIoLoading = true
         runCatching {
-            val ad = cachedAd ?: StartAppAd(appContext).also { cachedAd = it }
+            val ad = cachedStartIo ?: StartAppAd(appContext).also { cachedStartIo = it }
             ad.loadAd(StartAppAd.AdMode.AUTOMATIC, object : AdEventListener {
                 override fun onReceiveAd(ad: Ad) {
-                    isLoading = false
-                    isAdReady = true
-                    MomiStartIoSession.updateInterstitial("Ready")
-                    Log.d(TAG, "Interstitial preloaded")
+                    isStartIoLoading = false
+                    isStartIoReady = true
+                    if (cachedAdMob == null) {
+                        MomiStartIoSession.updateInterstitial("Start.io Ready")
+                    }
                 }
 
                 override fun onFailedToReceiveAd(ad: Ad?) {
-                    isLoading = false
-                    isAdReady = false
-                    val reason = ad?.errorMessage?.takeIf { it.isNotBlank() } ?: "No fill"
-                    MomiStartIoSession.updateInterstitial("No fill: $reason")
-                    Log.w(TAG, "Interstitial preload skipped: $reason")
+                    isStartIoLoading = false
+                    isStartIoReady = false
+                    if (cachedAdMob == null) {
+                        val reason = ad?.errorMessage?.takeIf { it.isNotBlank() } ?: "No fill"
+                        MomiStartIoSession.updateInterstitial("No fill: $reason")
+                    }
                 }
             })
-        }.onFailure { err ->
-            isLoading = false
-            isAdReady = false
-            MomiStartIoSession.updateInterstitial("Error: ${err.message ?: "init"}")
+        }.onFailure {
+            isStartIoLoading = false
+            isStartIoReady = false
         }
     }
 
-    fun maybeShowOnMilestone(context: Context): Boolean {
+    fun maybeShowOnMilestone(
+        context: Context,
+        config: AdMonetizationConfig = AdMonetizationConfig()
+    ): Boolean {
         val now = System.currentTimeMillis()
         if (now - lastShownAtMs < MIN_COOLDOWN_MS) return false
-        val ad = cachedAd
-        if (!isAdReady || ad == null) {
-            preload(context)
+
+        val activity = context.findActivity()
+        val adMobAd = cachedAdMob
+        if (config.admobEnabled && adMobAd != null && activity != null) {
+            lastShownAtMs = now
+            cachedAdMob = null
+            runCatching { adMobAd.show(activity) }
+            preload(context, config)
+            return true
+        }
+
+        val startIoAd = cachedStartIo
+        if (!config.startIoEnabled || !isStartIoReady || startIoAd == null) {
+            preload(context, config)
             return false
         }
         return runCatching {
             lastShownAtMs = now
-            isAdReady = false
-            ad.showAd(object : AdDisplayListener {
+            isStartIoReady = false
+            startIoAd.showAd(object : AdDisplayListener {
                 override fun adHidden(ad: Ad?) {
-                    preload(context)
+                    preload(context, config)
                 }
 
                 override fun adDisplayed(ad: Ad?) = Unit
-
                 override fun adClicked(ad: Ad?) = Unit
 
                 override fun adNotDisplayed(ad: Ad?) {
-                    preload(context)
+                    preload(context, config)
                 }
             })
         }.getOrElse {
-            isAdReady = false
-            preload(context)
+            isStartIoReady = false
+            preload(context, config)
             false
         }
     }
@@ -482,12 +605,19 @@ data class StartIoNativeAdState(
 )
 
 @Composable
-fun rememberStartIoNativeAds(count: Int = 3): StartIoNativeAdState {
+fun rememberStartIoNativeAds(
+    count: Int = 3,
+    enabled: Boolean = true
+): StartIoNativeAdState {
     val context = LocalContext.current
     val sdkReady by MomiStartIoSession.isInitialized.collectAsState()
     var state by remember { mutableStateOf(StartIoNativeAdState()) }
 
-    LaunchedEffect(context, count, sdkReady) {
+    LaunchedEffect(context, count, sdkReady, enabled) {
+        if (!enabled) {
+            state = StartIoNativeAdState(ads = emptyList(), finishedLoading = true)
+            return@LaunchedEffect
+        }
         if (!sdkReady) return@LaunchedEffect
         val mainHandler = Handler(Looper.getMainLooper())
 
@@ -504,9 +634,8 @@ fun rememberStartIoNativeAds(count: Int = 3): StartIoNativeAdState {
                 nativeLoader.load(prefs, object : AdEventListener {
                     override fun onReceiveAd(ad: Ad) {
                         val loaded = nativeLoader.nativeAds.orEmpty().toList()
-                        Log.d(TAG, "Native ads received: ${loaded.size}")
                         MomiStartIoSession.updateNative(
-                            if (loaded.isNotEmpty()) "Loaded (${loaded.size} ads)" else "Returned 0 native ads (using MREC/Banner)"
+                            if (loaded.isNotEmpty()) "Loaded (${loaded.size} ads)" else "0 native ads (falling back)"
                         )
                         mainHandler.post {
                             state = StartIoNativeAdState(ads = loaded, finishedLoading = true)
@@ -515,8 +644,7 @@ fun rememberStartIoNativeAds(count: Int = 3): StartIoNativeAdState {
 
                     override fun onFailedToReceiveAd(ad: Ad?) {
                         val reason = ad?.errorMessage?.takeIf { it.isNotBlank() } ?: "No fill"
-                        Log.w(TAG, "Native ad failed (attempt $attempt): $reason")
-                        MomiStartIoSession.updateNative("No fill ($reason) — falling back to MREC/Banner")
+                        MomiStartIoSession.updateNative("No fill ($reason) — falling back")
                         mainHandler.post {
                             state = StartIoNativeAdState(ads = emptyList(), finishedLoading = true)
                         }
@@ -526,7 +654,6 @@ fun rememberStartIoNativeAds(count: Int = 3): StartIoNativeAdState {
                     }
                 })
             }.onFailure { error ->
-                Log.w(TAG, "Native ad loader error: ${error.message}")
                 MomiStartIoSession.updateNative("Error: ${error.message ?: "load failed"}")
                 state = StartIoNativeAdState(ads = emptyList(), finishedLoading = true)
             }
@@ -542,24 +669,166 @@ fun rememberStartIoNativeAds(count: Int = 3): StartIoNativeAdState {
 fun MomiInlineFeedAdCard(
     slotIndex: Int = 0,
     nativeAdState: StartIoNativeAdState = StartIoNativeAdState(),
+    monetizationConfig: AdMonetizationConfig = AdMonetizationConfig(),
     modifier: Modifier = Modifier
 ) {
     val sdkReady by MomiStartIoSession.isInitialized.collectAsState()
-    if (!sdkReady) return
-
-    val nativeAd = if (slotIndex in nativeAdState.ads.indices) {
+    val nativeAd = if (monetizationConfig.startIoEnabled && slotIndex in nativeAdState.ads.indices) {
         nativeAdState.ads[slotIndex]
     } else {
         null
     }
 
+    val admobUnitId = remember(monetizationConfig) { resolveAdMobMrecUnitId(monetizationConfig) }
+    val monetagUrl = remember(monetizationConfig) { resolveMonetagDirectUrl(monetizationConfig) }
+
+    var admobExhausted by remember(monetizationConfig.admobEnabled, admobUnitId) {
+        mutableStateOf(!monetizationConfig.admobEnabled || admobUnitId.isBlank())
+    }
+    var startIoMrecExhausted by remember(monetizationConfig.startIoEnabled) {
+        mutableStateOf(!monetizationConfig.startIoEnabled)
+    }
+
+    // 1) AdMob Medium Rectangle (300x250) first in the waterfall when enabled
+    if (!admobExhausted) {
+        AdMobSponsoredCard(
+            unitId = admobUnitId,
+            adSize = AdSize.MEDIUM_RECTANGLE,
+            widthDp = 300,
+            heightDp = 250,
+            tagPrefix = "AdMob",
+            onFailedToFill = { admobExhausted = true },
+            modifier = modifier
+        )
+        return
+    }
+
+    // 2) Start.io Native or collapsed-until-loaded MREC
     if (nativeAd != null) {
         StartIoNativeSponsoredPostCard(
             nativeAd = nativeAd,
             modifier = modifier
         )
-    } else if (nativeAdState.finishedLoading && slotIndex < MAX_INLINE_WEBVIEW_MREC_SLOTS) {
-        StartIoMrecSponsoredCard(modifier = modifier)
+        return
+    }
+
+    if (monetizationConfig.startIoEnabled && sdkReady && !startIoMrecExhausted && slotIndex < MAX_INLINE_MREC_SLOTS) {
+        StartIoMrecSponsoredCard(
+            onExhausted = { startIoMrecExhausted = true },
+            modifier = modifier
+        )
+        return
+    }
+
+    // 3) Monetag Direct SmartLink Partner Showcase fallback (only if configured with an https:// URL)
+    if (monetagUrl.isNotEmpty()) {
+        MonetagPartnerShowcaseCard(
+            directLinkUrl = monetagUrl,
+            config = monetizationConfig,
+            modifier = modifier
+        )
+    }
+}
+
+@Composable
+private fun AdMobSponsoredCard(
+    unitId: String,
+    adSize: AdSize,
+    widthDp: Int,
+    heightDp: Int,
+    tagPrefix: String,
+    onFailedToFill: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var isLoaded by remember(unitId) { mutableStateOf(false) }
+
+    CollapsibleMeasuredAdWrapper(
+        isVisible = isLoaded,
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.background)
+                .testTag("home_feed_ad_card")
+        ) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .border(
+                        width = 0.75.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f),
+                        shape = RoundedCornerShape(16.dp)
+                    ),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                tonalElevation = 1.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    SponsoredHeaderRow(label = "Partner Showcase")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .width(widthDp.dp)
+                            .height(heightDp.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AndroidView(
+                            factory = { ctx ->
+                                FrameLayout(ctx).apply {
+                                    MomiStartIoSession.updateAdMob("$tagPrefix requesting...")
+                                    val adView = AdView(ctx).apply {
+                                        setAdSize(adSize)
+                                        adUnitId = unitId
+                                        adListener = object : AdListener() {
+                                            override fun onAdLoaded() {
+                                                isLoaded = true
+                                                MomiStartIoSession.updateAdMob("$tagPrefix loaded")
+                                            }
+
+                                            override fun onAdFailedToLoad(error: LoadAdError) {
+                                                isLoaded = false
+                                                MomiStartIoSession.updateAdMob("No fill (${error.code}) — falling back")
+                                                onFailedToFill()
+                                            }
+                                        }
+                                    }
+                                    addView(
+                                        adView,
+                                        FrameLayout.LayoutParams(
+                                            FrameLayout.LayoutParams.WRAP_CONTENT,
+                                            FrameLayout.LayoutParams.WRAP_CONTENT,
+                                            Gravity.CENTER
+                                        )
+                                    )
+                                    post {
+                                        runCatching { adView.loadAd(AdRequest.Builder().build()) }
+                                            .onFailure {
+                                                MomiStartIoSession.updateAdMob("Error: ${it.message}")
+                                                onFailedToFill()
+                                            }
+                                    }
+                                }
+                            },
+                            onRelease = { container -> disposeAdMobContainer(container) },
+                            modifier = Modifier
+                                .width(widthDp.dp)
+                                .height(heightDp.dp)
+                        )
+                    }
+                }
+            }
+            HorizontalDivider(
+                thickness = 0.5.dp,
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+            )
+        }
     }
 }
 
@@ -590,7 +859,6 @@ private fun StartIoNativeSponsoredPostCard(
     ) {
         Box(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.fillMaxWidth()) {
-                // Header mimicking a genuine Momi creator post
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -664,7 +932,7 @@ private fun StartIoNativeSponsoredPostCard(
                                     )
                                     Spacer(modifier = Modifier.width(2.dp))
                                     Text(
-                                        text = String.format("%.1f", nativeAd.rating),
+                                        text = String.format(Locale.US, "%.1f", nativeAd.rating),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -682,7 +950,6 @@ private fun StartIoNativeSponsoredPostCard(
                     }
                 }
 
-                // Creative Banner Image
                 when {
                     creativeBitmap != null -> Image(
                         bitmap = creativeBitmap,
@@ -702,7 +969,6 @@ private fun StartIoNativeSponsoredPostCard(
                     )
                 }
 
-                // Description & CTA Strip
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -737,7 +1003,6 @@ private fun StartIoNativeSponsoredPostCard(
                 }
             }
 
-            // Native Start.io impression & click tracking layer covering the post card
             AndroidView(
                 factory = { ctx ->
                     FrameLayout(ctx).apply {
@@ -760,13 +1025,32 @@ private fun StartIoNativeSponsoredPostCard(
 
 @Composable
 private fun StartIoMrecSponsoredCard(
+    onExhausted: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
+    var mrecLoaded by remember { mutableStateOf(false) }
     var mrecFailed by remember { mutableStateOf(activity == null) }
     var bannerFallbackFailed by remember { mutableStateOf(false) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
+
+    // Timeout guard so Start.io never stalls silently
+    LaunchedEffect(mrecFailed, mrecLoaded) {
+        if (!mrecFailed && !mrecLoaded) {
+            delay(STARTIO_FILL_TIMEOUT_MS)
+            if (!mrecLoaded) {
+                MomiStartIoSession.updateMrec("Timed out — trying 320x50 Banner")
+                mrecFailed = true
+            }
+        }
+    }
+
+    LaunchedEffect(mrecFailed, bannerFallbackFailed) {
+        if (mrecFailed && bannerFallbackFailed) {
+            onExhausted()
+        }
+    }
 
     if (mrecFailed && bannerFallbackFailed) return
 
@@ -780,216 +1064,102 @@ private fun StartIoMrecSponsoredCard(
 
     val hostActivity = activity ?: return
 
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.background)
-            .testTag("home_feed_ad_card")
+    // Only expands visible card height once onReceiveAd confirms real banner fill
+    CollapsibleMeasuredAdWrapper(
+        isVisible = mrecLoaded,
+        modifier = modifier.fillMaxWidth()
     ) {
-        Surface(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp)
-                .border(
-                    width = 0.75.dp,
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f),
-                    shape = RoundedCornerShape(16.dp)
-                ),
-            shape = RoundedCornerShape(16.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-            tonalElevation = 1.dp
+                .background(MaterialTheme.colorScheme.background)
+                .testTag("home_feed_ad_card")
         ) {
-            Column(
+            Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .border(
+                        width = 0.75.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f),
+                        shape = RoundedCornerShape(16.dp)
+                    ),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                tonalElevation = 1.dp
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(MaterialTheme.colorScheme.secondaryContainer)
-                                .padding(horizontal = 7.dp, vertical = 2.dp)
-                        ) {
-                            Text(
-                                text = "Sponsored",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Partner Showcase",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Icon(
-                        imageVector = Icons.Outlined.Campaign,
-                        contentDescription = "Sponsored content",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // Explicit 300x250dp box ensures Start.io MREC always has full non-zero dimensions
-                Box(
+                Column(
                     modifier = Modifier
-                        .width(300.dp)
-                        .height(250.dp),
-                    contentAlignment = Alignment.Center
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    AndroidView(
-                        factory = { ctx ->
-                            FrameLayout(ctx).apply {
-                                val onRendererGone = {
-                                    MomiStartIoSession.updateMrec("Renderer recovered (hidden)")
-                                    mrecFailed = true
-                                }
-                                val mrec = Mrec(hostActivity, object : BannerListener {
-                                    override fun onReceiveAd(banner: View) {
-                                        Log.d(TAG, "MREC ad received")
-                                        MomiStartIoSession.updateMrec("Loaded (300x250)")
-                                        mainHandler.post {
-                                            (banner as? BannerStandard)?.let {
-                                                protectBannerStandardWebViews(it, onRendererGone)
-                                            }
-                                            mrecFailed = false
-                                            runCatching { (banner as? Mrec)?.showBanner() }
-                                        }
-                                    }
-
-                                    override fun onFailedToReceiveAd(banner: View?) {
-                                        Log.w(TAG, "MREC ad failed; falling back to 320x50 banner")
-                                        MomiStartIoSession.updateMrec("No fill — trying 320x50 Banner")
-                                        mainHandler.post { mrecFailed = true }
-                                    }
-
-                                    override fun onImpression(banner: View?) = Unit
-
-                                    override fun onClick(banner: View?) = Unit
-                                })
-                                attachBannerWebViewProtector(mrec, mainHandler, onRendererGone)
-                                addView(
-                                    mrec,
-                                    FrameLayout.LayoutParams(
-                                        FrameLayout.LayoutParams.WRAP_CONTENT,
-                                        FrameLayout.LayoutParams.WRAP_CONTENT,
-                                        Gravity.CENTER
-                                    )
-                                )
-                                post {
-                                    MomiStartIoSession.updateMrec("Requesting 300x250...")
-                                    runCatching { mrec.loadAd(300, 250) }
-                                }
-                            }
-                        },
-                        onRelease = { container ->
-                            disposeStartIoBannerContainer(container)
-                        },
+                    SponsoredHeaderRow(label = "Partner Showcase")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Box(
                         modifier = Modifier
                             .width(300.dp)
-                            .height(250.dp)
-                    )
+                            .height(250.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AndroidView(
+                            factory = { ctx ->
+                                FrameLayout(ctx).apply {
+                                    val onRendererGone = {
+                                        MomiStartIoSession.updateMrec("Renderer recovered")
+                                        mrecLoaded = false
+                                        mrecFailed = true
+                                    }
+                                    val mrec = Mrec(hostActivity, object : BannerListener {
+                                        override fun onReceiveAd(banner: View) {
+                                            MomiStartIoSession.updateMrec("Loaded (300x250)")
+                                            mainHandler.post {
+                                                (banner as? BannerStandard)?.let {
+                                                    protectBannerStandardWebViews(it, onRendererGone)
+                                                }
+                                                mrecFailed = false
+                                                mrecLoaded = true
+                                                runCatching { (banner as? Mrec)?.showBanner() }
+                                            }
+                                        }
+
+                                        override fun onFailedToReceiveAd(banner: View?) {
+                                            MomiStartIoSession.updateMrec("No fill — trying 320x50 Banner")
+                                            mainHandler.post {
+                                                mrecLoaded = false
+                                                mrecFailed = true
+                                            }
+                                        }
+
+                                        override fun onImpression(banner: View?) = Unit
+                                        override fun onClick(banner: View?) = Unit
+                                    })
+                                    attachBannerWebViewProtector(mrec, mainHandler, onRendererGone)
+                                    addView(
+                                        mrec,
+                                        FrameLayout.LayoutParams(
+                                            FrameLayout.LayoutParams.WRAP_CONTENT,
+                                            FrameLayout.LayoutParams.WRAP_CONTENT,
+                                            Gravity.CENTER
+                                        )
+                                    )
+                                    post {
+                                        MomiStartIoSession.updateMrec("Requesting 300x250...")
+                                        runCatching { mrec.loadAd(300, 250) }
+                                    }
+                                }
+                            },
+                            onRelease = { container -> disposeStartIoBannerContainer(container) },
+                            modifier = Modifier
+                                .width(300.dp)
+                                .height(250.dp)
+                        )
+                    }
                 }
             }
-        }
-
-        HorizontalDivider(
-            thickness = 0.5.dp,
-            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-        )
-    }
-}
-
-@Composable
-fun MomiAnchoredExploreBanner(
-    modifier: Modifier = Modifier
-) {
-    val sdkReady by MomiStartIoSession.isInitialized.collectAsState()
-    var adFailed by remember { mutableStateOf(false) }
-    val mainHandler = remember { Handler(Looper.getMainLooper()) }
-
-    if (!sdkReady || adFailed) return
-
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.background)
-            .testTag("explore_ad_banner"),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        HorizontalDivider(
-            thickness = 0.5.dp,
-            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(54.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            AndroidView(
-                factory = { ctx ->
-                    FrameLayout(ctx).apply {
-                        val onRendererGone = {
-                            MomiStartIoSession.updateBanner("Renderer recovered (hidden)")
-                            adFailed = true
-                        }
-                        val hostCtx = ctx.findActivity() ?: ctx
-                        val banner = Banner(hostCtx, object : BannerListener {
-                            override fun onReceiveAd(banner: View) {
-                                Log.d(TAG, "Explore banner ad received")
-                                MomiStartIoSession.updateBanner("Loaded (320x50)")
-                                mainHandler.post {
-                                    (banner as? BannerStandard)?.let {
-                                        protectBannerStandardWebViews(it, onRendererGone)
-                                    }
-                                    adFailed = false
-                                    runCatching { (banner as? Banner)?.showBanner() }
-                                }
-                            }
-
-                            override fun onFailedToReceiveAd(banner: View?) {
-                                Log.w(TAG, "Explore banner failed to receive")
-                                MomiStartIoSession.updateBanner("No fill (Explore 320x50)")
-                                mainHandler.post { adFailed = true }
-                            }
-
-                            override fun onImpression(banner: View?) = Unit
-
-                            override fun onClick(banner: View?) = Unit
-                        })
-                        attachBannerWebViewProtector(banner, mainHandler, onRendererGone)
-                        addView(
-                            banner,
-                            FrameLayout.LayoutParams(
-                                FrameLayout.LayoutParams.WRAP_CONTENT,
-                                FrameLayout.LayoutParams.WRAP_CONTENT,
-                                Gravity.CENTER
-                            )
-                        )
-                        post {
-                            MomiStartIoSession.updateBanner("Requesting 320x50...")
-                            runCatching { banner.loadAd(320, 50) }
-                        }
-                    }
-                },
-                onRelease = { container ->
-                    disposeStartIoBannerContainer(container)
-                },
-                modifier = Modifier
-                    .width(320.dp)
-                    .height(50.dp)
+            HorizontalDivider(
+                thickness = 0.5.dp,
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
             )
         }
     }
@@ -1001,107 +1171,107 @@ private fun StartIoStandardFeedBannerCard(
     modifier: Modifier = Modifier
 ) {
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    var bannerLoaded by remember { mutableStateOf(false) }
 
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.background)
-            .testTag("home_feed_ad_card")
+    LaunchedEffect(bannerLoaded) {
+        if (!bannerLoaded) {
+            delay(STARTIO_FILL_TIMEOUT_MS)
+            if (!bannerLoaded) {
+                MomiStartIoSession.updateBanner("Feed 320x50 timeout")
+                onFailed()
+            }
+        }
+    }
+
+    CollapsibleMeasuredAdWrapper(
+        isVisible = bannerLoaded,
+        modifier = modifier.fillMaxWidth()
     ) {
-        Surface(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 6.dp)
-                .border(
-                    width = 0.75.dp,
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f),
-                    shape = RoundedCornerShape(14.dp)
-                ),
-            shape = RoundedCornerShape(14.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                .background(MaterialTheme.colorScheme.background)
+                .testTag("home_feed_ad_card")
         ) {
-            Column(
+            Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                    .border(
+                        width = 0.75.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f),
+                        shape = RoundedCornerShape(14.dp)
+                    ),
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "Sponsored",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Icon(
-                        imageVector = Icons.Outlined.Campaign,
-                        contentDescription = "Sponsored banner",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(15.dp)
-                    )
-                }
-                Spacer(modifier = Modifier.height(6.dp))
-                Box(
+                Column(
                     modifier = Modifier
-                        .width(320.dp)
-                        .height(50.dp),
-                    contentAlignment = Alignment.Center
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    AndroidView(
-                        factory = { ctx ->
-                            FrameLayout(ctx).apply {
-                                val onRendererGone = {
-                                    MomiStartIoSession.updateBanner("Renderer recovered (hidden)")
-                                    onFailed()
-                                }
-                                val hostCtx = ctx.findActivity() ?: ctx
-                                val banner = Banner(hostCtx, object : BannerListener {
-                                    override fun onReceiveAd(banner: View) {
-                                        Log.d(TAG, "Feed fallback banner received")
-                                        MomiStartIoSession.updateBanner("Loaded (Feed 320x50)")
-                                        mainHandler.post {
-                                            (banner as? BannerStandard)?.let {
-                                                protectBannerStandardWebViews(it, onRendererGone)
-                                            }
-                                            runCatching { (banner as? Banner)?.showBanner() }
-                                        }
-                                    }
-
-                                    override fun onFailedToReceiveAd(banner: View?) {
-                                        MomiStartIoSession.updateBanner("No fill (Feed 320x50)")
-                                        mainHandler.post(onFailed)
-                                    }
-
-                                    override fun onImpression(banner: View?) = Unit
-
-                                    override fun onClick(banner: View?) = Unit
-                                })
-                                attachBannerWebViewProtector(banner, mainHandler, onRendererGone)
-                                addView(
-                                    banner,
-                                    FrameLayout.LayoutParams(
-                                        FrameLayout.LayoutParams.WRAP_CONTENT,
-                                        FrameLayout.LayoutParams.WRAP_CONTENT,
-                                        Gravity.CENTER
-                                    )
-                                )
-                                post {
-                                    MomiStartIoSession.updateBanner("Requesting Feed 320x50...")
-                                    runCatching { banner.loadAd(320, 50) }
-                                }
-                            }
-                        },
-                        onRelease = { container ->
-                            disposeStartIoBannerContainer(container)
-                        },
+                    SponsoredHeaderRow(label = "Partner Banner")
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Box(
                         modifier = Modifier
                             .width(320.dp)
-                            .height(50.dp)
-                    )
+                            .height(50.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AndroidView(
+                            factory = { ctx ->
+                                FrameLayout(ctx).apply {
+                                    val onRendererGone = {
+                                        MomiStartIoSession.updateBanner("Renderer recovered")
+                                        bannerLoaded = false
+                                        onFailed()
+                                    }
+                                    val hostCtx = ctx.findActivity() ?: ctx
+                                    val banner = Banner(hostCtx, object : BannerListener {
+                                        override fun onReceiveAd(banner: View) {
+                                            MomiStartIoSession.updateBanner("Loaded (Feed 320x50)")
+                                            mainHandler.post {
+                                                (banner as? BannerStandard)?.let {
+                                                    protectBannerStandardWebViews(it, onRendererGone)
+                                                }
+                                                bannerLoaded = true
+                                                runCatching { (banner as? Banner)?.showBanner() }
+                                            }
+                                        }
+
+                                        override fun onFailedToReceiveAd(banner: View?) {
+                                            MomiStartIoSession.updateBanner("No fill (Feed 320x50)")
+                                            mainHandler.post {
+                                                bannerLoaded = false
+                                                onFailed()
+                                            }
+                                        }
+
+                                        override fun onImpression(banner: View?) = Unit
+                                        override fun onClick(banner: View?) = Unit
+                                    })
+                                    attachBannerWebViewProtector(banner, mainHandler, onRendererGone)
+                                    addView(
+                                        banner,
+                                        FrameLayout.LayoutParams(
+                                            FrameLayout.LayoutParams.WRAP_CONTENT,
+                                            FrameLayout.LayoutParams.WRAP_CONTENT,
+                                            Gravity.CENTER
+                                        )
+                                    )
+                                    post {
+                                        MomiStartIoSession.updateBanner("Requesting Feed 320x50...")
+                                        runCatching { banner.loadAd(320, 50) }
+                                    }
+                                }
+                            },
+                            onRelease = { container -> disposeStartIoBannerContainer(container) },
+                            modifier = Modifier
+                                .width(320.dp)
+                                .height(50.dp)
+                        )
+                    }
                 }
             }
         }
@@ -1109,103 +1279,448 @@ private fun StartIoStandardFeedBannerCard(
 }
 
 @Composable
-fun MomiMarketplaceBanner(
+private fun MonetagPartnerShowcaseCard(
+    directLinkUrl: String,
+    config: AdMonetizationConfig,
     modifier: Modifier = Modifier
 ) {
-    val sdkReady by MomiStartIoSession.isInitialized.collectAsState()
-    var adFailed by remember { mutableStateOf(false) }
-    val mainHandler = remember { Handler(Looper.getMainLooper()) }
-
-    if (!sdkReady || adFailed) return
+    val uriHandler = LocalUriHandler.current
+    LaunchedEffect(directLinkUrl) {
+        MomiStartIoSession.updateMonetag("Active Direct Partner Link")
+    }
 
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .background(MaterialTheme.colorScheme.background)
+            .testTag("monetag_partner_card")
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp)
+                .border(
+                    width = 0.75.dp,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f),
+                    shape = RoundedCornerShape(16.dp)
+                )
+                .clip(RoundedCornerShape(16.dp))
+                .clickable { runCatching { uriHandler.openUri(directLinkUrl) } },
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.28f),
+            tonalElevation = 1.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                SponsoredHeaderRow(label = "Monetag Partner")
+                Text(
+                    text = config.partnerPromoTitle.ifBlank { "Featured Creator Deals & Partner Showcase" },
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = config.partnerPromoSubtitle.ifBlank {
+                        "Explore verified creator collections, partner offers & exclusive community perks."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Button(
+                    onClick = { runCatching { uriHandler.openUri(directLinkUrl) } },
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .testTag("monetag_partner_cta")
+                ) {
+                    Text(
+                        text = config.partnerPromoCta.ifBlank { "Explore Partner" },
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                        contentDescription = "Open sponsored partner link",
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+        }
+        HorizontalDivider(
+            thickness = 0.5.dp,
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+        )
+    }
+}
+
+@Composable
+private fun MonetagCompactStrip(
+    directLinkUrl: String,
+    config: AdMonetizationConfig,
+    modifier: Modifier = Modifier
+) {
+    val uriHandler = LocalUriHandler.current
+    LaunchedEffect(directLinkUrl) {
+        MomiStartIoSession.updateMonetag("Active Direct Partner Strip")
+    }
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.32f),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
             .clip(RoundedCornerShape(12.dp))
-            .background(Color(0xFFF5F5F5))
-            .border(0.75.dp, Color(0xFFE0E0E0), RoundedCornerShape(12.dp))
-            .padding(horizontal = 12.dp, vertical = 8.dp)
-            .testTag("marketplace_ad_banner"),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .clickable { runCatching { uriHandler.openUri(directLinkUrl) } }
+            .testTag("monetag_compact_strip")
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text(
-                text = "Sponsored Deal",
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
-                color = Color(0xFF6B6B6B)
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MaterialTheme.colorScheme.secondaryContainer)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = "Sponsored",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = config.partnerPromoTitle.ifBlank { "Explore Partner Showcase" },
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
             Icon(
-                imageVector = Icons.Outlined.Campaign,
-                contentDescription = "Sponsored partner deal",
-                tint = Color(0xFF3665F3),
-                modifier = Modifier.size(15.dp)
-            )
-        }
-        Spacer(modifier = Modifier.height(6.dp))
-        Box(
-            modifier = Modifier
-                .width(320.dp)
-                .height(50.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            AndroidView(
-                factory = { ctx ->
-                    FrameLayout(ctx).apply {
-                        val onRendererGone = {
-                            MomiStartIoSession.updateBanner("Renderer recovered (hidden)")
-                            adFailed = true
-                        }
-                        val hostCtx = ctx.findActivity() ?: ctx
-                        val banner = Banner(hostCtx, object : BannerListener {
-                            override fun onReceiveAd(banner: View) {
-                                MomiStartIoSession.updateBanner("Loaded (Market 320x50)")
-                                mainHandler.post {
-                                    (banner as? BannerStandard)?.let {
-                                        protectBannerStandardWebViews(it, onRendererGone)
-                                    }
-                                    adFailed = false
-                                    runCatching { (banner as? Banner)?.showBanner() }
-                                }
-                            }
-
-                            override fun onFailedToReceiveAd(banner: View?) {
-                                MomiStartIoSession.updateBanner("No fill (Market 320x50)")
-                                mainHandler.post { adFailed = true }
-                            }
-
-                            override fun onImpression(banner: View?) = Unit
-
-                            override fun onClick(banner: View?) = Unit
-                        })
-                        attachBannerWebViewProtector(banner, mainHandler, onRendererGone)
-                        addView(
-                            banner,
-                            FrameLayout.LayoutParams(
-                                FrameLayout.LayoutParams.WRAP_CONTENT,
-                                FrameLayout.LayoutParams.WRAP_CONTENT,
-                                Gravity.CENTER
-                            )
-                        )
-                        post {
-                            runCatching { banner.loadAd(320, 50) }
-                        }
-                    }
-                },
-                onRelease = { container ->
-                    disposeStartIoBannerContainer(container)
-                },
-                modifier = Modifier
-                    .width(320.dp)
-                    .height(50.dp)
+                imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                contentDescription = "Open partner offer",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp)
             )
         }
     }
 }
 
+@Composable
+private fun SponsoredHeaderRow(label: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(MaterialTheme.colorScheme.secondaryContainer)
+                    .padding(horizontal = 7.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    text = "Sponsored",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Icon(
+            imageVector = Icons.Outlined.Campaign,
+            contentDescription = "Sponsored content",
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(16.dp)
+        )
+    }
+}
 
+@Composable
+fun MomiAnchoredExploreBanner(
+    monetizationConfig: AdMonetizationConfig = AdMonetizationConfig(),
+    modifier: Modifier = Modifier
+) {
+    val sdkReady by MomiStartIoSession.isInitialized.collectAsState()
+    val admobUnitId = remember(monetizationConfig) { resolveAdMobBannerUnitId(monetizationConfig) }
+    val monetagUrl = remember(monetizationConfig) { resolveMonetagDirectUrl(monetizationConfig) }
+
+    var admobExhausted by remember(monetizationConfig.admobEnabled, admobUnitId) {
+        mutableStateOf(!monetizationConfig.admobEnabled || admobUnitId.isBlank())
+    }
+    var startIoFailed by remember(monetizationConfig.startIoEnabled) {
+        mutableStateOf(!monetizationConfig.startIoEnabled)
+    }
+
+    if (!admobExhausted) {
+        AdMobAnchoredStrip(
+            unitId = admobUnitId,
+            tag = "explore_ad_banner",
+            onFailedToFill = { admobExhausted = true },
+            modifier = modifier
+        )
+        return
+    }
+
+    if (monetizationConfig.startIoEnabled && sdkReady && !startIoFailed) {
+        StartIoAnchoredStrip(
+            tag = "explore_ad_banner",
+            statusLabel = "Explore 320x50",
+            onFailedToFill = { startIoFailed = true },
+            modifier = modifier
+        )
+        return
+    }
+
+    if (monetagUrl.isNotEmpty()) {
+        MonetagCompactStrip(
+            directLinkUrl = monetagUrl,
+            config = monetizationConfig,
+            modifier = modifier
+        )
+    }
+}
+
+@Composable
+fun MomiMarketplaceBanner(
+    monetizationConfig: AdMonetizationConfig = AdMonetizationConfig(),
+    modifier: Modifier = Modifier
+) {
+    val sdkReady by MomiStartIoSession.isInitialized.collectAsState()
+    val admobUnitId = remember(monetizationConfig) { resolveAdMobBannerUnitId(monetizationConfig) }
+    val monetagUrl = remember(monetizationConfig) { resolveMonetagDirectUrl(monetizationConfig) }
+
+    var admobExhausted by remember(monetizationConfig.admobEnabled, admobUnitId) {
+        mutableStateOf(!monetizationConfig.admobEnabled || admobUnitId.isBlank())
+    }
+    var startIoFailed by remember(monetizationConfig.startIoEnabled) {
+        mutableStateOf(!monetizationConfig.startIoEnabled)
+    }
+
+    if (!admobExhausted) {
+        AdMobAnchoredStrip(
+            unitId = admobUnitId,
+            tag = "marketplace_ad_banner",
+            onFailedToFill = { admobExhausted = true },
+            modifier = modifier
+        )
+        return
+    }
+
+    if (monetizationConfig.startIoEnabled && sdkReady && !startIoFailed) {
+        StartIoAnchoredStrip(
+            tag = "marketplace_ad_banner",
+            statusLabel = "Market 320x50",
+            onFailedToFill = { startIoFailed = true },
+            modifier = modifier
+        )
+        return
+    }
+
+    if (monetagUrl.isNotEmpty()) {
+        MonetagCompactStrip(
+            directLinkUrl = monetagUrl,
+            config = monetizationConfig,
+            modifier = modifier
+        )
+    }
+}
+
+@Composable
+private fun AdMobAnchoredStrip(
+    unitId: String,
+    tag: String,
+    onFailedToFill: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var isLoaded by remember(unitId) { mutableStateOf(false) }
+
+    CollapsibleMeasuredAdWrapper(
+        isVisible = isLoaded,
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.background)
+                .testTag(tag),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            HorizontalDivider(
+                thickness = 0.5.dp,
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(54.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                AndroidView(
+                    factory = { ctx ->
+                        FrameLayout(ctx).apply {
+                            val adView = AdView(ctx).apply {
+                                setAdSize(AdSize.BANNER)
+                                adUnitId = unitId
+                                adListener = object : AdListener() {
+                                    override fun onAdLoaded() {
+                                        isLoaded = true
+                                        MomiStartIoSession.updateAdMob("Banner loaded (320x50)")
+                                    }
+
+                                    override fun onAdFailedToLoad(error: LoadAdError) {
+                                        isLoaded = false
+                                        MomiStartIoSession.updateAdMob("Banner no fill (${error.code})")
+                                        onFailedToFill()
+                                    }
+                                }
+                            }
+                            addView(
+                                adView,
+                                FrameLayout.LayoutParams(
+                                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                                    Gravity.CENTER
+                                )
+                            )
+                            post {
+                                runCatching { adView.loadAd(AdRequest.Builder().build()) }
+                                    .onFailure { onFailedToFill() }
+                            }
+                        }
+                    },
+                    onRelease = { container -> disposeAdMobContainer(container) },
+                    modifier = Modifier
+                        .width(320.dp)
+                        .height(50.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StartIoAnchoredStrip(
+    tag: String,
+    statusLabel: String,
+    onFailedToFill: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    var isLoaded by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isLoaded) {
+        if (!isLoaded) {
+            delay(STARTIO_FILL_TIMEOUT_MS)
+            if (!isLoaded) {
+                MomiStartIoSession.updateBanner("No fill ($statusLabel timeout)")
+                onFailedToFill()
+            }
+        }
+    }
+
+    CollapsibleMeasuredAdWrapper(
+        isVisible = isLoaded,
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.background)
+                .testTag(tag),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            HorizontalDivider(
+                thickness = 0.5.dp,
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(54.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                AndroidView(
+                    factory = { ctx ->
+                        FrameLayout(ctx).apply {
+                            val onRendererGone = {
+                                MomiStartIoSession.updateBanner("Renderer recovered")
+                                isLoaded = false
+                                onFailedToFill()
+                            }
+                            val hostCtx = ctx.findActivity() ?: ctx
+                            val banner = Banner(hostCtx, object : BannerListener {
+                                override fun onReceiveAd(banner: View) {
+                                    MomiStartIoSession.updateBanner("Loaded ($statusLabel)")
+                                    mainHandler.post {
+                                        (banner as? BannerStandard)?.let {
+                                            protectBannerStandardWebViews(it, onRendererGone)
+                                        }
+                                        isLoaded = true
+                                        runCatching { (banner as? Banner)?.showBanner() }
+                                    }
+                                }
+
+                                override fun onFailedToReceiveAd(banner: View?) {
+                                    MomiStartIoSession.updateBanner("No fill ($statusLabel)")
+                                    mainHandler.post {
+                                        isLoaded = false
+                                        onFailedToFill()
+                                    }
+                                }
+
+                                override fun onImpression(banner: View?) = Unit
+                                override fun onClick(banner: View?) = Unit
+                            })
+                            attachBannerWebViewProtector(banner, mainHandler, onRendererGone)
+                            addView(
+                                banner,
+                                FrameLayout.LayoutParams(
+                                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                                    Gravity.CENTER
+                                )
+                            )
+                            post {
+                                MomiStartIoSession.updateBanner("Requesting $statusLabel...")
+                                runCatching { banner.loadAd(320, 50) }
+                            }
+                        }
+                    },
+                    onRelease = { container -> disposeStartIoBannerContainer(container) },
+                    modifier = Modifier
+                        .width(320.dp)
+                        .height(50.dp)
+                )
+            }
+        }
+    }
+}

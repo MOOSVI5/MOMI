@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.MomiAiAssistantRepository
 import com.example.data.model.AccountPerkItem
+import com.example.data.model.AdMonetizationConfig
 import com.example.data.model.ChatMessage
 import com.example.data.model.Comment
 import com.example.data.model.ContentReport
@@ -26,9 +27,11 @@ import com.example.data.model.MomiCreditCatalog
 import com.example.data.model.MomiRoles
 import com.example.data.model.NotificationItem
 import com.example.data.model.Post
+import com.example.data.model.PostBoostOption
 import com.example.data.model.Story
 import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
+import com.example.data.model.sortFeedWithBoostPriority
 import com.example.data.repository.MarketplaceRepository
 import com.example.data.repository.MomiFirestoreRepository
 import com.example.data.repository.WalletRepository
@@ -139,6 +142,7 @@ class MomiViewModel(
     private val cachedContentReports = MutableStateFlow<List<ContentReport>>(emptyList())
     private val cachedWallet = MutableStateFlow<UserWallet?>(null)
     private val cachedCreditTransactions = MutableStateFlow<List<CreditTransaction>>(emptyList())
+    private val cachedMonetizationConfig = MutableStateFlow(AdMonetizationConfig())
     private val cachedLikedPostIds = MutableStateFlow<Set<String>>(emptySet())
     private val cachedBookmarkedPostIds = MutableStateFlow<Set<String>>(emptySet())
     private val cachedSeenStoryIds = MutableStateFlow<Set<String>>(emptySet())
@@ -445,8 +449,9 @@ class MomiViewModel(
                 isFollowingAuthor = post.userId == currentUserId || base.following.contains(post.userId)
             )
         }
-        lastKnownEnrichedPosts.value = enriched
-        StreamUiState.Success(enriched) as StreamUiState<List<Post>>
+        val prioritized = sortFeedWithBoostPriority(enriched)
+        lastKnownEnrichedPosts.value = prioritized
+        StreamUiState.Success(prioritized) as StreamUiState<List<Post>>
     }
         .catch { error ->
             val root = unwrapOrRethrowCancellation(error)
@@ -608,6 +613,10 @@ class MomiViewModel(
     val creditTransactions: StateFlow<List<CreditTransaction>> = walletRepository.observeTransactions(currentUserId)
         .resilientWithCache(cachedCreditTransactions, "creditTransactions")
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
+
+    val monetizationConfig: StateFlow<AdMonetizationConfig> = repository.observeAdMonetizationConfig(currentUserId)
+        .resilientWithCache(cachedMonetizationConfig, "monetizationConfig")
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), AdMonetizationConfig())
 
     private val _themePreference = MutableStateFlow(ThemePreference.SYSTEM)
     val themePreference: StateFlow<ThemePreference> = _themePreference.asStateFlow()
@@ -1873,6 +1882,137 @@ class MomiViewModel(
 
     fun showInfoNotice(message: String) {
         _statusNotice.value = message
+    }
+
+    fun saveAdMonetizationConfig(
+        config: AdMonetizationConfig,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to update monetizer settings."
+            onComplete(false)
+            return
+        }
+        viewModelScope.launch {
+            _isProcessingWalletAction.value = true
+            repository.saveAdMonetizationConfig(
+                config = config,
+                adminEmail = initialEmail ?: "syali6511@gmail.com"
+            ).onSuccess {
+                _statusNotice.value = "Updated AdMob, Start.io & Monetag config for Android & Web!"
+                onComplete(true)
+            }.onFailure { error ->
+                _errorMessage.value = unwrapErrorMessage(error, "Could not save monetizer settings")
+                onComplete(false)
+            }
+            _isProcessingWalletAction.value = false
+        }
+    }
+
+    fun updatePartnerConsent(
+        consented: Boolean,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            repository.updatePartnerConsent(consented)
+                .onSuccess {
+                    _statusNotice.value = if (consented) {
+                        "Partner Boost & Perks Consent enabled — you're eligible for owner grants & featured perks!"
+                    } else {
+                        "Partner Boost & Perks Consent turned off."
+                    }
+                    onComplete(true)
+                }
+                .onFailure { error ->
+                    _errorMessage.value = unwrapErrorMessage(error, "Could not update consent preference")
+                    onComplete(false)
+                }
+        }
+    }
+
+    fun boostPostWithCredits(
+        post: Post,
+        option: PostBoostOption,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        val currentProfile = fallbackProfile()
+        viewModelScope.launch {
+            _isProcessingWalletAction.value = true
+            walletRepository.boostPostWithCredits(
+                profile = currentProfile,
+                postId = post.id,
+                option = option
+            ).onSuccess {
+                _statusNotice.value = "${option.title} activated (-${option.creditsCost} cr)! Your post is now promoted."
+                onComplete(true)
+            }.onFailure { error ->
+                _errorMessage.value = unwrapErrorMessage(error, "Could not boost post")
+                onComplete(false)
+            }
+            _isProcessingWalletAction.value = false
+        }
+    }
+
+    fun adminSetPostRecommended(
+        post: Post,
+        recommended: Boolean,
+        label: String = "Recommended by Momi",
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to recommend posts."
+            onComplete(false)
+            return
+        }
+        viewModelScope.launch {
+            repository.adminSetPostRecommended(
+                post = post,
+                recommended = recommended,
+                actorProfile = fallbackProfile(),
+                label = label
+            ).onSuccess {
+                _statusNotice.value = if (recommended) {
+                    "Post by @${post.authorUsername} marked \"$label\"!"
+                } else {
+                    "Removed recommendation badge from @${post.authorUsername}'s post."
+                }
+                onComplete(true)
+            }.onFailure { error ->
+                _errorMessage.value = unwrapErrorMessage(error, "Could not update post recommendation")
+                onComplete(false)
+            }
+        }
+    }
+
+    fun adminGrantConsentingUser(
+        targetUser: UserProfile,
+        creditsAmount: Long,
+        perk: AccountPerkItem? = null,
+        grantVerified: Boolean = false,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to grant perks or credits."
+            onComplete(false)
+            return
+        }
+        viewModelScope.launch {
+            _isProcessingWalletAction.value = true
+            walletRepository.adminGrantUserPerksAndCredits(
+                adminProfile = fallbackProfile(),
+                targetUser = targetUser,
+                creditsAmount = creditsAmount,
+                perk = perk,
+                grantVerified = grantVerified
+            ).onSuccess {
+                _statusNotice.value = "Granted rewards to @${targetUser.username}!"
+                onComplete(true)
+            }.onFailure { error ->
+                _errorMessage.value = unwrapErrorMessage(error, "Could not send owner grant")
+                onComplete(false)
+            }
+            _isProcessingWalletAction.value = false
+        }
     }
 
     fun publishShowcaseActivityBurst() {

@@ -7,6 +7,7 @@ import com.example.data.model.CreditPackageOption
 import com.example.data.model.CreditTransaction
 import com.example.data.model.LiveGiftItem
 import com.example.data.model.MomiCreditCatalog
+import com.example.data.model.PostBoostOption
 import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
 import com.example.data.remote.OperationType
@@ -447,6 +448,235 @@ class WalletRepository(private val db: FirebaseFirestore) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.WRITE, walletRef.path)
+            throw e
+        }
+    }
+
+    suspend fun boostPostWithCredits(
+        profile: UserProfile,
+        postId: String,
+        option: PostBoostOption
+    ): Result<String> = runCatching {
+        val uid = requireUserId()
+        require(postId.isNotBlank() && !postId.startsWith("showcase_")) {
+            "Select one of your published posts to boost."
+        }
+        ensureWalletInitialized().getOrThrow()
+
+        val walletRef = walletDoc(uid)
+        val postRef = db.collection("posts").document(postId)
+        val txId = generateTxId("boost")
+        val txRef = txCol().document(txId)
+        val safeUsername = profile.username.ifBlank { "creator" }.take(50)
+
+        try {
+            db.runTransaction { transaction ->
+                val walletSnap = transaction.get(walletRef)
+                val postSnap = transaction.get(postRef)
+                if (!walletSnap.exists()) {
+                    throw IllegalStateException("Wallet is not ready yet.")
+                }
+                if (!postSnap.exists() || postSnap.getString("userId") != uid) {
+                    throw IllegalStateException("You can only boost your own published posts.")
+                }
+                val currentBalance = (walletSnap.getLong("balance") ?: 0L).coerceAtLeast(0L)
+                val currentSpent = (walletSnap.getLong("totalSpent") ?: 0L).coerceAtLeast(0L)
+                if (currentBalance < option.creditsCost) {
+                    throw IllegalStateException(
+                        "You need ${option.creditsCost} credits for ${option.title} (balance: $currentBalance)."
+                    )
+                }
+
+                transaction.set(
+                    txRef,
+                    mapOf(
+                        "txId" to txId,
+                        "type" to CreditTransaction.TYPE_POST_BOOST,
+                        "senderUid" to uid,
+                        "senderUsername" to safeUsername,
+                        "recipientUid" to uid,
+                        "recipientUsername" to safeUsername,
+                        "creditsAmount" to option.creditsCost,
+                        "priceUsd" to 0.0,
+                        "paymentMethod" to CreditTransaction.METHOD_WALLET_CREDITS,
+                        "postId" to postId,
+                        "recipientClaimed" to true,
+                        "status" to "COMPLETED",
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+                transaction.update(
+                    walletRef,
+                    mapOf(
+                        "balance" to (currentBalance - option.creditsCost),
+                        "totalSpent" to (currentSpent + option.creditsCost),
+                        "lastTxId" to txId,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+                transaction.update(
+                    postRef,
+                    mapOf(
+                        "isBoosted" to true,
+                        "boostTier" to option.tier,
+                        "recommendedLabel" to option.badgeLabel.take(40),
+                        "boostedByUid" to uid,
+                        "boostedAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }.await()
+            txId
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, walletRef.path)
+            throw e
+        }
+    }
+
+    suspend fun adminGrantUserPerksAndCredits(
+        adminProfile: UserProfile,
+        targetUser: UserProfile,
+        creditsAmount: Long,
+        perk: AccountPerkItem?,
+        grantVerified: Boolean
+    ): Result<String> = runCatching {
+        val adminUid = requireUserId()
+        val targetUid = targetUser.userId
+        require(targetUid.isNotBlank()) { "Select a creator to grant perks." }
+        require(targetUser.partnerConsent) {
+            "@${targetUser.username} must enable Partner Boost & Perks Consent first."
+        }
+        val safeCredits = creditsAmount.coerceIn(0L, 5000L)
+        require(safeCredits > 0L || perk != null || grantVerified) {
+            "Choose credits, an in-app perk, or Verified status to grant."
+        }
+
+        val walletRef = walletDoc(targetUid)
+        val targetUserRef = userDoc(targetUid)
+        val txId = generateTxId("grant")
+        val txRef = txCol().document(txId)
+        val adminName = adminProfile.username.ifBlank { "syali6511" }.take(50)
+        val targetName = targetUser.username.ifBlank { "creator" }.take(50)
+
+        try {
+            db.runTransaction { transaction ->
+                val walletSnap = transaction.get(walletRef)
+                val txPayload = buildMap<String, Any> {
+                    put("txId", txId)
+                    put("type", CreditTransaction.TYPE_OWNER_GRANT)
+                    put("senderUid", adminUid)
+                    put("senderUsername", adminName)
+                    put("recipientUid", targetUid)
+                    put("recipientUsername", targetName)
+                    put("creditsAmount", safeCredits)
+                    put("priceUsd", 0.0)
+                    put("paymentMethod", CreditTransaction.METHOD_OWNER_ADMIN)
+                    if (perk != null) put("perkKey", perk.key)
+                    put("recipientClaimed", true)
+                    put("status", "COMPLETED")
+                    put("createdAt", FieldValue.serverTimestamp())
+                    put("updatedAt", FieldValue.serverTimestamp())
+                }
+                transaction.set(txRef, txPayload)
+
+                if (!walletSnap.exists()) {
+                    val nextPerks = listOfNotNull(perk?.key)
+                    val nextTier = MomiCreditCatalog.tierForTotalPurchased(0L, nextPerks)
+                    val nextVerification = if (grantVerified) {
+                        MomiCreditCatalog.VERIFICATION_VERIFIED
+                    } else {
+                        MomiCreditCatalog.verificationTierForPerks(MomiCreditCatalog.VERIFICATION_NONE, nextPerks)
+                    }
+                    transaction.set(
+                        walletRef,
+                        mapOf(
+                            "userId" to targetUid,
+                            "balance" to safeCredits,
+                            "totalEarned" to safeCredits,
+                            "totalSpent" to 0L,
+                            "totalPurchased" to 0L,
+                            "accountTier" to nextTier,
+                            "verificationTier" to nextVerification,
+                            "unlockedPerks" to nextPerks,
+                            "lastTxId" to txId,
+                            "createdAt" to FieldValue.serverTimestamp(),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                } else {
+                    val currentBalance = (walletSnap.getLong("balance") ?: 0L).coerceAtLeast(0L)
+                    val currentEarned = (walletSnap.getLong("totalEarned") ?: 0L).coerceAtLeast(0L)
+                    val currentPurchased = (walletSnap.getLong("totalPurchased") ?: 0L).coerceAtLeast(0L)
+                    val currentVerification = walletSnap.getString("verificationTier")
+                        ?: MomiCreditCatalog.VERIFICATION_NONE
+                    @Suppress("UNCHECKED_CAST")
+                    val existingPerks = (walletSnap.get("unlockedPerks") as? List<String>).orEmpty()
+                    val nextPerks = if (perk != null) (existingPerks + perk.key).distinct() else existingPerks
+                    val nextTier = MomiCreditCatalog.tierForTotalPurchased(currentPurchased, nextPerks)
+                    val nextVerification = if (grantVerified) {
+                        MomiCreditCatalog.VERIFICATION_VERIFIED
+                    } else {
+                        MomiCreditCatalog.verificationTierForPerks(currentVerification, nextPerks)
+                    }
+                    transaction.update(
+                        walletRef,
+                        mapOf(
+                            "balance" to (currentBalance + safeCredits),
+                            "totalEarned" to (currentEarned + safeCredits),
+                            "accountTier" to nextTier,
+                            "verificationTier" to nextVerification,
+                            "unlockedPerks" to nextPerks,
+                            "lastTxId" to txId,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                }
+
+                if (grantVerified) {
+                    transaction.update(
+                        targetUserRef,
+                        mapOf(
+                            "isVerified" to true,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                }
+            }.await()
+
+            val rewardSummary = buildList {
+                if (safeCredits > 0L) add("+$safeCredits Momi credits")
+                if (perk != null) add(perk.title)
+                if (grantVerified) add("Verified Creator badge")
+            }.joinToString(", ")
+
+            if (targetUid != adminUid && rewardSummary.isNotBlank()) {
+                runCatching {
+                    targetUserRef.collection("notifications").document().set(
+                        mapOf(
+                            "userId" to targetUid,
+                            "actorUid" to adminUid,
+                            "actorUsername" to adminName,
+                            "actorAvatarKey" to adminProfile.avatarKey.ifBlank { "avatar_aria" }.take(64),
+                            "message" to "granted you $rewardSummary!",
+                            "timeLabel" to "now",
+                            "section" to "Today",
+                            "isFollowAction" to false,
+                            "isFollowingBack" to false,
+                            "isUnread" to true,
+                            "createdAt" to FieldValue.serverTimestamp(),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+            txId
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, txRef.path)
             throw e
         }
     }

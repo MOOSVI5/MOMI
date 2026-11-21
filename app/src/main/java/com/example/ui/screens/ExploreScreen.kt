@@ -56,6 +56,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.AdMonetizationConfig
 import com.example.data.model.Post
 import com.example.data.model.UserProfile
 import com.example.ui.components.LumaAvatar
@@ -80,6 +81,7 @@ fun ExploreScreen(
     onCreatorClick: (UserProfile) -> Unit = {},
     onFollowCreator: (UserProfile, Boolean) -> Unit = { _, _ -> },
     onMessageCreator: (UserProfile) -> Unit = {},
+    monetizationConfig: AdMonetizationConfig = AdMonetizationConfig(),
     modifier: Modifier = Modifier
 ) {
     var useNotesGrid by remember { mutableStateOf(true) }
@@ -551,7 +553,7 @@ fun ExploreScreen(
             }
         }
 
-        MomiAnchoredExploreBanner()
+        MomiAnchoredExploreBanner(monetizationConfig = monetizationConfig)
     }
 }
 
@@ -701,6 +703,17 @@ private fun ExploreNoteCard(
                     .fillMaxWidth()
                     .padding(horizontal = 10.dp, vertical = 8.dp)
             ) {
+                if (post.isBoosted || post.recommendedLabel.isNotBlank()) {
+                    Text(
+                        text = post.recommendedLabel.ifBlank { "Boosted" },
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                }
                 Text(
                     text = post.caption.ifBlank { "${post.category} moment" },
                     style = MaterialTheme.typography.bodySmall,

@@ -20,11 +20,33 @@ android {
     versionCode = 11
     versionName = "2.0"
 
-    val startIoAppId = System.getenv("STARTIO_APP_ID")?.takeIf { it.isNotBlank() }
-        ?: "210719378"
+    val dotEnvProps = java.util.Properties().apply {
+      val envFile = rootProject.file(".env")
+      if (envFile.exists()) {
+        envFile.inputStream().use { load(it) }
+      }
+    }
+    fun resolveEnv(key: String, fallback: String = ""): String {
+      val fromEnv = System.getenv(key)?.trim()?.takeIf { it.isNotEmpty() }
+      val fromFile = dotEnvProps.getProperty(key)?.trim()?.removeSurrounding("\"")?.takeIf { it.isNotEmpty() }
+      return (fromEnv ?: fromFile ?: fallback).replace("\\", "\\\\").replace("\"", "\\\"")
+    }
+
+    val startIoAppId = resolveEnv("STARTIO_APP_ID", "210719378")
+    val admobAppId = resolveEnv("ADMOB_APP_ID", "ca-app-pub-3940256099942544~3347511713")
+    val admobBannerUnitId = resolveEnv("ADMOB_BANNER_UNIT_ID", "ca-app-pub-3940256099942544/6300978111")
+    val admobMrecUnitId = resolveEnv("ADMOB_MREC_UNIT_ID", "ca-app-pub-3940256099942544/6300978111")
+    val admobInterstitialUnitId = resolveEnv("ADMOB_INTERSTITIAL_UNIT_ID", "ca-app-pub-3940256099942544/1033173712")
+    val monetagDirectLinkUrl = resolveEnv("MONETAG_DIRECT_LINK_URL", "")
 
     manifestPlaceholders["startIoAppId"] = startIoAppId
+    manifestPlaceholders["admobAppId"] = admobAppId
     buildConfigField("String", "STARTIO_APP_ID", "\"$startIoAppId\"")
+    buildConfigField("String", "ADMOB_APP_ID", "\"$admobAppId\"")
+    buildConfigField("String", "ADMOB_BANNER_UNIT_ID", "\"$admobBannerUnitId\"")
+    buildConfigField("String", "ADMOB_MREC_UNIT_ID", "\"$admobMrecUnitId\"")
+    buildConfigField("String", "ADMOB_INTERSTITIAL_UNIT_ID", "\"$admobInterstitialUnitId\"")
+    buildConfigField("String", "MONETAG_DIRECT_LINK_URL", "\"$monetagDirectLinkUrl\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -82,7 +104,17 @@ android {
 secrets {
   propertiesFileName = ".env"
   defaultPropertiesFileName = ".env.example"
-  ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
+  ignoreList.addAll(
+    listOf(
+      "FIREBASE_APPCHECK_DEBUG_TOKEN",
+      "STARTIO_APP_ID",
+      "ADMOB_APP_ID",
+      "ADMOB_BANNER_UNIT_ID",
+      "ADMOB_MREC_UNIT_ID",
+      "ADMOB_INTERSTITIAL_UNIT_ID",
+      "MONETAG_DIRECT_LINK_URL"
+    )
+  )
 }
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
@@ -125,6 +157,7 @@ dependencies {
   implementation(libs.androidx.credentials.play.services)
   implementation(libs.googleid)
   implementation(libs.startapp.inapp.sdk)
+  implementation(libs.play.services.ads)
   implementation(libs.billing.ktx)
   implementation(libs.androidx.media3.exoplayer)
   implementation(libs.androidx.media3.ui.compose)

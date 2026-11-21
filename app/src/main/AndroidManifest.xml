@@ -64,6 +64,9 @@
         <meta-data
             android:name="com.startapp.sdk.APPLICATION_ID"
             android:value="${startIoAppId}" />
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="${admobAppId}" />
     </application>
 
 </manifest>

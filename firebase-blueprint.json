@@ -18,6 +18,8 @@
         "role": { "type": "string", "enum": ["USER", "MODERATOR", "EDITOR"] },
         "moderationScopes": { "type": "array", "items": { "type": "string" } },
         "assignedByEmail": { "type": "string" },
+        "partnerConsent": { "type": "boolean" },
+        "consentUpdatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
@@ -57,6 +59,11 @@
         "audioTitle": { "type": "string" },
         "localAudioPath": { "type": "string" },
         "audioData": { "type": "string" },
+        "isBoosted": { "type": "boolean" },
+        "boostTier": { "type": "string", "enum": ["", "SPOTLIGHT", "SUPER_BOOST", "OWNER_RECOMMENDED"] },
+        "recommendedLabel": { "type": "string" },
+        "boostedByUid": { "type": "string" },
+        "boostedAt": { "type": "string", "format": "date-time" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
@@ -369,25 +376,48 @@
       "type": "object",
       "properties": {
         "txId": { "type": "string" },
-        "type": { "type": "string", "enum": ["TOP_UP", "GIFT", "PERK_UNLOCK"] },
+        "type": { "type": "string", "enum": ["TOP_UP", "GIFT", "PERK_UNLOCK", "POST_BOOST", "OWNER_GRANT"] },
         "senderUid": { "type": "string" },
         "senderUsername": { "type": "string" },
         "recipientUid": { "type": "string" },
         "recipientUsername": { "type": "string" },
         "creditsAmount": { "type": "integer" },
         "priceUsd": { "type": "number" },
-        "paymentMethod": { "type": "string", "enum": ["GOOGLE_PLAY", "DEBUG_SANDBOX", "WALLET_CREDITS"] },
+        "paymentMethod": { "type": "string", "enum": ["GOOGLE_PLAY", "DEBUG_SANDBOX", "WALLET_CREDITS", "OWNER_ADMIN"] },
         "paymentRef": { "type": "string" },
         "giftKey": { "type": "string" },
         "giftName": { "type": "string" },
         "streamId": { "type": "string" },
         "perkKey": { "type": "string" },
+        "postId": { "type": "string" },
         "recipientClaimed": { "type": "boolean" },
         "status": { "type": "string", "enum": ["COMPLETED", "PENDING"] },
         "createdAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
       "required": ["txId", "type", "senderUid", "senderUsername", "recipientUid", "recipientUsername", "creditsAmount", "priceUsd", "paymentMethod", "recipientClaimed", "status", "createdAt"]
+    },
+    "AdMonetizationConfig": {
+      "title": "AdMonetizationConfig",
+      "description": "Live owner-editable configuration for AdMob, Start.io, Monetag, and partner banner slots.",
+      "type": "object",
+      "properties": {
+        "admobEnabled": { "type": "boolean" },
+        "admobBannerUnitId": { "type": "string" },
+        "admobMrecUnitId": { "type": "string" },
+        "admobInterstitialUnitId": { "type": "string" },
+        "startIoEnabled": { "type": "boolean" },
+        "monetagEnabled": { "type": "boolean" },
+        "monetagDirectLinkUrl": { "type": "string" },
+        "monetagWebZoneId": { "type": "string" },
+        "monetagWebMetaTag": { "type": "string" },
+        "partnerPromoTitle": { "type": "string" },
+        "partnerPromoSubtitle": { "type": "string" },
+        "partnerPromoCta": { "type": "string" },
+        "updatedByEmail": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
+      },
+      "required": ["admobEnabled", "admobBannerUnitId", "admobMrecUnitId", "admobInterstitialUnitId", "startIoEnabled", "monetagEnabled", "monetagDirectLinkUrl", "monetagWebZoneId", "monetagWebMetaTag", "partnerPromoTitle", "partnerPromoSubtitle", "partnerPromoCta", "updatedByEmail", "updatedAt"]
     }
   },
   "firestore": {
@@ -474,6 +504,10 @@
     "/contentReports/{reportId}": {
       "schema": { "$ref": "#/entities/ContentReport" },
       "description": "Moderation surveillance queue for reported graphic, sexual, violent, or marketplace content."
+    },
+    "/appConfig/{configId}": {
+      "schema": { "$ref": "#/entities/AdMonetizationConfig" },
+      "description": "Owner-editable monetization configuration for AdMob, Start.io, Monetag, and partner banner slots."
     }
   }
 }
