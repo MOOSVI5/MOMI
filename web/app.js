@@ -244,7 +244,12 @@ document.getElementById('googleSignInBtn').addEventListener('click', async () =>
     if (err?.code === 'auth/popup-blocked' || err?.code === 'auth/cancelled-popup-request') {
       await signInWithRedirect(auth, googleProvider);
     } else {
-      authErrorBox.textContent = err?.message || 'Google Sign-In failed. Check Authorized Domains in Firebase Auth.';
+      if (err?.code === 'auth/unauthorized-domain') {
+        const host = window.location.hostname || 'this domain';
+        authErrorBox.textContent = `Domain "${host}" is not yet authorized. Open Firebase Console -> Authentication -> Settings -> Authorized domains (project gen-lang-client-0132255277) and add "${host}".`;
+      } else {
+        authErrorBox.textContent = err?.message || 'Google Sign-In failed. Check Authorized Domains in Firebase Auth.';
+      }
       authErrorBox.classList.remove('hidden');
     }
   }

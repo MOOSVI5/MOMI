@@ -5,9 +5,6 @@ on:
     branches:
       - main
       - master
-    paths:
-      - 'web/**'
-      - '.github/workflows/deploy-web.yml'
   workflow_dispatch:
 
 permissions:
@@ -30,7 +27,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Pages
+        id: pages
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Upload Web App Artifact
         uses: actions/upload-pages-artifact@v3
@@ -40,3 +40,13 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Publish Web App Link Summary
+        shell: bash
+        run: |
+          {
+            echo "### Momi Web App Live URL"
+            echo "Open on desktop or mobile: ${{ steps.deployment.outputs.page_url }}"
+            echo ""
+            echo "If Google Sign-In asks for domain authorization, add \`${{ github.repository_owner }}.github.io\` in Firebase Console -> Authentication -> Settings -> Authorized domains."
+          } >> "$GITHUB_STEP_SUMMARY"
