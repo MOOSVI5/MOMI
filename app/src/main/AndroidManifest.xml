@@ -24,12 +24,41 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:label="@string/app_name"
             android:theme="@style/Theme.Luma">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:scheme="https"
+                    android:host="moosvi5.github.io"
+                    android:pathPrefix="/MOMI" />
+                <data
+                    android:scheme="http"
+                    android:host="moosvi5.github.io"
+                    android:pathPrefix="/MOMI" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:scheme="momi"
+                    android:host="post" />
+                <data
+                    android:scheme="momi"
+                    android:host="user" />
             </intent-filter>
         </activity>
         <meta-data

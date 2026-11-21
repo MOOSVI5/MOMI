@@ -213,6 +213,44 @@ body[data-theme="light"] .auth-error {
   border-radius: 5px;
 }
 
+.auth-link-notice {
+  margin: 0;
+  padding: 11px 14px;
+  border-radius: 12px;
+  background: rgba(224, 82, 121, 0.14);
+  border: 1px solid rgba(224, 82, 121, 0.45);
+  color: var(--text);
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.android-promo-card {
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.android-promo-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.android-promo-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.android-promo-actions a {
+  text-decoration: none;
+}
+
 /* Desktop + Responsive Shell */
 .main-shell {
   display: grid;

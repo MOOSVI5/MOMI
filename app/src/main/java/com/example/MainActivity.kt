@@ -127,6 +127,8 @@ import com.example.ui.theme.ThemePreference
 import com.example.ui.viewmodel.MomiViewModel
 import com.example.util.AppUpdateChecker
 import com.example.util.MomiAlertNotifier
+import com.example.util.MomiDeepLink
+import com.example.util.MomiLinks
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
@@ -160,7 +162,7 @@ private object LumaRoutes {
     fun messagesRoute(threadId: String? = null) =
         if (threadId.isNullOrBlank()) "messages" else "messages?threadId=$threadId"
     fun storyRoute(storyId: String) = "story/$storyId"
-    fun postDetailRoute(postId: String) = "post/$postId"
+    fun postDetailRoute(postId: String) = "post/${Uri.encode(postId)}"
     fun liveViewerRoute(streamId: String) = "live/${Uri.encode(streamId)}"
 }
 
@@ -181,11 +183,14 @@ private val PrimaryTabs = listOf(
 )
 
 class MainActivity : ComponentActivity() {
+    private val latestIncomingIntent = mutableStateOf<Intent?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         MomiAlertNotifier.ensureChannel(this)
         configureAppCheck(this, intent)
+        latestIncomingIntent.value = intent
 
         runCatching {
             StartAppSDK.setTestAdsEnabled(BuildConfig.DEBUG)
@@ -207,16 +212,26 @@ class MainActivity : ComponentActivity() {
                 appColorScheme = appColorScheme
             ) {
                 AppNavigation(
+                    incomingIntent = latestIncomingIntent.value,
+                    onConsumeIncomingIntent = { latestIncomingIntent.value = null },
                     onThemePreferenceChange = { themePreference = it },
                     onColorSchemeChange = { appColorScheme = it }
                 )
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        latestIncomingIntent.value = intent
+    }
 }
 
 @Composable
 private fun AppNavigation(
+    incomingIntent: Intent?,
+    onConsumeIncomingIntent: () -> Unit,
     onThemePreferenceChange: (ThemePreference) -> Unit,
     onColorSchemeChange: (AppColorScheme) -> Unit
 ) {
@@ -282,6 +297,8 @@ private fun AppNavigation(
 
             LumaApp(
                 viewModel = viewModel,
+                incomingIntent = incomingIntent,
+                onConsumeIncomingIntent = onConsumeIncomingIntent,
                 onSignOut = {
                     signOut(
                         context = context,
@@ -297,6 +314,8 @@ private fun AppNavigation(
 @Composable
 private fun LumaApp(
     viewModel: MomiViewModel,
+    incomingIntent: Intent?,
+    onConsumeIncomingIntent: () -> Unit,
     onSignOut: () -> Unit
 ) {
     val context = LocalContext.current
@@ -368,12 +387,14 @@ private fun LumaApp(
         }
     }
 
-    // Handle notification tap routing on launch
-    LaunchedEffect(Unit) {
-        val activity = context.findActivity()
-        val routeExtra = activity?.intent?.getStringExtra(MomiAlertNotifier.EXTRA_ALERT_ROUTE)
+    var pendingDeepLinkUser by remember { mutableStateOf<String?>(null) }
+
+    // Handle notification tap routing & shared post/profile deep links (cold start + warm onNewIntent)
+    LaunchedEffect(incomingIntent) {
+        val intentToHandle = incomingIntent ?: return@LaunchedEffect
+        val routeExtra = intentToHandle.getStringExtra(MomiAlertNotifier.EXTRA_ALERT_ROUTE)
         if (!routeExtra.isNullOrBlank()) {
-            activity.intent.removeExtra(MomiAlertNotifier.EXTRA_ALERT_ROUTE)
+            intentToHandle.removeExtra(MomiAlertNotifier.EXTRA_ALERT_ROUTE)
             when (routeExtra) {
                 LumaRoutes.NOTIFICATIONS,
                 LumaRoutes.WALLET,
@@ -381,6 +402,24 @@ private fun LumaApp(
                     if (routeExtra == "messages") LumaRoutes.messagesRoute() else routeExtra
                 )
             }
+            onConsumeIncomingIntent()
+            return@LaunchedEffect
+        }
+
+        when (val link = MomiLinks.parseDeepLink(intentToHandle.data)) {
+            is MomiDeepLink.PostTarget -> {
+                intentToHandle.data = null
+                onConsumeIncomingIntent()
+                navController.navigate(LumaRoutes.postDetailRoute(link.postId)) {
+                    launchSingleTop = true
+                }
+            }
+            is MomiDeepLink.UserTarget -> {
+                intentToHandle.data = null
+                onConsumeIncomingIntent()
+                pendingDeepLinkUser = link.username
+            }
+            null -> Unit
         }
     }
 
@@ -533,7 +572,7 @@ private fun LumaApp(
         shareText(
             context = context,
             subject = "Momi post by @${post.authorUsername}",
-            text = "${post.authorDisplayName} (@${post.authorUsername}) on Momi:\n\"${post.caption}\""
+            text = MomiLinks.buildPostShareText(post)
         )
     }
 
@@ -587,6 +626,13 @@ private fun LumaApp(
                 navigatePrimaryTab(LumaRoutes.EXPLORE)
             }
         }
+    }
+
+    LaunchedEffect(pendingDeepLinkUser, allCreators) {
+        val targetUsername = pendingDeepLinkUser ?: return@LaunchedEffect
+        if (allCreators.isEmpty()) return@LaunchedEffect
+        pendingDeepLinkUser = null
+        openMentionProfile(targetUsername)
     }
 
     val remoteVideoResolver: suspend (String, String, Long) -> Uri? = remember(viewModel, context) {
@@ -934,7 +980,7 @@ private fun LumaApp(
                                     shareText(
                                         context = context,
                                         subject = "Follow @$handle on Momi",
-                                        text = "Check out @$handle on Momi: https://momi.photo/$handle"
+                                        text = MomiLinks.buildProfileShareText(handle)
                                     )
                                 },
                                 onUpdateProfile = viewModel::updateProfile,
@@ -1156,7 +1202,7 @@ private fun LumaApp(
                                     shareText(
                                         context = context,
                                         subject = "Follow @${targetProfile.username} on Momi",
-                                        text = "Check out @${targetProfile.username} on Momi: https://momi.photo/${targetProfile.username}"
+                                        text = MomiLinks.buildProfileShareText(targetProfile.username)
                                     )
                                 },
                                 onOpenUserProfile = { nextUid ->
@@ -1227,7 +1273,7 @@ private fun LumaApp(
                             route = LumaRoutes.POST_DETAIL,
                             arguments = listOf(navArgument("postId") { type = NavType.StringType })
                         ) { backStackEntry ->
-                            val postId = backStackEntry.arguments?.getString("postId").orEmpty()
+                            val postId = Uri.decode(backStackEntry.arguments?.getString("postId").orEmpty())
                             val post by remember(postId) {
                                 viewModel.observePost(postId)
                             }.collectAsStateWithLifecycle(initialValue = allPosts.firstOrNull { it.id == postId })

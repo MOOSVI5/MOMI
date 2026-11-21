@@ -27,6 +27,8 @@ import {
 } from 'https://www.gstatic.com/firebasejs/11.6.0/firebase-firestore.js';
 import {
   ADMIN_OWNER_EMAIL,
+  ANDROID_APK_URL,
+  ANDROID_RELEASES_URL,
   ASPECT_RATIOS,
   COLOR_SCHEMES,
   escapeHtml,
@@ -42,6 +44,10 @@ import {
   MAX_IMAGE_BASE64_CHARS,
   normalizeUsername,
   PRESET_IMAGE_OPTIONS,
+  WEB_APP_URL,
+  buildPostShareUrl,
+  buildProfileShareUrl,
+  parseDeepLinkFromLocation,
   renderRichCaptionHtml,
   resolveImageSrc,
   TRENDING_HASHTAGS,
@@ -113,6 +119,7 @@ const state = {
   seenNotifIds: new Set(),
   seenMsgKeys: new Set(),
   initialSnapshotsLoaded: { notifs: false, threads: false },
+  pendingDeepLink: parseDeepLinkFromLocation(window.location.search, window.location.hash),
   studio: {
     imageKey: 'img_post_coastal',
     uploadedSrc: null,
@@ -144,6 +151,17 @@ const modalContent = document.getElementById('modalContent');
 const toastBar = document.getElementById('toastBar');
 
 document.getElementById('currentHostnameLabel').textContent = window.location.hostname || 'localhost';
+
+const pendingLinkNotice = document.getElementById('pendingLinkNotice');
+if (pendingLinkNotice) {
+  if (state.pendingDeepLink.postId) {
+    pendingLinkNotice.textContent = 'Shared Momi post ready — sign in with Google to open it directly.';
+    pendingLinkNotice.classList.remove('hidden');
+  } else if (state.pendingDeepLink.username) {
+    pendingLinkNotice.textContent = `Shared creator @${state.pendingDeepLink.username} — sign in with Google to view their profile.`;
+    pendingLinkNotice.classList.remove('hidden');
+  }
+}
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js').catch(() => undefined);
@@ -225,6 +243,9 @@ function closeModal() {
   state.liveUnsubs = [];
   modalBackdrop.classList.add('hidden');
   modalContent.innerHTML = '';
+  if (window.location.search.includes('post=') || window.location.hash.startsWith('#post-')) {
+    window.history.replaceState({}, '', window.location.pathname);
+  }
 }
 
 modalBackdrop.addEventListener('click', (e) => {
@@ -339,6 +360,7 @@ function startRealtimeSync(uid) {
     if (snap.exists()) {
       state.profile = { ...snap.data(), userId: snap.id };
       renderAll();
+      maybeConsumePendingDeepLink();
     }
   }));
 
@@ -353,12 +375,14 @@ function startRealtimeSync(uid) {
   pushUnsub(onSnapshot(query(collection(db, 'users'), limit(50)), (snap) => {
     state.creators = snap.docs.map((d) => ({ ...d.data(), userId: d.id }));
     renderRightRail();
+    maybeConsumePendingDeepLink();
     if (state.nav === 'explore' || state.nav === 'create') renderMainStage();
   }));
 
   pushUnsub(onSnapshot(query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(40)), (snap) => {
     state.posts = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
     renderMainStage();
+    maybeConsumePendingDeepLink();
   }));
 
   pushUnsub(onSnapshot(query(collection(db, 'stories'), orderBy('createdAt', 'desc'), limit(30)), (snap) => {
@@ -462,6 +486,32 @@ async function claimGiftTransaction(uid, tx) {
   triggerAlert(`You received ${tx.creditsAmount} credits (${tx.giftName || 'Gift'}) from @${tx.senderUsername}!`);
 }
 
+function maybeConsumePendingDeepLink() {
+  if (!state.user || !state.profile) return;
+  if (state.pendingDeepLink.postId) {
+    const targetPostId = state.pendingDeepLink.postId;
+    state.pendingDeepLink.postId = null;
+    if (pendingLinkNotice) pendingLinkNotice.classList.add('hidden');
+    openPostDetailModal(targetPostId);
+    return;
+  }
+  if (state.pendingDeepLink.username && state.creators.length > 0) {
+    const targetName = state.pendingDeepLink.username;
+    state.pendingDeepLink.username = null;
+    if (pendingLinkNotice) pendingLinkNotice.classList.add('hidden');
+    const creator = state.creators.find((c) => (c.username || '').toLowerCase() === targetName.toLowerCase());
+    if (creator) {
+      state.viewedProfileUid = creator.userId;
+      state.profileTab = 'posts';
+      navigateTo('profile', { keepViewedUid: true });
+    } else {
+      state.exploreCategory = 'For You';
+      state.exploreQuery = `@${targetName}`;
+      navigateTo('explore');
+    }
+  }
+}
+
 function triggerAlert(text) {
   if (state.soundEnabled) playMomiAlertChime();
   showToast(text);
@@ -513,6 +563,7 @@ function renderAll() {
 
 function renderRightRail() {
   const rightUserCard = document.getElementById('rightUserCard');
+  const rightAndroidCard = document.getElementById('rightAndroidCard');
   const rightLiveCard = document.getElementById('rightLiveCard');
   const rightCreatorsCard = document.getElementById('rightCreatorsCard');
   if (!state.profile) return;
@@ -538,6 +589,27 @@ function renderRightRail() {
   `;
   document.getElementById('railProfileBtn').onclick = () => navigateTo('profile');
   document.getElementById('railWalletBtn').onclick = () => navigateTo('wallet');
+
+  if (rightAndroidCard) {
+    rightAndroidCard.innerHTML = `
+      <div class="rail-title-row">
+        <h3>Momi for Android</h3>
+        <span class="desktop-badge">APK</span>
+      </div>
+      <p class="muted small" style="margin:0 0 10px;">
+        Get the full Android app for mobile camera filters, native sound alerts &amp; Play Billing wallet top-ups.
+      </p>
+      <div class="android-promo-actions">
+        <a class="btn-primary btn-sm" href="${ANDROID_APK_URL}" target="_blank" rel="noopener noreferrer">Download APK</a>
+        <a class="btn-outline btn-sm" href="${ANDROID_RELEASES_URL}" target="_blank" rel="noopener noreferrer">Releases</a>
+        <button type="button" class="btn-ghost btn-sm" id="railCopyAndroidLinkBtn">Copy Link</button>
+      </div>
+    `;
+    document.getElementById('railCopyAndroidLinkBtn').onclick = async () => {
+      await navigator.clipboard?.writeText(ANDROID_APK_URL).catch(() => undefined);
+      showToast('Android APK download link copied!');
+    };
+  }
 
   rightLiveCard.innerHTML = `
     <div class="rail-title-row">
@@ -1539,6 +1611,7 @@ function renderProfile() {
           </div>
 
           <div class="chip-row">
+            <button type="button" class="btn-outline" id="shareProfileBtn">Share Profile</button>
             ${
               isOwn
                 ? '<button type="button" class="btn-outline" id="editProfileBtn">Edit Profile</button><button type="button" class="btn-primary" id="profileCreateBtn">New Post</button>'
@@ -1549,6 +1622,17 @@ function renderProfile() {
         </div>
         ${profile.bio ? `<p style="margin:6px 0 0;line-height:1.45;">${escapeHtml(profile.bio)}</p>` : ''}
         ${profile.website ? `<a href="${escapeHtml(profile.website)}" target="_blank" rel="noopener noreferrer" style="color:var(--primary);font-size:0.88rem;">${escapeHtml(profile.website)}</a>` : ''}
+      </div>
+
+      <div class="android-promo-card">
+        <div class="android-promo-copy">
+          <strong>Take Momi with you on Android</strong>
+          <span class="muted small">Same account, live camera streaming, sound alerts, and Play Billing wallet in your pocket.</span>
+        </div>
+        <div class="android-promo-actions">
+          <a class="btn-primary btn-sm" href="${ANDROID_APK_URL}" target="_blank" rel="noopener noreferrer">Download Android APK</a>
+          <a class="btn-outline btn-sm" href="${ANDROID_RELEASES_URL}" target="_blank" rel="noopener noreferrer">Release Notes</a>
+        </div>
       </div>
 
       ${isOwn ? `
@@ -1568,6 +1652,7 @@ function renderProfile() {
     </div>
   `;
 
+  document.getElementById('shareProfileBtn').onclick = () => shareProfileExternally(profile);
   const editBtn = document.getElementById('editProfileBtn');
   if (editBtn) editBtn.onclick = () => openEditProfileModal();
   const createBtn = document.getElementById('profileCreateBtn');
@@ -1631,9 +1716,7 @@ function bindFeedInteractions(container) {
     b.onclick = async (e) => {
       e.stopPropagation();
       const post = state.posts.find((p) => p.id === b.dataset.sharePost);
-      const url = `${window.location.origin}${window.location.pathname}#post-${b.dataset.sharePost}`;
-      await navigator.clipboard?.writeText(url).catch(() => undefined);
-      showToast(`Link copied for @${post?.authorUsername || 'Momi'} post`);
+      await sharePostExternally(post || { id: b.dataset.sharePost, authorUsername: 'momi', caption: '' });
     };
   });
   container.querySelectorAll('[data-slide]').forEach((b) => {
@@ -1801,9 +1884,58 @@ async function resolveVideoForPost(post) {
   return null;
 }
 
+async function shareExternalText({ title, text, url, toastMessage }) {
+  if (navigator.share) {
+    try {
+      await navigator.share({ title, text, url });
+      return;
+    } catch (err) {
+      if (err?.name === 'AbortError') return;
+    }
+  }
+  await navigator.clipboard?.writeText(url).catch(() => undefined);
+  showToast(toastMessage || `Copied working link: ${url}`);
+}
+
+async function sharePostExternally(post) {
+  const shareUrl = buildPostShareUrl(post.id, WEB_APP_URL);
+  const captionSnippet = String(post.caption || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+  const body = captionSnippet
+    ? `@${post.authorUsername || 'momi'} on Momi: "${captionSnippet}"`
+    : `See @${post.authorUsername || 'momi'}'s post on Momi`;
+  await shareExternalText({
+    title: `Momi post by @${post.authorUsername || 'momi'}`,
+    text: `${body}\n\nOpen post: ${shareUrl}\nGet Momi for Android: ${ANDROID_APK_URL}`,
+    url: shareUrl,
+    toastMessage: `Post link copied! Opens directly in Momi (${shareUrl})`
+  });
+}
+
+async function shareProfileExternally(profile) {
+  const shareUrl = buildProfileShareUrl(profile.username, WEB_APP_URL);
+  await shareExternalText({
+    title: `@${profile.username} on Momi`,
+    text: `Check out @${profile.username} on Momi: ${shareUrl}\nGet Momi for Android: ${ANDROID_APK_URL}`,
+    url: shareUrl,
+    toastMessage: `Profile link copied for @${profile.username}`
+  });
+}
+
 async function openPostDetailModal(postId) {
-  const post = state.posts.find((p) => p.id === postId);
-  if (!post) return;
+  let post = state.posts.find((p) => p.id === postId);
+  if (!post) {
+    const snap = await getDoc(doc(db, 'posts', postId)).catch(() => null);
+    if (snap && snap.exists()) {
+      post = { ...snap.data(), id: snap.id };
+    }
+  }
+  if (!post) {
+    showToast('Shared post not found or was removed.');
+    return;
+  }
+  if (!window.location.search.includes(`post=${encodeURIComponent(postId)}`)) {
+    window.history.replaceState({}, '', `${window.location.pathname}?post=${encodeURIComponent(postId)}`);
+  }
   updateDoc(doc(db, 'posts', postId), { viewsCount: increment(1), updatedAt: serverTimestamp() }).catch(() => undefined);
 
   let videoUrl = state.videoCache[postId];
@@ -1816,9 +1948,12 @@ async function openPostDetailModal(postId) {
   const morePosts = state.posts.filter((p) => p.id !== postId).slice(0, 4);
 
   openModal(`
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;gap:10px;">
       <strong>@${escapeHtml(post.authorUsername)}</strong>
-      <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button type="button" class="btn-outline btn-sm" id="modalSharePostBtn">Share Link</button>
+        <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+      </div>
     </div>
     <div class="post-detail-split">
       <div style="background:#000;border-radius:14px;overflow:hidden;display:grid;place-items:center;">
@@ -1860,6 +1995,7 @@ async function openPostDetailModal(postId) {
   `);
 
   document.getElementById('closeModalBtn').onclick = closeModal;
+  document.getElementById('modalSharePostBtn').onclick = () => sharePostExternally(post);
   bindFeedInteractions(modalContent);
 
   document.getElementById('modalCommentForm').onsubmit = async (e) => {

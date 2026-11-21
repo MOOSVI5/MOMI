@@ -2,11 +2,14 @@ package com.example
 
 import android.app.NotificationManager
 import android.content.Context
+import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.model.Post
 import com.example.ui.theme.AppearancePrefs
 import com.example.util.MediaAssets
 import com.example.util.MomiAlertNotifier
+import com.example.util.MomiDeepLink
+import com.example.util.MomiLinks
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -79,5 +82,30 @@ class MomiFeaturesTest {
         assertFalse(AppearancePrefs.isNotificationSoundsEnabled(context))
         AppearancePrefs.setNotificationSoundsEnabled(context, true)
         assertTrue(AppearancePrefs.isNotificationSoundsEnabled(context))
+    }
+
+    @Test
+    fun momiLinks_builds_and_parses_canonical_post_and_profile_deep_links() {
+        val postUrl = MomiLinks.buildPostShareUrl("post_abc_123")
+        assertEquals("https://moosvi5.github.io/MOMI/?post=post_abc_123", postUrl)
+
+        val parsedPost = MomiLinks.parseDeepLink(Uri.parse(postUrl))
+        assertEquals(MomiDeepLink.PostTarget("post_abc_123"), parsedPost)
+
+        val parsedHashPost = MomiLinks.parseDeepLink(Uri.parse("https://moosvi5.github.io/MOMI/#post-post_xyz_9"))
+        assertEquals(MomiDeepLink.PostTarget("post_xyz_9"), parsedHashPost)
+
+        val parsedSchemePost = MomiLinks.parseDeepLink(Uri.parse("momi://post/post_777"))
+        assertEquals(MomiDeepLink.PostTarget("post_777"), parsedSchemePost)
+
+        val profileUrl = MomiLinks.buildProfileShareUrl("@aria.studio")
+        assertEquals("https://moosvi5.github.io/MOMI/?user=aria.studio", profileUrl)
+        assertEquals(MomiDeepLink.UserTarget("aria.studio"), MomiLinks.parseDeepLink(Uri.parse(profileUrl)))
+
+        val shareBody = MomiLinks.buildPostShareText(
+            Post(id = "post_abc_123", authorUsername = "aria.studio", authorDisplayName = "Aria", caption = "Golden hour")
+        )
+        assertTrue(shareBody.contains(postUrl))
+        assertTrue(shareBody.contains(MomiLinks.ANDROID_APK_URL))
     }
 }

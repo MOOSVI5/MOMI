@@ -175,6 +175,43 @@ export function escapeHtml(str = '') {
     .replace(/'/g, '&#39;');
 }
 
+export const WEB_APP_URL = 'https://moosvi5.github.io/MOMI/';
+export const ANDROID_APK_URL = 'https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-v2.0.apk';
+export const ANDROID_RELEASES_URL = 'https://github.com/MOOSVI5/MOMI/releases/latest';
+
+export function buildPostShareUrl(postId, baseUrl = WEB_APP_URL) {
+  const cleanId = String(postId || '').trim();
+  const normalizedBase = String(baseUrl || WEB_APP_URL).split('?')[0].split('#')[0];
+  if (!cleanId) return normalizedBase;
+  return `${normalizedBase}?post=${encodeURIComponent(cleanId)}`;
+}
+
+export function buildProfileShareUrl(username, baseUrl = WEB_APP_URL) {
+  const cleanUser = String(username || '').trim().replace(/^@/, '');
+  const normalizedBase = String(baseUrl || WEB_APP_URL).split('?')[0].split('#')[0];
+  if (!cleanUser) return normalizedBase;
+  return `${normalizedBase}?user=${encodeURIComponent(cleanUser)}`;
+}
+
+export function parseDeepLinkFromLocation(search = '', hash = '') {
+  const safeId = (val) => {
+    const clean = String(val || '').trim();
+    return /^[a-zA-Z0-9._-]{1,128}$/.test(clean) ? clean : null;
+  };
+  const params = new URLSearchParams(String(search || '').replace(/^\?/, ''));
+  const postFromQuery = safeId(params.get('post') || params.get('p'));
+  const userFromQuery = safeId((params.get('user') || params.get('u') || '').replace(/^@/, ''));
+
+  const cleanHash = String(hash || '').replace(/^#/, '');
+  const postFromHash = cleanHash.startsWith('post-') ? safeId(cleanHash.slice(5)) : null;
+  const userFromHash = cleanHash.startsWith('user-') ? safeId(cleanHash.slice(5).replace(/^@/, '')) : null;
+
+  return {
+    postId: postFromQuery || postFromHash || null,
+    username: userFromQuery || userFromHash || null
+  };
+}
+
 export function renderRichCaptionHtml(caption = '') {
   const safe = escapeHtml(caption);
   return safe

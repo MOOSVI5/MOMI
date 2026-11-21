@@ -53,18 +53,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
           REPO="${{ github.repository }}"
+          PAYLOAD='{"build_type":"legacy","source":{"branch":"gh-pages","path":"/"}}'
           if gh api "/repos/${REPO}/pages" >/dev/null 2>&1; then
-            gh api -X PUT "/repos/${REPO}/pages" \
-              -f build_type="legacy" \
-              -f "source[branch]=gh-pages" \
-              -f "source[path]=/" || true
+            echo "$PAYLOAD" | gh api -X PUT "/repos/${REPO}/pages" --input - || true
           else
-            gh api -X POST "/repos/${REPO}/pages" \
-              -f build_type="legacy" \
-              -f "source[branch]=gh-pages" \
-              -f "source[path]=/"
+            echo "$PAYLOAD" | gh api -X POST "/repos/${REPO}/pages" --input - || true
           fi
           gh api -X POST "/repos/${REPO}/pages/builds" >/dev/null 2>&1 || true
           SITE_URL="$(gh api "/repos/${REPO}/pages" --jq '.html_url' 2>/dev/null || echo "")"

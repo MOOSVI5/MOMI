@@ -43,7 +43,20 @@
           Continue with Google
         </button>
 
+        <p id="pendingLinkNotice" class="auth-link-notice hidden"></p>
+
         <p id="authErrorBox" class="auth-error hidden" role="alert"></p>
+
+        <div class="android-promo-card">
+          <div class="android-promo-copy">
+            <strong>Prefer Momi on Android?</strong>
+            <span class="muted small">Get native camera live streaming, instant sound alerts, and Play Billing wallet perks.</span>
+          </div>
+          <div class="android-promo-actions">
+            <a id="authAndroidDownloadLink" class="btn-outline btn-sm" href="https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-v2.0.apk" target="_blank" rel="noopener noreferrer">Download Android APK</a>
+            <a class="btn-ghost btn-sm" href="https://github.com/MOOSVI5/MOMI/releases/latest" target="_blank" rel="noopener noreferrer">Releases</a>
+          </div>
+        </div>
 
         <div class="auth-help-card">
           <strong>Using a custom domain or GitHub Pages?</strong>
@@ -161,6 +174,7 @@
       <!-- Desktop Right Discovery Rail -->
       <aside class="right-rail" aria-label="Account and discovery">
         <div id="rightUserCard" class="rail-card"></div>
+        <div id="rightAndroidCard" class="rail-card"></div>
         <div id="rightLiveCard" class="rail-card"></div>
         <div id="rightCreatorsCard" class="rail-card"></div>
       </aside>

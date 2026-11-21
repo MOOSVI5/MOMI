@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  ANDROID_APK_URL,
+  ANDROID_RELEASES_URL,
   aspectRatioCss,
+  buildPostShareUrl,
+  buildProfileShareUrl,
   escapeHtml,
   extractHashtags,
   extractMentions,
@@ -14,9 +18,11 @@ import {
   formatCount,
   initialsForUsername,
   normalizeUsername,
+  parseDeepLinkFromLocation,
   PRESET_IMAGE_OPTIONS,
   renderRichCaptionHtml,
-  resolveImageSrc
+  resolveImageSrc,
+  WEB_APP_URL
 } from '../firebase-config.js';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
@@ -88,4 +94,31 @@ test('username, count formatting, and image resolution utilities work accurately
   assert.equal(resolveImageSrc({ imageKey: 'img_post_coffee' }), './assets/img_post_coffee.jpg');
   assert.ok(resolveImageSrc({ imageData: 'QUJD' }).startsWith('data:image/jpeg;base64,QUJD'));
   assert.equal(escapeHtml('"a&b"'), '&quot;a&amp;b&quot;');
+});
+
+test('share URL builders, deep-link parser, and Android app recommendation links work properly', () => {
+  assert.equal(WEB_APP_URL, 'https://moosvi5.github.io/MOMI/');
+  assert.equal(ANDROID_APK_URL, 'https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-v2.0.apk');
+  assert.equal(ANDROID_RELEASES_URL, 'https://github.com/MOOSVI5/MOMI/releases/latest');
+
+  const postUrl = buildPostShareUrl('post_17321_abc');
+  assert.equal(postUrl, 'https://moosvi5.github.io/MOMI/?post=post_17321_abc');
+  assert.deepEqual(parseDeepLinkFromLocation('?post=post_17321_abc', ''), {
+    postId: 'post_17321_abc',
+    username: null
+  });
+  assert.deepEqual(parseDeepLinkFromLocation('', '#post-post_legacy_9'), {
+    postId: 'post_legacy_9',
+    username: null
+  });
+
+  const userUrl = buildProfileShareUrl('@Aria.Studio');
+  assert.equal(userUrl, 'https://moosvi5.github.io/MOMI/?user=Aria.Studio');
+  assert.deepEqual(parseDeepLinkFromLocation('?user=Aria.Studio', ''), {
+    postId: null,
+    username: 'Aria.Studio'
+  });
+
+  const indexHtml = fs.readFileSync(path.join(REPO_ROOT, 'web', 'index.html'), 'utf8');
+  assert.ok(indexHtml.includes(ANDROID_APK_URL));
 });
