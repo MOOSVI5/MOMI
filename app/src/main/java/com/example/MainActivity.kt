@@ -946,6 +946,9 @@ private fun LumaApp(
                         }
 
                         composable(LumaRoutes.PROFILE) {
+                            val showcasePostsCount by viewModel.showcasePostsCount.collectAsStateWithLifecycle()
+                            val showcaseStoriesCount by viewModel.showcaseStoriesCount.collectAsStateWithLifecycle()
+                            val isShowcaseBusy by viewModel.isShowcaseActionBusy.collectAsStateWithLifecycle()
                             ProfileScreen(
                                 profile = profile,
                                 allCreators = allCreators,
@@ -1036,6 +1039,12 @@ private fun LumaApp(
                                         isPlayStoreInstall = AppUpdateChecker.isInstalledFromGooglePlay(context)
                                     )
                                 },
+                                showcasePostsCount = showcasePostsCount,
+                                showcaseStoriesCount = showcaseStoriesCount,
+                                isShowcaseBusy = isShowcaseBusy,
+                                onPublishShowcaseBurst = viewModel::publishShowcaseActivityBurst,
+                                onEngageWithShowcase = viewModel::engageRecentPostsWithShowcase,
+                                onRemoveAllShowcase = viewModel::removeAllShowcaseContent,
                                 onSignOut = onSignOut
                             )
                         }

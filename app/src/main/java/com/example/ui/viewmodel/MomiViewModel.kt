@@ -103,6 +103,9 @@ class MomiViewModel(
     private val _isSendingChatMedia = MutableStateFlow(false)
     val isSendingChatMedia: StateFlow<Boolean> = _isSendingChatMedia.asStateFlow()
 
+    private val _isShowcaseActionBusy = MutableStateFlow(false)
+    val isShowcaseActionBusy: StateFlow<Boolean> = _isShowcaseActionBusy.asStateFlow()
+
     private val _availableUpdate = MutableStateFlow<AvailableAppUpdate?>(null)
     val availableUpdate: StateFlow<AvailableAppUpdate?> = _availableUpdate.asStateFlow()
 
@@ -508,6 +511,14 @@ class MomiViewModel(
             emit(cachedStories.value)
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
+
+    val showcasePostsCount: StateFlow<Int> = allPosts
+        .map { list -> list.count { it.id.startsWith("showcase_") } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), 0)
+
+    val showcaseStoriesCount: StateFlow<Int> = stories
+        .map { list -> list.count { it.id.startsWith("showcase_") } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), 0)
 
     val activeLiveStreams: StateFlow<List<LiveStream>> = combine(
         repository.observeActiveLiveStreams(currentUserId)
@@ -1862,6 +1873,67 @@ class MomiViewModel(
 
     fun showInfoNotice(message: String) {
         _statusNotice.value = message
+    }
+
+    fun publishShowcaseActivityBurst() {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to manage starter showcase accounts."
+            return
+        }
+        if (_isShowcaseActionBusy.value) return
+        viewModelScope.launch {
+            _isShowcaseActionBusy.value = true
+            repository.publishShowcaseActivityBurst()
+                .onSuccess { count ->
+                    _statusNotice.value = "Published $count starter showcase posts, comments & stories!"
+                }
+                .onFailure { error ->
+                    _errorMessage.value = unwrapErrorMessage(error, "Could not publish starter showcase activity")
+                }
+            _isShowcaseActionBusy.value = false
+        }
+    }
+
+    fun engageRecentPostsWithShowcase() {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to trigger starter engagement."
+            return
+        }
+        if (_isShowcaseActionBusy.value) return
+        viewModelScope.launch {
+            _isShowcaseActionBusy.value = true
+            repository.engageRecentPostsWithShowcase()
+                .onSuccess { count ->
+                    _statusNotice.value = if (count > 0) {
+                        "Added starter likes & comments across $count recent posts!"
+                    } else {
+                        "No posts available yet — publish a showcase burst first."
+                    }
+                }
+                .onFailure { error ->
+                    _errorMessage.value = unwrapErrorMessage(error, "Could not add starter engagement")
+                }
+            _isShowcaseActionBusy.value = false
+        }
+    }
+
+    fun removeAllShowcaseContent() {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to remove starter showcase accounts."
+            return
+        }
+        if (_isShowcaseActionBusy.value) return
+        viewModelScope.launch {
+            _isShowcaseActionBusy.value = true
+            repository.removeAllShowcaseContent()
+                .onSuccess { (postsRemoved, storiesRemoved) ->
+                    _statusNotice.value = "Removed $postsRemoved starter posts & $storiesRemoved stories."
+                }
+                .onFailure { error ->
+                    _errorMessage.value = unwrapErrorMessage(error, "Could not remove starter showcase accounts")
+                }
+            _isShowcaseActionBusy.value = false
+        }
     }
 
     private fun fallbackProfile(): UserProfile {

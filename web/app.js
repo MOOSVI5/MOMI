@@ -13,8 +13,8 @@ import {
   doc,
   getDoc,
   getDocs,
-  getFirestore,
   increment,
+  initializeFirestore,
   limit,
   onSnapshot,
   orderBy,
@@ -44,6 +44,8 @@ import {
   MAX_IMAGE_BASE64_CHARS,
   normalizeUsername,
   PRESET_IMAGE_OPTIONS,
+  SHOWCASE_COMMENTS,
+  SHOWCASE_PERSONAS,
   WEB_APP_URL,
   buildPostShareUrl,
   buildProfileShareUrl,
@@ -63,7 +65,11 @@ import {
 
 const firebaseApp = initializeApp(FIREBASE_WEB_CONFIG);
 const auth = getAuth(firebaseApp);
-const db = getFirestore(firebaseApp, FIRESTORE_DATABASE_ID);
+const db = initializeFirestore(
+  firebaseApp,
+  { experimentalAutoDetectLongPolling: true },
+  FIRESTORE_DATABASE_ID
+);
 const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
@@ -119,6 +125,9 @@ const state = {
   seenNotifIds: new Set(),
   seenMsgKeys: new Set(),
   initialSnapshotsLoaded: { notifs: false, threads: false },
+  syncError: null,
+  isLoadingFeed: true,
+  showcaseBusy: false,
   pendingDeepLink: parseDeepLinkFromLocation(window.location.search, window.location.hash),
   studio: {
     imageKey: 'img_post_coastal',
@@ -294,42 +303,64 @@ function cleanupSubscriptions() {
   state.initialSnapshotsLoaded = { notifs: false, threads: false };
 }
 
-onAuthStateChanged(auth, async (user) => {
+function handleSyncError(err, label = 'Firestore sync') {
+  console.error(`[Momi Web] ${label}:`, err);
+  const code = err?.code || 'sync-error';
+  const msg = err?.message || 'Unable to reach Momi cloud feed.';
+  state.syncError = `${label} (${code}): ${msg}`;
+  state.isLoadingFeed = false;
+  renderMainStage();
+}
+
+function buildFallbackProfile(user) {
+  const username = normalizeUsername(user.email || user.displayName, user.uid);
+  const displayName = (user.displayName || username).slice(0, 80);
+  const avatarKeys = ['avatar_aria', 'avatar_elena', 'avatar_kenji', 'avatar_nord', 'avatar_matcha', 'avatar_sora'];
+  const avatarKey = avatarKeys[Math.abs(user.uid.charCodeAt(0) + user.uid.length) % avatarKeys.length];
+  return {
+    userId: user.uid,
+    username,
+    displayName,
+    category: 'Visual Creator',
+    bio: 'Capturing moments across Momi mobile & desktop.',
+    website: '',
+    avatarKey,
+    followersCount: 0,
+    followingCount: 0,
+    isVerified: user.email === ADMIN_OWNER_EMAIL && Boolean(user.emailVerified),
+    role: 'USER',
+    moderationScopes: [],
+    assignedByEmail: null
+  };
+}
+
+onAuthStateChanged(auth, (user) => {
   cleanupSubscriptions();
   state.user = user;
+  state.syncError = null;
   if (!user) {
+    state.profile = null;
+    state.isLoadingFeed = false;
     mainShell.classList.add('hidden');
     authGate.classList.remove('hidden');
     return;
   }
+  state.isLoadingFeed = true;
+  state.profile = buildFallbackProfile(user);
   authGate.classList.add('hidden');
   mainShell.classList.remove('hidden');
-  await ensureUserSeeded(user);
+  renderAll();
   startRealtimeSync(user.uid);
+  ensureUserSeeded(user).catch((err) => handleSyncError(err, 'Account initialization'));
 });
 
 async function ensureUserSeeded(user) {
   const userRef = doc(db, 'users', user.uid);
   const snap = await getDoc(userRef);
   if (!snap.exists()) {
-    const username = normalizeUsername(user.email || user.displayName, user.uid);
-    const displayName = (user.displayName || username).slice(0, 80);
-    const avatarKeys = ['avatar_aria', 'avatar_elena', 'avatar_kenji', 'avatar_nord', 'avatar_matcha', 'avatar_sora'];
-    const avatarKey = avatarKeys[Math.abs(user.uid.charCodeAt(0) + user.uid.length) % avatarKeys.length];
+    const base = buildFallbackProfile(user);
     await setDoc(userRef, {
-      userId: user.uid,
-      username,
-      displayName,
-      category: 'Visual Creator',
-      bio: 'Capturing moments across Momi mobile & desktop.',
-      website: '',
-      avatarKey,
-      followersCount: 0,
-      followingCount: 0,
-      isVerified: user.email === ADMIN_OWNER_EMAIL && Boolean(user.emailVerified),
-      role: 'USER',
-      moderationScopes: [],
-      assignedByEmail: null,
+      ...base,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     });
@@ -351,6 +382,11 @@ async function ensureUserSeeded(user) {
       updatedAt: serverTimestamp()
     });
   }
+
+  const postsProbe = await getDocs(query(collection(db, 'posts'), limit(1)));
+  if (postsProbe.empty) {
+    await publishShowcaseBurst(user.uid, { silent: true });
+  }
 }
 
 function startRealtimeSync(uid) {
@@ -362,7 +398,7 @@ function startRealtimeSync(uid) {
       renderAll();
       maybeConsumePendingDeepLink();
     }
-  }));
+  }, (err) => handleSyncError(err, 'Profile sync')));
 
   pushUnsub(onSnapshot(doc(db, 'wallets', uid), (snap) => {
     if (snap.exists()) {
@@ -370,47 +406,49 @@ function startRealtimeSync(uid) {
       renderRightRail();
       if (state.nav === 'wallet') renderMainStage();
     }
-  }));
+  }, (err) => handleSyncError(err, 'Wallet sync')));
 
   pushUnsub(onSnapshot(query(collection(db, 'users'), limit(50)), (snap) => {
     state.creators = snap.docs.map((d) => ({ ...d.data(), userId: d.id }));
     renderRightRail();
     maybeConsumePendingDeepLink();
     if (state.nav === 'explore' || state.nav === 'create') renderMainStage();
-  }));
+  }, (err) => handleSyncError(err, 'Creators sync')));
 
   pushUnsub(onSnapshot(query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(40)), (snap) => {
     state.posts = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+    state.isLoadingFeed = false;
+    state.syncError = null;
     renderMainStage();
     maybeConsumePendingDeepLink();
-  }));
+  }, (err) => handleSyncError(err, 'Posts feed sync')));
 
   pushUnsub(onSnapshot(query(collection(db, 'stories'), orderBy('createdAt', 'desc'), limit(30)), (snap) => {
     state.stories = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
     if (state.nav === 'home') renderMainStage();
-  }));
+  }, (err) => handleSyncError(err, 'Stories sync')));
 
   pushUnsub(onSnapshot(query(collection(db, 'liveStreams'), where('isLive', '==', true), limit(20)), (snap) => {
     state.liveStreams = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
     updateBadges();
     renderRightRail();
     if (state.nav === 'home' || state.nav === 'live') renderMainStage();
-  }));
+  }, () => undefined));
 
   pushUnsub(onSnapshot(collection(db, 'users', uid, 'likedPosts'), (snap) => {
     state.likedIds = new Set(snap.docs.map((d) => d.id));
     renderMainStage();
-  }));
+  }, () => undefined));
 
   pushUnsub(onSnapshot(collection(db, 'users', uid, 'bookmarks'), (snap) => {
     state.bookmarkIds = new Set(snap.docs.map((d) => d.id));
     renderMainStage();
-  }));
+  }, () => undefined));
 
   pushUnsub(onSnapshot(collection(db, 'users', uid, 'seenStories'), (snap) => {
     state.seenStoryIds = new Set(snap.docs.map((d) => d.id));
     if (state.nav === 'home') renderMainStage();
-  }));
+  }, () => undefined));
 
   pushUnsub(onSnapshot(query(collection(db, 'follows'), where('followerUid', '==', uid)), (snap) => {
     state.followingUids = new Set(snap.docs.map((d) => d.data().targetUid));
@@ -794,6 +832,16 @@ function renderHome() {
         </div>
       </div>
 
+      ${state.syncError ? `
+        <div class="sync-error-banner" role="alert">
+          <div style="flex:1;min-width:220px;">
+            <strong>Could not sync Momi feed</strong>
+            <div class="small muted">${escapeHtml(state.syncError)}</div>
+          </div>
+          <button type="button" class="btn-outline btn-sm" id="retrySyncBtn">Retry Sync</button>
+        </div>
+      ` : ''}
+
       <section class="stories-tray" aria-label="Stories and live streams">
         <button type="button" class="story-tile" id="homeGoLiveTile">
           <span class="avatar-ring"><span class="avatar" style="width:58px;height:58px;font-size:1.3rem;">&#9673;</span></span>
@@ -817,8 +865,8 @@ function renderHome() {
       ${
         posts.length === 0
           ? `<div class="card-panel" style="text-align:center;padding:36px;">
-              <h3 style="margin:0 0 8px;">No posts in ${escapeHtml(state.homeFilter)} yet</h3>
-              <p class="muted" style="margin:0 0 16px;">Create a post in Desktop Studio or follow creators in Explore.</p>
+              <h3 style="margin:0 0 8px;">${state.isLoadingFeed ? 'Syncing your Momi feed...' : `No posts in ${escapeHtml(state.homeFilter)} yet`}</h3>
+              <p class="muted" style="margin:0 0 16px;">${state.isLoadingFeed ? 'Connecting to real-time Firestore feed across Android and Web.' : 'Create a post in Desktop Studio or follow creators in Explore.'}</p>
               <button type="button" class="btn-primary" id="emptyCreateBtn">Open Create Studio</button>
             </div>`
           : posts.map(renderPostCardHtml).join('')
@@ -826,6 +874,17 @@ function renderHome() {
     </div>
   `;
 
+  const retryBtn = document.getElementById('retrySyncBtn');
+  if (retryBtn && state.user) {
+    retryBtn.onclick = () => {
+      state.syncError = null;
+      state.isLoadingFeed = true;
+      cleanupSubscriptions();
+      renderHome();
+      startRealtimeSync(state.user.uid);
+      ensureUserSeeded(state.user).catch((err) => handleSyncError(err, 'Retry initialization'));
+    };
+  }
   mainStage.querySelectorAll('[data-home-filter]').forEach((b) => {
     b.onclick = () => {
       state.homeFilter = b.dataset.homeFilter;
@@ -1589,6 +1648,10 @@ function renderProfile() {
   const displayed = state.profileTab === 'saved' && isOwn ? savedPosts : userPosts;
   const isFollowing = state.followingUids.has(profile.userId);
 
+  const isOwnerAdmin = state.user?.email === ADMIN_OWNER_EMAIL && Boolean(state.user?.emailVerified);
+  const showcasePostCount = state.posts.filter((p) => p.id.startsWith('showcase_')).length;
+  const showcaseStoryCount = state.stories.filter((s) => s.id.startsWith('showcase_')).length;
+
   mainStage.innerHTML = `
     <div class="stage-wide">
       <div class="card-panel">
@@ -1624,6 +1687,22 @@ function renderProfile() {
         ${profile.website ? `<a href="${escapeHtml(profile.website)}" target="_blank" rel="noopener noreferrer" style="color:var(--primary);font-size:0.88rem;">${escapeHtml(profile.website)}</a>` : ''}
       </div>
 
+      ${isOwn && isOwnerAdmin ? `
+        <div class="card-panel">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+            <div>
+              <strong>Owner Starter Showcase Accounts (${showcasePostCount} posts &middot; ${showcaseStoryCount} stories)</strong>
+              <div class="muted small">Publish active starter creator posts, stories, likes &amp; comments while growing early users — remove all in 1 click anytime.</div>
+            </div>
+            <div class="chip-row">
+              <button type="button" class="btn-primary btn-sm" id="showcaseBurstBtn" ${state.showcaseBusy ? 'disabled' : ''}>Publish Activity Burst</button>
+              <button type="button" class="btn-outline btn-sm" id="showcaseEngageBtn" ${state.showcaseBusy ? 'disabled' : ''}>Like &amp; Comment Recent</button>
+              <button type="button" class="btn-danger btn-sm" id="showcaseRemoveBtn" ${state.showcaseBusy ? 'disabled' : ''}>Remove All Starter Accounts</button>
+            </div>
+          </div>
+        </div>
+      ` : ''}
+
       <div class="android-promo-card">
         <div class="android-promo-copy">
           <strong>Take Momi with you on Android</strong>
@@ -1653,6 +1732,12 @@ function renderProfile() {
   `;
 
   document.getElementById('shareProfileBtn').onclick = () => shareProfileExternally(profile);
+  const burstBtn = document.getElementById('showcaseBurstBtn');
+  if (burstBtn) burstBtn.onclick = () => publishShowcaseBurst(state.user.uid);
+  const engageBtn = document.getElementById('showcaseEngageBtn');
+  if (engageBtn) engageBtn.onclick = () => engagePostsWithShowcase(state.user.uid);
+  const removeBtn = document.getElementById('showcaseRemoveBtn');
+  if (removeBtn) removeBtn.onclick = () => removeAllShowcaseContent();
   const editBtn = document.getElementById('editProfileBtn');
   if (editBtn) editBtn.onclick = () => openEditProfileModal();
   const createBtn = document.getElementById('profileCreateBtn');
@@ -1664,6 +1749,151 @@ function renderProfile() {
   const tSaved = document.getElementById('profTabSaved');
   if (tSaved) tSaved.onclick = () => { state.profileTab = 'saved'; renderProfile(); };
   bindFeedInteractions(mainStage);
+}
+
+async function publishShowcaseBurst(uid, { silent = false } = {}) {
+  if (!uid || state.showcaseBusy) return;
+  state.showcaseBusy = true;
+  if (!silent && state.nav === 'profile') renderProfile();
+  try {
+    const batch = writeBatch(db);
+    const stamp = Date.now();
+    const batchPersonas = [...SHOWCASE_PERSONAS].sort(() => Math.random() - 0.5).slice(0, 4);
+    batchPersonas.forEach((persona, idx) => {
+      const postId = `showcase_${persona.username.replace(/[^a-z0-9]/gi, '_')}_${stamp}_${idx}`;
+      const commentId = `showcase_cmt_${stamp}_${idx}`;
+      const commenter = SHOWCASE_PERSONAS[(idx + 2) % SHOWCASE_PERSONAS.length];
+      const commentText = SHOWCASE_COMMENTS[(idx + Math.floor(stamp / 1000)) % SHOWCASE_COMMENTS.length];
+      batch.set(doc(db, 'posts', postId), {
+        userId: uid,
+        authorUsername: persona.username,
+        authorDisplayName: persona.displayName,
+        authorAvatarKey: persona.avatarKey,
+        authorVerified: true,
+        location: persona.location,
+        imageKey: persona.imageKey,
+        filterTag: persona.filterTag,
+        aspectRatio: persona.aspectRatio,
+        hashtags: persona.hashtags,
+        taggedUsernames: extractMentions(persona.caption),
+        caption: persona.caption,
+        likesCount: 14 + idx * 7,
+        viewsCount: 95 + idx * 32,
+        commentsCount: 1,
+        category: persona.category,
+        isReel: idx % 2 === 0,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      batch.set(doc(db, 'posts', postId, 'comments', commentId), {
+        userId: uid,
+        authorUsername: commenter.username,
+        authorAvatarKey: commenter.avatarKey,
+        text: commentText,
+        likesCount: 2,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      if (idx < 2) {
+        batch.set(doc(db, 'stories', `showcase_story_${stamp}_${idx}`), {
+          userId: uid,
+          username: persona.username,
+          avatarKey: persona.avatarKey,
+          imageKey: persona.imageKey,
+          caption: persona.location,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        });
+      }
+    });
+    await batch.commit();
+    if (!silent) showToast('Published 4 starter showcase posts, comments & stories!');
+  } catch (err) {
+    if (!silent) showToast(err?.message || 'Could not publish showcase burst');
+  } finally {
+    state.showcaseBusy = false;
+    if (!silent && state.nav === 'profile') renderProfile();
+  }
+}
+
+async function engagePostsWithShowcase(uid) {
+  if (!uid || state.showcaseBusy) return;
+  state.showcaseBusy = true;
+  if (state.nav === 'profile') renderProfile();
+  try {
+    const targets = state.posts.slice(0, 4);
+    if (targets.length === 0) {
+      showToast('No posts available yet — publish a showcase burst first.');
+      return;
+    }
+    const batch = writeBatch(db);
+    const stamp = Date.now();
+    targets.forEach((p, idx) => {
+      const persona = SHOWCASE_PERSONAS[(idx + Math.floor(stamp / 1000)) % SHOWCASE_PERSONAS.length];
+      const commentText = SHOWCASE_COMMENTS[(idx + 1) % SHOWCASE_COMMENTS.length];
+      batch.set(doc(db, 'posts', p.id, 'comments', `showcase_cmt_${stamp}_${idx}`), {
+        userId: uid,
+        authorUsername: persona.username,
+        authorAvatarKey: persona.avatarKey,
+        text: commentText,
+        likesCount: 1,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      batch.update(doc(db, 'posts', p.id), {
+        commentsCount: increment(1),
+        updatedAt: serverTimestamp()
+      });
+    });
+    await batch.commit();
+    const likeBatch = writeBatch(db);
+    targets.forEach((p) => {
+      likeBatch.update(doc(db, 'posts', p.id), {
+        likesCount: increment(1),
+        updatedAt: serverTimestamp()
+      });
+    });
+    await likeBatch.commit();
+    showToast(`Added starter likes & comments to ${targets.length} posts!`);
+  } catch (err) {
+    showToast(err?.message || 'Could not add showcase engagement');
+  } finally {
+    state.showcaseBusy = false;
+    if (state.nav === 'profile') renderProfile();
+  }
+}
+
+async function removeAllShowcaseContent() {
+  if (!state.user || state.showcaseBusy) return;
+  if (!window.confirm('Remove all starter showcase posts and stories from Momi?')) return;
+  state.showcaseBusy = true;
+  if (state.nav === 'profile') renderProfile();
+  try {
+    const [postsSnap, storiesSnap] = await Promise.all([
+      getDocs(query(collection(db, 'posts'), limit(120))),
+      getDocs(query(collection(db, 'stories'), limit(60)))
+    ]);
+    const showcasePosts = postsSnap.docs.filter((d) => d.id.startsWith('showcase_'));
+    const showcaseStories = storiesSnap.docs.filter((d) => d.id.startsWith('showcase_'));
+    for (const pDoc of showcasePosts) {
+      const cmts = await getDocs(collection(db, 'posts', pDoc.id, 'comments')).catch(() => null);
+      if (cmts && !cmts.empty) {
+        const cBatch = writeBatch(db);
+        cmts.docs.forEach((c) => cBatch.delete(c.reference));
+        await cBatch.commit().catch(() => undefined);
+      }
+      await deleteDoc(pDoc.reference);
+    }
+    for (const sDoc of showcaseStories) {
+      await deleteDoc(sDoc.reference).catch(() => undefined);
+    }
+    showToast(`Removed ${showcasePosts.length} starter posts & ${showcaseStories.length} stories.`);
+  } catch (err) {
+    showToast(err?.message || 'Failed removing starter showcase content');
+  } finally {
+    state.showcaseBusy = false;
+    if (state.nav === 'profile') renderProfile();
+  }
 }
 
 // Modals & Shared Actions

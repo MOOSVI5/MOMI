@@ -460,6 +460,214 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         }
     }
 
+    suspend fun publishShowcaseActivityBurst(): Result<Int> = runCatching {
+        val uid = requireUserId()
+        val batch = db.batch()
+        val stamp = System.currentTimeMillis()
+        val selected = SHOWCASE_PERSONAS.shuffled().take(4)
+
+        selected.forEachIndexed { idx, persona ->
+            val cleanHandle = persona.username.replace(Regex("[^a-zA-Z0-9_]"), "_")
+            val postId = "showcase_${cleanHandle}_${stamp}_$idx"
+            val commentId = "showcase_cmt_${stamp}_$idx"
+            val commenter = SHOWCASE_PERSONAS[(idx + 2) % SHOWCASE_PERSONAS.size]
+            val commentText = SHOWCASE_COMMENTS[((stamp / 1000L).toInt() + idx).mod(SHOWCASE_COMMENTS.size)]
+            val postPayload = mapOf(
+                "userId" to uid,
+                "authorUsername" to persona.username,
+                "authorDisplayName" to persona.displayName,
+                "authorAvatarKey" to persona.avatarKey,
+                "authorVerified" to true,
+                "location" to persona.location,
+                "imageKey" to persona.imageKey,
+                "filterTag" to persona.filterTag,
+                "aspectRatio" to persona.aspectRatio,
+                "hashtags" to persona.hashtags,
+                "taggedUsernames" to MediaAssets.extractMentions(persona.caption),
+                "caption" to persona.caption,
+                "likesCount" to (14L + idx * 7L),
+                "viewsCount" to (95L + idx * 32L),
+                "commentsCount" to 1L,
+                "category" to persona.category,
+                "isReel" to (idx % 2 == 0),
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            batch.set(postsCol().document(postId), postPayload)
+            batch.set(
+                postsCol().document(postId).collection("comments").document(commentId),
+                mapOf(
+                    "userId" to uid,
+                    "authorUsername" to commenter.username,
+                    "authorAvatarKey" to commenter.avatarKey,
+                    "text" to commentText,
+                    "likesCount" to 2L,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            if (idx < 2) {
+                batch.set(
+                    storiesCol().document("showcase_story_${stamp}_$idx"),
+                    mapOf(
+                        "userId" to uid,
+                        "username" to persona.username,
+                        "avatarKey" to persona.avatarKey,
+                        "imageKey" to persona.imageKey,
+                        "caption" to persona.location,
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
+        }
+        try {
+            batch.commit().await()
+            selected.size
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, postsCol().path)
+            throw e
+        }
+    }
+
+    suspend fun engageRecentPostsWithShowcase(): Result<Int> = runCatching {
+        val uid = requireUserId()
+        val recentSnap = try {
+            postsCol()
+                .orderBy("createdAt", Query.Direction.DESCENDING)
+                .limit(4)
+                .get()
+                .await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, postsCol().path)
+            throw e
+        }
+
+        val targets = recentSnap.documents
+        if (targets.isEmpty()) return@runCatching 0
+
+        val stamp = System.currentTimeMillis()
+        val commentBatch = db.batch()
+        targets.forEachIndexed { idx, docSnap ->
+            val persona = SHOWCASE_PERSONAS[((stamp / 1000L).toInt() + idx).mod(SHOWCASE_PERSONAS.size)]
+            val commentText = SHOWCASE_COMMENTS[(idx + 1).mod(SHOWCASE_COMMENTS.size)]
+            val commentRef = docSnap.reference.collection("comments").document("showcase_cmt_${stamp}_$idx")
+            commentBatch.set(
+                commentRef,
+                mapOf(
+                    "userId" to uid,
+                    "authorUsername" to persona.username,
+                    "authorAvatarKey" to persona.avatarKey,
+                    "text" to commentText,
+                    "likesCount" to 1L,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            commentBatch.update(
+                docSnap.reference,
+                mapOf(
+                    "commentsCount" to FieldValue.increment(1L),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+        }
+        try {
+            commentBatch.commit().await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, postsCol().path)
+            throw e
+        }
+
+        val likeBatch = db.batch()
+        targets.forEach { docSnap ->
+            likeBatch.update(
+                docSnap.reference,
+                mapOf(
+                    "likesCount" to FieldValue.increment(1L),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+        }
+        try {
+            likeBatch.commit().await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, postsCol().path)
+            throw e
+        }
+
+        targets.size
+    }
+
+    suspend fun removeAllShowcaseContent(): Result<Pair<Int, Int>> = runCatching {
+        requireUserId()
+        val postsSnap = try {
+            postsCol().limit(120).get().await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, postsCol().path)
+            throw e
+        }
+        val storiesSnap = try {
+            storiesCol().limit(60).get().await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, storiesCol().path)
+            throw e
+        }
+
+        val showcasePosts = postsSnap.documents.filter { it.id.startsWith("showcase_") }
+        val showcaseStories = storiesSnap.documents.filter { it.id.startsWith("showcase_") }
+
+        var removedPosts = 0
+        for (postDoc in showcasePosts) {
+            runCatching {
+                val cmtsSnap = postDoc.reference.collection("comments").get().await()
+                cmtsSnap.documents.chunked(20).forEach { group ->
+                    val batch = db.batch()
+                    group.forEach { batch.delete(it.reference) }
+                    batch.commit().await()
+                }
+            }
+            runCatching {
+                val chunksSnap = postDoc.reference.collection("videoChunks").get().await()
+                chunksSnap.documents.chunked(20).forEach { group ->
+                    val batch = db.batch()
+                    group.forEach { batch.delete(it.reference) }
+                    batch.commit().await()
+                }
+            }
+            try {
+                postDoc.reference.delete().await()
+                removedPosts++
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                handleFirestoreError(e, OperationType.DELETE, postDoc.reference.path)
+            }
+        }
+
+        var removedStories = 0
+        for (storyDoc in showcaseStories) {
+            runCatching {
+                storyDoc.reference.delete().await()
+                removedStories++
+            }
+        }
+
+        Pair(removedPosts, removedStories)
+    }
+
     suspend fun toggleLike(post: Post, actorProfile: UserProfile?): Result<Unit> = runCatching {
         val uid = requireUserId()
         require(post.id.isNotBlank()) { "Post ID must not be blank" }
@@ -1801,7 +2009,103 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         return (fromName ?: "momi.creator").take(50)
     }
 
+    data class ShowcasePersona(
+        val username: String,
+        val displayName: String,
+        val avatarKey: String,
+        val imageKey: String,
+        val location: String,
+        val category: String,
+        val filterTag: String,
+        val aspectRatio: String,
+        val hashtags: List<String>,
+        val caption: String
+    )
+
     companion object {
+        val SHOWCASE_PERSONAS = listOf(
+            ShowcasePersona(
+                username = "elena.maris",
+                displayName = "Elena Maris",
+                avatarKey = "avatar_elena",
+                imageKey = "img_post_coastal",
+                location = "Positano, Amalfi Coast",
+                category = "Travel",
+                filterTag = "NONE",
+                aspectRatio = "1:1",
+                hashtags = listOf("amalfi", "coastal", "momi"),
+                caption = "Golden hour spilling over the cliffs before the ferries drift back in. #amalfi #coastal #momi"
+            ),
+            ShowcasePersona(
+                username = "matcha.ritual",
+                displayName = "Matcha Ritual",
+                avatarKey = "avatar_matcha",
+                imageKey = "img_post_coffee",
+                location = "Lisbon, Chiado",
+                category = "Coffee",
+                filterTag = "WARM",
+                aspectRatio = "4:5",
+                hashtags = listOf("matcha", "cafeculture", "lisbon"),
+                caption = "Morning ritual: stone-ground Uji matcha over crystal ice and warm pastry. #matcha #cafeculture #lisbon"
+            ),
+            ShowcasePersona(
+                username = "atelier.nord",
+                displayName = "Atelier Nord",
+                avatarKey = "avatar_nord",
+                imageKey = "img_post_architecture",
+                location = "Copenhagen, Denmark",
+                category = "Architecture",
+                filterTag = "CINEMA",
+                aspectRatio = "4:5",
+                hashtags = listOf("architecture", "minimal", "nordic"),
+                caption = "When raw concrete meets warm white oak and four o'clock sunbeams. #architecture #minimal #nordic"
+            ),
+            ShowcasePersona(
+                username = "kenji.lens",
+                displayName = "Kenji Takahashi",
+                avatarKey = "avatar_kenji",
+                imageKey = "img_post_neon_street",
+                location = "Shinjuku, Tokyo",
+                category = "Night",
+                filterTag = "BLUE",
+                aspectRatio = "1:1",
+                hashtags = listOf("tokyo", "nightphotography", "street"),
+                caption = "Silk blue & maroon neon reflections after a sudden midnight downpour. #tokyo #nightphotography #street"
+            ),
+            ShowcasePersona(
+                username = "sora.frames",
+                displayName = "Sora Nakamura",
+                avatarKey = "avatar_sora",
+                imageKey = "img_post_coffee",
+                location = "Kyoto, Gion",
+                category = "Food",
+                filterTag = "VINTAGE",
+                aspectRatio = "4:5",
+                hashtags = listOf("kyoto", "espresso", "aesthetic"),
+                caption = "Pour-over clouds and analog film grain at dawn. @atelier.nord #kyoto #espresso #aesthetic"
+            ),
+            ShowcasePersona(
+                username = "layla.travels",
+                displayName = "Layla Haddad",
+                avatarKey = "avatar_layla",
+                imageKey = "img_post_coastal",
+                location = "Santorini, Greece",
+                category = "Travel",
+                filterTag = "PASTEL",
+                aspectRatio = "16:9",
+                hashtags = listOf("santorini", "sunset", "wanderlust"),
+                caption = "Aegean blues fading into rose gold right on cue. @elena.maris #santorini #sunset #wanderlust"
+            )
+        )
+
+        val SHOWCASE_COMMENTS = listOf(
+            "Love the color tone on this shot!",
+            "The lighting feels so calm and crisp.",
+            "Saving this spot for my next trip.",
+            "Framing and texture look incredible here.",
+            "Cleanest shot on the feed today!"
+        )
+
         const val POSTS_LIMIT = 20L
         const val STORIES_LIMIT = 15L
         const val PROFILES_LIMIT = 30L

@@ -31,10 +31,13 @@ import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.AddBox
 import androidx.compose.material.icons.filled.AdminPanelSettings
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Collections
+import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Menu
@@ -55,6 +58,7 @@ import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.PersonAdd
 import androidx.compose.material.icons.outlined.PhoneAndroid
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -95,6 +99,7 @@ import com.example.data.model.MomiRoles
 import com.example.data.model.Post
 import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
+import com.example.data.repository.MomiFirestoreRepository
 import com.example.ui.components.EditProfileDialog
 import com.example.ui.components.FollowListBottomSheet
 import com.example.ui.components.LumaAvatar
@@ -162,6 +167,12 @@ fun ProfileScreen(
     onTestAlertSound: () -> Unit = {},
     onRequestNotificationPermission: () -> Unit = {},
     onCheckForUpdates: () -> Unit = {},
+    showcasePostsCount: Int = 0,
+    showcaseStoriesCount: Int = 0,
+    isShowcaseBusy: Boolean = false,
+    onPublishShowcaseBurst: () -> Unit = {},
+    onEngageWithShowcase: () -> Unit = {},
+    onRemoveAllShowcase: () -> Unit = {},
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -173,6 +184,7 @@ fun ProfileScreen(
     var showTeamRolesSheet by remember { mutableStateOf(false) }
     var showModerationQueueSheet by remember { mutableStateOf(false) }
     var showPlayReadinessSheet by remember { mutableStateOf(false) }
+    var showShowcaseManagerSheet by remember { mutableStateOf(false) }
     var followSheetTab by remember { mutableStateOf<Int?>(null) }
 
     val canAccessSafetyQueue = isAdminViewActive || (
@@ -658,6 +670,29 @@ fun ProfileScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Play Store & Monetization Status", fontWeight = FontWeight.Bold)
                     }
+                    OutlinedButton(
+                        onClick = {
+                            showSettingsSheet = false
+                            showShowcaseManagerSheet = true
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("admin_showcase_accounts_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.AutoAwesome,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Starter Showcase Accounts ($showcasePostsCount posts)",
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
 
                 if (canAccessSafetyQueue) {
@@ -800,6 +835,18 @@ fun ProfileScreen(
     if (showPlayReadinessSheet && isOwnerAccount && isAdminViewActive) {
         OwnerMonetizationAndPlaySheet(
             onDismiss = { showPlayReadinessSheet = false }
+        )
+    }
+
+    if (showShowcaseManagerSheet && isOwnerAccount && isAdminViewActive) {
+        ShowcaseAccountsManagerSheet(
+            showcasePostsCount = showcasePostsCount,
+            showcaseStoriesCount = showcaseStoriesCount,
+            isBusy = isShowcaseBusy,
+            onPublishBurst = onPublishShowcaseBurst,
+            onEngageRecent = onEngageWithShowcase,
+            onRemoveAll = onRemoveAllShowcase,
+            onDismiss = { showShowcaseManagerSheet = false }
         )
     }
 
@@ -1360,6 +1407,39 @@ fun ProfileScreen(
                                         )
                                     }
                                 }
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .minimumInteractiveComponentSize()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(MaterialTheme.colorScheme.surface)
+                                        .clickable { showShowcaseManagerSheet = true }
+                                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                                        .testTag("profile_showcase_accounts_chip"),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Filled.AutoAwesome,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(17.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "Starter Showcase Accounts",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    Text(
+                                        text = "$showcasePostsCount posts · $showcaseStoriesCount stories",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
                             }
                         }
                     } else if (isOwnerAccount && !isAdminViewActive) {
@@ -1887,6 +1967,241 @@ private fun PortalLinkButton(
                 tint = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(18.dp)
             )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ShowcaseAccountsManagerSheet(
+    showcasePostsCount: Int,
+    showcaseStoriesCount: Int,
+    isBusy: Boolean,
+    onPublishBurst: () -> Unit,
+    onEngageRecent: () -> Unit,
+    onRemoveAll: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var confirmRemove by remember { mutableStateOf(false) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp),
+            contentPadding = PaddingValues(top = 6.dp, bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Filled.AutoAwesome,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Starter Showcase Accounts",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Publish realistic creator posts, stories, likes, and comments while growing your early community — then remove all starter content in 1 tap.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            item {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "Active Starter Feed Footprint",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "$showcasePostsCount showcase posts · $showcaseStoriesCount active stories",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Text(
+                            text = "${MomiFirestoreRepository.SHOWCASE_PERSONAS.size} personas",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = onPublishBurst,
+                        enabled = !isBusy,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("showcase_burst_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.AutoAwesome,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (isBusy) "Working..." else "Publish 4 Posts, Comments & Stories",
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = onEngageRecent,
+                        enabled = !isBusy,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("showcase_engage_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Favorite,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Like & Comment Recent Posts",
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    if (!confirmRemove) {
+                        OutlinedButton(
+                            onClick = { confirmRemove = true },
+                            enabled = !isBusy,
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("showcase_remove_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.DeleteSweep,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Remove All Starter Accounts", fontWeight = FontWeight.Bold)
+                        }
+                    } else {
+                        Button(
+                            onClick = {
+                                confirmRemove = false
+                                onRemoveAll()
+                            },
+                            enabled = !isBusy,
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.error,
+                                contentColor = MaterialTheme.colorScheme.onError
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("showcase_confirm_remove_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.DeleteSweep,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Confirm Delete All Starter Content", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            item {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Included Starter Personas",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            items(MomiFirestoreRepository.SHOWCASE_PERSONAS, key = { it.username }) { persona ->
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        LumaAvatar(
+                            username = persona.username,
+                            avatarKey = persona.avatarKey,
+                            size = 40.dp,
+                            hasActiveStory = true
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "@${persona.username}",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Icon(
+                                    imageVector = Icons.Filled.Verified,
+                                    contentDescription = "Verified persona",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                            Text(
+                                text = "${persona.displayName} · ${persona.category} · ${persona.location}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }

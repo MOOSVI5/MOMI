@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.model.Post
+import com.example.data.repository.MomiFirestoreRepository
 import com.example.ui.theme.AppearancePrefs
 import com.example.util.MediaAssets
 import com.example.util.MomiAlertNotifier
@@ -107,5 +108,21 @@ class MomiFeaturesTest {
         )
         assertTrue(shareBody.contains(postUrl))
         assertTrue(shareBody.contains(MomiLinks.ANDROID_APK_URL))
+    }
+
+    @Test
+    fun showcasePersonas_satisfy_filter_aspectRatio_and_schema_constraints() {
+        val validFilterTags = MediaAssets.postFilterOptions.map { it.tag }.toSet()
+        assertEquals(6, MomiFirestoreRepository.SHOWCASE_PERSONAS.size)
+        assertTrue(MomiFirestoreRepository.SHOWCASE_COMMENTS.size >= 4)
+
+        MomiFirestoreRepository.SHOWCASE_PERSONAS.forEach { persona ->
+            assertTrue(persona.username.isNotBlank())
+            assertTrue(persona.displayName.isNotBlank())
+            assertTrue(validFilterTags.contains(persona.filterTag))
+            assertTrue(persona.aspectRatio in setOf("1:1", "4:5", "16:9"))
+            assertTrue(persona.hashtags.isNotEmpty())
+            assertTrue(persona.caption.isNotBlank())
+        }
     }
 }

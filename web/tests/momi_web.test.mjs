@@ -22,6 +22,8 @@ import {
   PRESET_IMAGE_OPTIONS,
   renderRichCaptionHtml,
   resolveImageSrc,
+  SHOWCASE_COMMENTS,
+  SHOWCASE_PERSONAS,
   WEB_APP_URL
 } from '../firebase-config.js';
 
@@ -121,4 +123,27 @@ test('share URL builders, deep-link parser, and Android app recommendation links
 
   const indexHtml = fs.readFileSync(path.join(REPO_ROOT, 'web', 'index.html'), 'utf8');
   assert.ok(indexHtml.includes(ANDROID_APK_URL));
+});
+
+test('starter showcase personas and Firestore Web sync resilience are configured correctly', () => {
+  const validFilters = new Set(FILTER_OPTIONS.map((f) => f.tag));
+  assert.equal(SHOWCASE_PERSONAS.length, 6);
+  assert.ok(SHOWCASE_COMMENTS.length >= 4);
+
+  for (const persona of SHOWCASE_PERSONAS) {
+    assert.ok(persona.username.length > 2);
+    assert.ok(persona.displayName.length > 2);
+    assert.ok(validFilters.has(persona.filterTag), `Invalid filter tag ${persona.filterTag}`);
+    assert.ok(['1:1', '4:5', '16:9'].includes(persona.aspectRatio));
+    assert.ok(persona.hashtags.length > 0);
+  }
+
+  const appJs = fs.readFileSync(path.join(REPO_ROOT, 'web', 'app.js'), 'utf8');
+  assert.ok(appJs.includes('experimentalAutoDetectLongPolling: true'));
+  assert.ok(appJs.includes('handleSyncError'));
+  assert.ok(appJs.includes('removeAllShowcaseContent'));
+  assert.ok(appJs.includes('publishShowcaseBurst'));
+
+  const swJs = fs.readFileSync(path.join(REPO_ROOT, 'web', 'sw.js'), 'utf8');
+  assert.ok(swJs.includes('momi-web-v3'));
 });

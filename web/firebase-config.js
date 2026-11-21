@@ -179,6 +179,89 @@ export const WEB_APP_URL = 'https://moosvi5.github.io/MOMI/';
 export const ANDROID_APK_URL = 'https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-v2.0.apk';
 export const ANDROID_RELEASES_URL = 'https://github.com/MOOSVI5/MOMI/releases/latest';
 
+export const SHOWCASE_PERSONAS = [
+  {
+    username: 'elena.maris',
+    displayName: 'Elena Maris',
+    avatarKey: 'avatar_elena',
+    imageKey: 'img_post_coastal',
+    filterTag: 'WARM',
+    aspectRatio: '4:5',
+    category: 'Travel',
+    location: 'Positano, Amalfi Coast',
+    hashtags: ['amalfi', 'goldenhour', 'travel', 'momi'],
+    caption: 'Golden hour spilling across the harbor stairs before sunset boats head back. #amalfi #goldenhour #momi'
+  },
+  {
+    username: 'matcha.ritual',
+    displayName: 'Matcha Ritual',
+    avatarKey: 'avatar_matcha',
+    imageKey: 'img_post_coffee',
+    filterTag: 'PASTEL',
+    aspectRatio: '1:1',
+    category: 'Cafe & Food',
+    location: 'Chiado, Lisbon',
+    hashtags: ['matcha', 'coffee', 'cafeculture', 'momi'],
+    caption: 'Slow iced ceremonial matcha and flaky croissants with morning light on stone tables. #matcha #cafeculture'
+  },
+  {
+    username: 'atelier.nord',
+    displayName: 'Atelier Nord',
+    avatarKey: 'avatar_nord',
+    imageKey: 'img_post_architecture',
+    filterTag: 'CINEMA',
+    aspectRatio: '4:5',
+    category: 'Architecture',
+    location: 'Copenhagen, Denmark',
+    hashtags: ['architecture', 'minimal', 'design', 'momi'],
+    caption: 'Sunbeams cutting diagonally across raw concrete and white oak galleries. #architecture #minimal'
+  },
+  {
+    username: 'kenji.lens',
+    displayName: 'Kenji Takahashi',
+    avatarKey: 'avatar_kenji',
+    imageKey: 'img_post_neon_street',
+    filterTag: 'BLUE',
+    aspectRatio: '1:1',
+    category: 'Street',
+    location: 'Shinjuku, Tokyo',
+    hashtags: ['tokyo', 'street', 'photography', 'momi'],
+    caption: 'Cobalt and maroon neon reflections after a sudden midnight rainstorm. #tokyo #street #photography'
+  },
+  {
+    username: 'sora.frames',
+    displayName: 'Sora Takahashi',
+    avatarKey: 'avatar_sora',
+    imageKey: 'img_post_neon_street',
+    filterTag: 'MAROON',
+    aspectRatio: '16:9',
+    category: 'Street',
+    location: 'Osaka, Japan',
+    hashtags: ['nightwalk', 'aesthetic', 'momi'],
+    caption: 'Framing late-night alley signs and warm lantern reflections after dinner. #nightwalk #aesthetic'
+  },
+  {
+    username: 'layla.travels',
+    displayName: 'Layla Al-Noor',
+    avatarKey: 'avatar_aria',
+    imageKey: 'img_post_coastal',
+    filterTag: 'VIVID',
+    aspectRatio: '4:5',
+    category: 'Lifestyle',
+    location: 'Bosphorus, Istanbul',
+    hashtags: ['coastal', 'travel', 'lifestyle', 'momi'],
+    caption: 'Breeze off the water and seaside tea stops with @elena.maris today. #coastal #travel'
+  }
+];
+
+export const SHOWCASE_COMMENTS = [
+  'Love the light and framing on this shot!',
+  'This palette looks incredible on Momi!',
+  'Adding this spot straight to my travel list.',
+  'Crisp tones and such a clean composition!',
+  'Bookmarking this for inspiration #momi'
+];
+
 export function buildPostShareUrl(postId, baseUrl = WEB_APP_URL) {
   const cleanId = String(postId || '').trim();
   const normalizedBase = String(baseUrl || WEB_APP_URL).split('?')[0].split('#')[0];
