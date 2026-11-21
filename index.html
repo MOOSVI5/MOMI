@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#6b0f2b" />
+  <title>Momi — Web &amp; Desktop Studio</title>
+  <link rel="icon" type="image/jpeg" href="./assets/momi-icon.jpg" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Grand+Hotel&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body data-scheme="MIDNIGHT_SUNSET" data-theme="dark">
+  <div id="appRoot" class="app-root">
+    <!-- Auth Gate -->
+    <section id="authGate" class="auth-gate hidden" aria-label="Sign in to Momi">
+      <div class="auth-card">
+        <div class="auth-brand-row">
+          <img src="./assets/momi-icon.jpg" alt="Momi App Icon" class="auth-logo-img" />
+          <div>
+            <h1 class="brand-script">Momi</h1>
+            <p class="muted">Desktop &amp; Web Companion</p>
+          </div>
+        </div>
+        <h2 class="auth-headline">Your Momi feed, stories, live rooms &amp; photo studio on any computer.</h2>
+        <p class="auth-subtext">
+          Sign in with the same Google account you use on Android to sync your posts, saved notes, DMs, live broadcasts, wallet credits, and marketplace orders in real time.
+        </p>
+
+        <div id="authFeaturePills" class="auth-pills">
+          <span class="pill">Instagram + RedNote Views</span>
+          <span class="pill">10 Studio Filters</span>
+          <span class="pill">Desktop Webcam Live</span>
+          <span class="pill">2-Pane Messages</span>
+        </div>
+
+        <button id="googleSignInBtn" type="button" class="btn-primary btn-lg full-width">
+          <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+            <path fill="currentColor" d="M21.35 11.1h-9.17v2.92h5.27c-.45 2.38-2.55 4.08-5.27 4.08a5.64 5.64 0 1 1 0-11.28c1.49 0 2.84.56 3.87 1.48l2.17-2.17A8.64 8.64 0 0 0 12.18 3.5a8.75 8.75 0 1 0 0 17.5c5.05 0 8.42-3.55 8.42-8.55 0-.58-.06-1.02-.25-1.35Z"/>
+          </svg>
+          Continue with Google
+        </button>
+
+        <p id="pendingLinkNotice" class="auth-link-notice hidden"></p>
+
+        <p id="authErrorBox" class="auth-error hidden" role="alert"></p>
+
+        <div class="android-promo-card">
+          <div class="android-promo-copy">
+            <strong>Prefer Momi on Android?</strong>
+            <span class="muted small">Get native camera live streaming, instant sound alerts, and Play Billing wallet perks.</span>
+          </div>
+          <div class="android-promo-actions">
+            <a id="authAndroidDownloadLink" class="btn-outline btn-sm" href="https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-v2.0.apk" target="_blank" rel="noopener noreferrer">Download Android APK</a>
+            <a class="btn-ghost btn-sm" href="https://github.com/MOOSVI5/MOMI/releases/latest" target="_blank" rel="noopener noreferrer">Releases</a>
+          </div>
+        </div>
+
+        <div class="auth-help-card">
+          <strong>Using a custom domain or GitHub Pages?</strong>
+          <p class="muted small">
+            If Google Sign-In shows an <em>unauthorized-domain</em> notice, add this hostname (<code id="currentHostnameLabel"></code>) under Firebase Console &rarr; Authentication &rarr; Settings &rarr; Authorized domains for project <code>gen-lang-client-0132255277</code>.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Main Desktop + Mobile Shell -->
+    <div id="mainShell" class="main-shell hidden">
+      <!-- Left Desktop Navigation Sidebar -->
+      <aside class="sidebar" aria-label="Primary navigation">
+        <div class="sidebar-top">
+          <button type="button" class="brand-button" data-nav="home" title="Momi Home">
+            <img src="./assets/momi-icon.jpg" alt="Momi" class="brand-icon" />
+            <span class="brand-script sidebar-label">Momi</span>
+          </button>
+          <span class="desktop-badge sidebar-label">WEB</span>
+        </div>
+
+        <nav class="nav-list">
+          <button type="button" class="nav-item active" data-nav="home">
+            <span class="nav-icon" aria-hidden="true">&#8962;</span>
+            <span class="sidebar-label">Home</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="explore">
+            <span class="nav-icon" aria-hidden="true">&#9740;</span>
+            <span class="sidebar-label">Explore</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="clips">
+            <span class="nav-icon" aria-hidden="true">&#9654;</span>
+            <span class="sidebar-label">Clips</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="create">
+            <span class="nav-icon" aria-hidden="true">&#43;</span>
+            <span class="sidebar-label">Create Studio</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="live">
+            <span class="nav-icon" aria-hidden="true">&#9673;</span>
+            <span class="sidebar-label">Live Rooms</span>
+            <span id="navLiveBadge" class="badge-pill live hidden">0</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="marketplace">
+            <span class="nav-icon" aria-hidden="true">&#128717;</span>
+            <span class="sidebar-label">Marketplace</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="messages">
+            <span class="nav-icon" aria-hidden="true">&#9993;</span>
+            <span class="sidebar-label">Messages</span>
+            <span id="navMsgBadge" class="badge-pill hidden">0</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="notifications">
+            <span class="nav-icon" aria-hidden="true">&#9825;</span>
+            <span class="sidebar-label">Alerts</span>
+            <span id="navNotifBadge" class="badge-pill hidden">0</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="wallet">
+            <span class="nav-icon" aria-hidden="true">&#9733;</span>
+            <span class="sidebar-label">Wallet &amp; Perks</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="profile">
+            <span class="nav-icon" aria-hidden="true">&#9786;</span>
+            <span class="sidebar-label">Profile</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <button id="installPwaBtn" type="button" class="btn-outline btn-sm hidden">
+            Install Desktop App
+          </button>
+          <div class="sidebar-controls-row">
+            <button id="themeToggleBtn" type="button" class="icon-chip" title="Toggle Dark/Light Mode">
+              &#9788; <span class="sidebar-label" id="themeModeLabel">Dark</span>
+            </button>
+            <button id="soundToggleBtn" type="button" class="icon-chip" title="Toggle Alert Chimes">
+              &#128276; <span class="sidebar-label" id="soundModeLabel">On</span>
+            </button>
+          </div>
+          <select id="schemeSelect" class="scheme-select sidebar-label" aria-label="Color palette">
+            <option value="MIDNIGHT_SUNSET">Midnight Sunset</option>
+            <option value="EMERALD_GOLD">Emerald &amp; Gold</option>
+            <option value="COBALT_INDIGO">Electric Indigo</option>
+            <option value="SILK_MAROON">Silk &amp; Maroon</option>
+            <option value="WHITE_GREY">White &amp; Grey</option>
+          </select>
+          <button id="signOutBtn" type="button" class="btn-ghost btn-sm full-width">
+            <span class="sidebar-label">Sign out</span>
+            <span class="compact-only" aria-hidden="true">&#9099;</span>
+          </button>
+        </div>
+      </aside>
+
+      <!-- Mobile Top Bar -->
+      <header class="mobile-header">
+        <div class="mobile-brand">
+          <img src="./assets/momi-icon.jpg" alt="Momi" class="brand-icon-sm" />
+          <span class="brand-script">Momi</span>
+        </div>
+        <div class="mobile-header-actions">
+          <button type="button" class="icon-btn" data-nav="notifications" aria-label="Notifications">
+            &#9825;<span id="mobileNotifDot" class="dot hidden"></span>
+          </button>
+          <button type="button" class="icon-btn" data-nav="messages" aria-label="Messages">
+            &#9993;<span id="mobileMsgDot" class="dot hidden"></span>
+          </button>
+          <button type="button" class="icon-btn" data-nav="wallet" aria-label="Wallet">&#9733;</button>
+        </div>
+      </header>
+
+      <!-- Main Center Stage -->
+      <main id="mainStage" class="main-stage" tabindex="-1"></main>
+
+      <!-- Desktop Right Discovery Rail -->
+      <aside class="right-rail" aria-label="Account and discovery">
+        <div id="rightUserCard" class="rail-card"></div>
+        <div id="rightAndroidCard" class="rail-card"></div>
+        <div id="rightLiveCard" class="rail-card"></div>
+        <div id="rightCreatorsCard" class="rail-card"></div>
+      </aside>
+
+      <!-- Mobile Bottom Bar -->
+      <nav class="mobile-bottom-nav" aria-label="Mobile navigation">
+        <button type="button" class="mnav-item active" data-nav="home">&#8962;<span>Home</span></button>
+        <button type="button" class="mnav-item" data-nav="explore">&#9740;<span>Explore</span></button>
+        <button type="button" class="mnav-item" data-nav="create">&#43;<span>Create</span></button>
+        <button type="button" class="mnav-item" data-nav="clips">&#9654;<span>Clips</span></button>
+        <button type="button" class="mnav-item" data-nav="profile">&#9786;<span>Profile</span></button>
+      </nav>
+    </div>
+
+    <!-- Modal Overlay (Post Detail, Story Viewer, Live Room, Edit Profile, Report) -->
+    <div id="modalBackdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+      <div id="modalContent" class="modal-content"></div>
+    </div>
+
+    <!-- Toast Bar -->
+    <div id="toastBar" class="toast-bar hidden" role="status" aria-live="polite"></div>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
