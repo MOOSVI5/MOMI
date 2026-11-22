@@ -1,8 +1,11 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.6.0/firebase-app.js';
 import {
+  browserLocalPersistence,
   getAuth,
+  getRedirectResult,
   GoogleAuthProvider,
   onAuthStateChanged,
+  setPersistence,
   signInWithPopup,
   signInWithRedirect,
   signOut
@@ -284,22 +287,118 @@ document.addEventListener('keydown', (e) => {
 });
 
 // Authentication
-document.getElementById('googleSignInBtn').addEventListener('click', async () => {
-  authErrorBox.classList.add('hidden');
+const googleSignInBtn = document.getElementById('googleSignInBtn');
+const defaultGoogleSignInHtml = googleSignInBtn.innerHTML;
+let signInPending = false;
+
+function isStandalonePwaMode() {
+  return Boolean(
+    window.matchMedia?.('(display-mode: standalone)')?.matches
+      || window.navigator?.standalone === true
+  );
+}
+
+function showAuthError(message, { includeOpenInChrome = false } = {}) {
+  authErrorBox.textContent = message;
+  if (includeOpenInChrome) {
+    const link = document.createElement('a');
+    link.href = WEB_APP_URL;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = ' Open in Chrome Browser →';
+    link.style.color = '#fde047';
+    link.style.fontWeight = '700';
+    link.style.textDecoration = 'underline';
+    link.style.marginLeft = '6px';
+    authErrorBox.appendChild(link);
+  }
+  authErrorBox.classList.remove('hidden');
+}
+
+function setSignInBusy(busy) {
+  signInPending = busy;
+  googleSignInBtn.disabled = busy;
+  if (busy) {
+    googleSignInBtn.textContent = 'Connecting to Google...';
+  } else {
+    googleSignInBtn.innerHTML = defaultGoogleSignInHtml;
+  }
+}
+
+function formatGoogleAuthError(err) {
+  const code = err?.code || '';
+  if (code === 'auth/unauthorized-domain') {
+    const host = window.location.hostname || 'this domain';
+    return {
+      text: `Domain "${host}" is not authorized. Add "${host}" in Firebase Console -> Authentication -> Settings -> Authorized domains (gen-lang-client-0132255277).`,
+      openChrome: false
+    };
+  }
+  if (code === 'auth/popup-closed-by-user') {
+    return {
+      text: 'Google sign-in closed before finishing. If Google shows a permission screen, scroll down (↓) and tap Continue.',
+      openChrome: isStandalonePwaMode()
+    };
+  }
+  return {
+    text: err?.message || 'Google Sign-In did not finish. Try opening Momi directly in Chrome.',
+    openChrome: isStandalonePwaMode()
+  };
+}
+
+const persistenceReady = setPersistence(auth, browserLocalPersistence).catch(() => undefined);
+
+(async () => {
+  await persistenceReady;
   try {
+    const redirectResult = await getRedirectResult(auth);
+    if (redirectResult?.user) {
+      sessionStorage.removeItem('momi_redirect_pending');
+      return;
+    }
+    if (sessionStorage.getItem('momi_redirect_pending') === '1' && !auth.currentUser) {
+      sessionStorage.removeItem('momi_redirect_pending');
+      showAuthError(
+        'Your browser blocked cross-site sign-in return inside the app window. Tap to finish sign-in in Chrome:',
+        { includeOpenInChrome: true }
+      );
+    }
+  } catch (err) {
+    sessionStorage.removeItem('momi_redirect_pending');
+    const info = formatGoogleAuthError(err);
+    showAuthError(info.text, { includeOpenInChrome: info.openChrome });
+  }
+})();
+
+googleSignInBtn.addEventListener('click', async () => {
+  if (signInPending) return;
+  authErrorBox.classList.add('hidden');
+  setSignInBusy(true);
+  await persistenceReady;
+  try {
+    if (isStandalonePwaMode()) {
+      sessionStorage.setItem('momi_redirect_pending', '1');
+      await signInWithRedirect(auth, googleProvider);
+      return;
+    }
     await signInWithPopup(auth, googleProvider);
+    setSignInBusy(false);
   } catch (err) {
     if (err?.code === 'auth/popup-blocked' || err?.code === 'auth/cancelled-popup-request') {
-      await signInWithRedirect(auth, googleProvider);
-    } else {
-      if (err?.code === 'auth/unauthorized-domain') {
-        const host = window.location.hostname || 'this domain';
-        authErrorBox.textContent = `Domain "${host}" is not yet authorized. Open Firebase Console -> Authentication -> Settings -> Authorized domains (project gen-lang-client-0132255277) and add "${host}".`;
-      } else {
-        authErrorBox.textContent = err?.message || 'Google Sign-In failed. Check Authorized Domains in Firebase Auth.';
+      try {
+        sessionStorage.setItem('momi_redirect_pending', '1');
+        await signInWithRedirect(auth, googleProvider);
+        return;
+      } catch (redirErr) {
+        sessionStorage.removeItem('momi_redirect_pending');
+        const info = formatGoogleAuthError(redirErr);
+        showAuthError(info.text, { includeOpenInChrome: info.openChrome });
       }
-      authErrorBox.classList.remove('hidden');
+    } else {
+      const info = formatGoogleAuthError(err);
+      showAuthError(info.text, { includeOpenInChrome: info.openChrome });
     }
+    setSignInBusy(false);
   }
 });
 

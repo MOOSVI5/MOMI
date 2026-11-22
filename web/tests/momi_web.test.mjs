@@ -164,6 +164,8 @@ test('starter showcase personas and Firestore Web sync resilience are configured
   assert.ok(appJs.includes('removeAllShowcaseContent'));
   assert.ok(appJs.includes('publishShowcaseBurst'));
   assert.ok(appJs.includes('syncMonetagWebIntegration'));
+  assert.ok(appJs.includes('getRedirectResult'));
+  assert.ok(appJs.includes('browserLocalPersistence'));
 
   const swJs = fs.readFileSync(path.join(REPO_ROOT, 'web', 'sw.js'), 'utf8');
   assert.ok(swJs.includes('momi-web-v3'));
