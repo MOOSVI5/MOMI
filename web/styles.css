@@ -1219,3 +1219,120 @@ body[data-theme="light"] .auth-error {
     color: var(--primary);
   }
 }
+
+/* Boosted / Recommended Badges & Monetizer Partner Cards */
+.boost-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  background: rgba(245, 158, 11, 0.16);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.boost-pill.recommended {
+  background: rgba(224, 82, 121, 0.16);
+  color: #fb7185;
+  border-color: rgba(224, 82, 121, 0.4);
+}
+
+body[data-theme="light"] .boost-pill {
+  color: #b45309;
+}
+
+body[data-theme="light"] .boost-pill.recommended {
+  color: #be123c;
+}
+
+.partner-sponsor-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.partner-sponsor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sponsored-tag {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.consent-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+}
+
+.owner-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.creator-grant-row {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 14px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+}
+
+.arcade-partner-card {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.14), rgba(224, 82, 121, 0.12));
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.arcade-partner-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 13px;
+  background: var(--gradient);
+  display: grid;
+  place-items: center;
+  font-size: 1.35rem;
+  flex-shrink: 0;
+}
+
+.arcade-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.18);
+  color: var(--primary);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+}
+

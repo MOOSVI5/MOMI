@@ -17,15 +17,34 @@ import {
   FIRESTORE_DATABASE_ID,
   formatCount,
   initialsForUsername,
+  normalizeMonetagDirectUrl,
   normalizeUsername,
   parseDeepLinkFromLocation,
+  POST_BOOST_OPTIONS,
   PRESET_IMAGE_OPTIONS,
   renderRichCaptionHtml,
+  resolveGamezopUrl,
   resolveImageSrc,
+  sanitizeGamezopPublisherId,
+  sanitizeMonetagZoneId,
   SHOWCASE_COMMENTS,
   SHOWCASE_PERSONAS,
-  WEB_APP_URL
+  sortFeedWithBoostPriority,
+  tierForTotalPurchased,
+  verificationTierForPerks,
+  WEB_APP_URL,
+  WEB_PERK_CATALOG,
+  DEFAULT_MONETIZATION_CONFIG
 } from '../firebase-config.js';
+import {
+  SUPABASE_SCHEMA_TABLES,
+  buildSupabaseAuthHeaders,
+  checkSupabaseHealth,
+  isSafeSupabaseAnonKey,
+  isSupabaseClientReady,
+  mapFirestoreSnapshotToSupabaseBundle,
+  normalizeSupabaseUrl
+} from '../supabase-client.js';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
 
@@ -143,7 +162,115 @@ test('starter showcase personas and Firestore Web sync resilience are configured
   assert.ok(appJs.includes('handleSyncError'));
   assert.ok(appJs.includes('removeAllShowcaseContent'));
   assert.ok(appJs.includes('publishShowcaseBurst'));
+  assert.ok(appJs.includes('syncMonetagWebIntegration'));
 
   const swJs = fs.readFileSync(path.join(REPO_ROOT, 'web', 'sw.js'), 'utf8');
   assert.ok(swJs.includes('momi-web-v3'));
+});
+
+test('monetization config defaults, URL sanitization, boost sorting, and web perks align with Firestore rules', () => {
+  assert.equal(DEFAULT_MONETIZATION_CONFIG.admobEnabled, true);
+  assert.equal(DEFAULT_MONETIZATION_CONFIG.monetagEnabled, true);
+  assert.equal(normalizeMonetagDirectUrl('  https://otieu.com/4/9001234 '), 'https://otieu.com/4/9001234');
+  assert.equal(normalizeMonetagDirectUrl('http://insecure.example.com'), '');
+  assert.equal(normalizeMonetagDirectUrl('javascript:alert(1)'), '');
+  assert.equal(sanitizeMonetagZoneId(' 9012345;alert(1) '), '9012345alert1');
+
+  const sorted = sortFeedWithBoostPriority([
+    { id: 'showcase_1', isBoosted: true, boostTier: 'OWNER_RECOMMENDED' },
+    { id: 'post_1', isBoosted: false },
+    { id: 'post_2', isBoosted: true, boostTier: 'SPOTLIGHT' },
+    { id: 'post_3', isBoosted: true, boostTier: 'SUPER_BOOST' },
+    { id: 'post_4', isBoosted: true, boostTier: 'OWNER_RECOMMENDED', recommendedLabel: 'Recommended by Momi' }
+  ]);
+  assert.deepEqual(sorted.map((p) => p.id), ['post_4', 'post_3', 'post_2', 'showcase_1', 'post_1']);
+
+  assert.deepEqual(POST_BOOST_OPTIONS.map((o) => o.creditsCost), [100, 250]);
+  assert.deepEqual(WEB_PERK_CATALOG.map((p) => p.cost), [100, 250, 500, 1000]);
+  assert.equal(tierForTotalPurchased(0, ['VIP_PATRON_PASS']), 'VIP');
+  assert.equal(verificationTierForPerks('NONE', ['PRIORITY_VERIFICATION']), 'PENDING_PERK');
+
+  assert.equal(DEFAULT_MONETIZATION_CONFIG.gamezopEnabled, false);
+  assert.equal(resolveGamezopUrl(DEFAULT_MONETIZATION_CONFIG), '');
+  assert.equal(sanitizeGamezopPublisherId(' 9012;drop '), '9012drop');
+  assert.equal(
+    resolveGamezopUrl({ gamezopEnabled: true, gamezopPublisherId: '9012' }),
+    'https://www.gamezop.com/?id=9012'
+  );
+  assert.equal(
+    resolveGamezopUrl({ gamezopEnabled: true, gamezopPublisherId: '9012', gamezopPortalUrl: 'https://4829.play.gamezop.com' }),
+    'https://4829.play.gamezop.com'
+  );
+  assert.equal(
+    resolveGamezopUrl({ gamezopEnabled: true, gamezopPublisherId: '9012', gamezopPortalUrl: 'http://insecure.gamezop.com' }),
+    'https://www.gamezop.com/?id=9012'
+  );
+});
+
+test('Supabase migration schema SQL, URL safety, and Firestore bundle mapping match 1:1', () => {
+  const schemaPath = path.join(REPO_ROOT, 'supabase', 'schema.sql');
+  assert.ok(fs.existsSync(schemaPath), 'Missing supabase/schema.sql');
+  const schemaSql = fs.readFileSync(schemaPath, 'utf8');
+  for (const tbl of SUPABASE_SCHEMA_TABLES) {
+    assert.ok(schemaSql.includes(`public.${tbl}`), `Missing table public.${tbl} in supabase/schema.sql`);
+  }
+
+  assert.equal(normalizeSupabaseUrl(' https://DEMO.supabase.co/ '), 'https://demo.supabase.co');
+  assert.equal(normalizeSupabaseUrl('http://demo.supabase.co'), '');
+  assert.equal(normalizeSupabaseUrl('https://localhost:54321'), '');
+  assert.equal(isSafeSupabaseAnonKey('sb_secret_not_allowed'), false);
+  assert.equal(isSafeSupabaseAnonKey('sb_publishable_ok_123456'), true);
+  assert.equal(isSupabaseClientReady({ url: 'https://demo.supabase.co', anonKey: 'sb_publishable_ok_123456' }), true);
+
+  const bundle = mapFirestoreSnapshotToSupabaseBundle({
+    profile: { userId: 'u1', username: 'ali', displayName: 'Ali', partnerConsent: true },
+    creators: [],
+    posts: [
+      { id: 'p1', userId: 'u1', authorUsername: 'ali', authorDisplayName: 'Ali', isBoosted: true, boostTier: 'OWNER_RECOMMENDED' },
+      { id: 'showcase_1', userId: 'u1', authorUsername: 'elena', authorDisplayName: 'Elena' }
+    ],
+    stories: [{ id: 's1', userId: 'u1', username: 'ali', caption: 'Hi' }],
+    monetizationConfig: { ...DEFAULT_MONETIZATION_CONFIG, gamezopEnabled: true, gamezopPublisherId: '9012' },
+    wallet: { userId: 'u1', balance: 250, accountTier: 'CREATOR_PRO', unlockedPerks: ['CREATOR_BOOST'] }
+  });
+
+  assert.equal(bundle.schemaVersion, 'momi_supabase_v1');
+  assert.equal(bundle.tables.profiles.length, 1);
+  assert.equal(bundle.tables.posts.length, 1);
+  assert.equal(bundle.tables.posts[0].boost_tier, 'OWNER_RECOMMENDED');
+  assert.equal(bundle.tables.app_config[0].gamezop_publisher_id, '9012');
+  assert.equal(bundle.tables.wallets[0].balance, 250);
+});
+
+test('Supabase web auth headers omit Authorization Bearer for sb_publishable_ keys unless user JWT exists', async () => {
+  const pubHeaders = buildSupabaseAuthHeaders('sb_publishable_LbrQBb_example_123456');
+  assert.equal(pubHeaders.apikey, 'sb_publishable_LbrQBb_example_123456');
+  assert.equal('Authorization' in pubHeaders, false);
+
+  const pubUserHeaders = buildSupabaseAuthHeaders(
+    'sb_publishable_LbrQBb_example_123456',
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.user_payload.sig'
+  );
+  assert.equal(
+    pubUserHeaders.Authorization,
+    'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.user_payload.sig'
+  );
+
+  const legacyHeaders = buildSupabaseAuthHeaders('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.anon_payload.sig');
+  assert.equal(
+    legacyHeaders.Authorization,
+    'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.anon_payload.sig'
+  );
+
+  let seenHeaders = null;
+  const health = await checkSupabaseHealth(
+    { url: 'https://qotuvugkapaspowhbsbf.supabase.co', anonKey: 'sb_publishable_LbrQBb_example_123456' },
+    async (_url, init) => {
+      seenHeaders = init.headers;
+      return { ok: true, status: 200 };
+    }
+  );
+  assert.equal(health.connected, true);
+  assert.equal(seenHeaders.apikey, 'sb_publishable_LbrQBb_example_123456');
+  assert.equal('Authorization' in seenHeaders, false);
 });

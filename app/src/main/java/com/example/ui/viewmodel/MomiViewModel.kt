@@ -35,6 +35,8 @@ import com.example.data.model.sortFeedWithBoostPriority
 import com.example.data.repository.MarketplaceRepository
 import com.example.data.repository.MomiFirestoreRepository
 import com.example.data.repository.WalletRepository
+import com.example.data.supabase.MomiSupabaseClient
+import com.example.data.supabase.MomiSupabaseSchema
 import com.example.ui.components.AiAssistantTurn
 import com.example.ui.components.AiAssistantUiState
 import com.example.ui.theme.AppColorScheme
@@ -150,6 +152,23 @@ class MomiViewModel(
 
     private val _isProcessingWalletAction = MutableStateFlow(false)
     val isProcessingWalletAction: StateFlow<Boolean> = _isProcessingWalletAction.asStateFlow()
+
+    private val supabaseClient = MomiSupabaseClient()
+
+    private val _supabaseStatus = MutableStateFlow<String?>(
+        if (supabaseClient.isConfigured()) {
+            "Supabase secrets detected — tap Test Connection after running supabase/schema.sql."
+        } else {
+            "Waiting for SUPABASE_URL & SUPABASE_ANON_KEY in AI Studio Secrets. Firebase stays active."
+        }
+    )
+    val supabaseStatus: StateFlow<String?> = _supabaseStatus.asStateFlow()
+
+    private val _isSupabaseBusy = MutableStateFlow(false)
+    val isSupabaseBusy: StateFlow<Boolean> = _isSupabaseBusy.asStateFlow()
+
+    val isSupabaseConfigured: Boolean
+        get() = supabaseClient.isConfigured()
 
     @Volatile private var hasNotifiedQuotaError = false
     @Volatile private var quotaCooldownUntilMs = 0L
@@ -2073,6 +2092,65 @@ class MomiViewModel(
                     _errorMessage.value = unwrapErrorMessage(error, "Could not remove starter showcase accounts")
                 }
             _isShowcaseActionBusy.value = false
+        }
+    }
+
+    fun testSupabaseConnection() {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to run Supabase diagnostics."
+            return
+        }
+        if (_isSupabaseBusy.value) return
+        viewModelScope.launch {
+            _isSupabaseBusy.value = true
+            val result = supabaseClient.checkConnection()
+            _supabaseStatus.value = result.message
+            if (result.connected) {
+                _statusNotice.value = result.message
+            } else if (result.configured) {
+                _errorMessage.value = result.message
+            } else {
+                _statusNotice.value = result.message
+            }
+            _isSupabaseBusy.value = false
+        }
+    }
+
+    fun buildSupabaseMigrationSnapshotJson(): String =
+        MomiSupabaseSchema.buildMigrationBundleJson(
+            profiles = cachedProfiles.value,
+            posts = cachedRawPosts.value,
+            stories = cachedStories.value,
+            merchants = cachedMerchants.value,
+            products = cachedProducts.value,
+            wallet = cachedWallet.value,
+            monetizationConfig = cachedMonetizationConfig.value
+        )
+
+    fun syncLiveSnapshotToSupabase() {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to manage Supabase migration."
+            return
+        }
+        if (_isSupabaseBusy.value) return
+        viewModelScope.launch {
+            _isSupabaseBusy.value = true
+            supabaseClient.syncLiveSnapshot(
+                profiles = cachedProfiles.value,
+                posts = cachedRawPosts.value,
+                stories = cachedStories.value,
+                merchants = cachedMerchants.value,
+                products = cachedProducts.value,
+                monetizationConfig = cachedMonetizationConfig.value
+            ).onSuccess { msg ->
+                _supabaseStatus.value = msg
+                _statusNotice.value = msg
+            }.onFailure { err ->
+                val msg = unwrapErrorMessage(err, "Supabase sync check failed")
+                _supabaseStatus.value = msg
+                _errorMessage.value = msg
+            }
+            _isSupabaseBusy.value = false
         }
     }
 

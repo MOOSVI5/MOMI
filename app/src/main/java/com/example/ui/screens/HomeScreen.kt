@@ -65,6 +65,7 @@ import com.example.data.model.Story
 import com.example.data.model.UserProfile
 import kotlinx.coroutines.delay
 import com.example.ui.components.LumaAvatar
+import com.example.ui.components.MomiGamezopArcadeCard
 import com.example.ui.components.MomiInlineFeedAdCard
 import com.example.ui.components.PostCard
 import com.example.ui.components.rememberStartIoNativeAds
@@ -497,6 +498,10 @@ fun HomeScreen(
                     thickness = 0.5.dp,
                     color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
                 )
+            }
+
+            item(key = "gamezop_home_arcade") {
+                MomiGamezopArcadeCard(monetizationConfig = monetizationConfig)
             }
 
             if (displayedPosts.isEmpty()) {

@@ -1679,5 +1679,58 @@ test("AppConfig, Partner Consent, Post Boosts & Owner Grants: zero-trust enforce
   );
 });
 
+// --- 13. Live App Monetization Config (AdMob, Start.io, Monetag, Gamezop) ---
+
+test("AppConfig: admin writes valid Monetag + Gamezop config, rejects insecure URLs, and denies non-admin writes", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID, { email: "alice@example.com", email_verified: true }).firestore();
+  const adminDb = testEnv.authenticatedContext("admin_momi", {
+    email: "syali6511@gmail.com",
+    email_verified: true,
+  }).firestore();
+
+  const validConfig = {
+    admobEnabled: true,
+    admobBannerUnitId: "",
+    admobMrecUnitId: "",
+    admobInterstitialUnitId: "",
+    startIoEnabled: true,
+    monetagEnabled: true,
+    monetagDirectLinkUrl: "https://otieu.com/4/9001234",
+    monetagWebZoneId: "9001234",
+    monetagWebMetaTag: "monetag-meta-token",
+    partnerPromoTitle: "Featured Creator Deals",
+    partnerPromoSubtitle: "Explore verified creator collections & partner perks.",
+    partnerPromoCta: "Explore Partner",
+    gamezopEnabled: true,
+    gamezopPortalUrl: "https://www.gamezop.com/?id=9012",
+    gamezopPublisherId: "9012",
+    gamezopBannerTitle: "Momi Arcade · Play Instant Games",
+    updatedByEmail: "syali6511@gmail.com",
+    updatedAt: serverTimestamp(),
+  };
+
+  // Non-admin Alice cannot write appConfig
+  await assertFails(aliceDb.collection("appConfig").doc("monetization").set(validConfig));
+
+  // Admin cannot save insecure http:// URL for Monetag or Gamezop
+  await assertFails(
+    adminDb.collection("appConfig").doc("monetization").set({
+      ...validConfig,
+      gamezopPortalUrl: "http://insecure.gamezop.com",
+    })
+  );
+  await assertFails(
+    adminDb.collection("appConfig").doc("monetization").set({
+      ...validConfig,
+      monetagDirectLinkUrl: "http://insecure.monetag.com",
+    })
+  );
+
+  // Admin writes valid Monetag + Gamezop config and signed-in users can read it
+  await assertSucceeds(adminDb.collection("appConfig").doc("monetization").set(validConfig));
+  await assertSucceeds(aliceDb.collection("appConfig").doc("monetization").get());
+});
+
+
 
 

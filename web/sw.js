@@ -5,6 +5,7 @@ const SHELL_ASSETS = [
   './styles.css',
   './app.js',
   './firebase-config.js',
+  './supabase-client.js',
   './manifest.webmanifest',
   './assets/momi-icon.jpg',
   './assets/img_post_coastal.jpg',

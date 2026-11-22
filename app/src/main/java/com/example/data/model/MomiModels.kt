@@ -434,6 +434,10 @@ data class AdMonetizationConfig(
     val partnerPromoTitle: String = "Featured Creator Deals & Partner Showcase",
     val partnerPromoSubtitle: String = "Explore verified creator collections, partner offers & exclusive community perks.",
     val partnerPromoCta: String = "Explore Partner",
+    val gamezopEnabled: Boolean = false,
+    val gamezopPortalUrl: String = "",
+    val gamezopPublisherId: String = "",
+    val gamezopBannerTitle: String = "Momi Arcade · Play Instant Games",
     val updatedByEmail: String = "",
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -741,5 +745,16 @@ fun normalizeMonetagDirectUrl(raw: String?): String {
     val trimmed = raw?.trim().orEmpty()
     if (!trimmed.startsWith("https://", ignoreCase = false)) return ""
     return trimmed.take(300)
+}
+
+fun sanitizeGamezopPublisherId(raw: String?): String =
+    raw?.trim()?.replace(Regex("[^a-zA-Z0-9_-]"), "")?.take(40).orEmpty()
+
+fun resolveGamezopLaunchUrl(config: AdMonetizationConfig): String {
+    if (!config.gamezopEnabled) return ""
+    val portalUrl = normalizeMonetagDirectUrl(config.gamezopPortalUrl)
+    if (portalUrl.isNotEmpty()) return portalUrl
+    val pubId = sanitizeGamezopPublisherId(config.gamezopPublisherId)
+    return if (pubId.isNotEmpty()) "https://www.gamezop.com/?id=$pubId" else ""
 }
 

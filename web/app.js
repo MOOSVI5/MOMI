@@ -31,6 +31,7 @@ import {
   ANDROID_RELEASES_URL,
   ASPECT_RATIOS,
   COLOR_SCHEMES,
+  DEFAULT_MONETIZATION_CONFIG,
   escapeHtml,
   EXPLORE_CATEGORIES,
   extractHashtags,
@@ -42,11 +43,21 @@ import {
   formatCount,
   initialsForUsername,
   MAX_IMAGE_BASE64_CHARS,
+  normalizeMonetagDirectUrl,
   normalizeUsername,
+  POST_BOOST_OPTIONS,
   PRESET_IMAGE_OPTIONS,
+  resolveGamezopUrl,
+  sanitizeGamezopPublisherId,
+  sanitizeMonetagZoneId,
   SHOWCASE_COMMENTS,
   SHOWCASE_PERSONAS,
+  sortFeedWithBoostPriority,
+  SUPABASE_WEB_CONFIG,
+  tierForTotalPurchased,
+  verificationTierForPerks,
   WEB_APP_URL,
+  WEB_PERK_CATALOG,
   buildPostShareUrl,
   buildProfileShareUrl,
   parseDeepLinkFromLocation,
@@ -55,6 +66,12 @@ import {
   TRENDING_HASHTAGS,
   aspectRatioCss
 } from './firebase-config.js';
+import {
+  SUPABASE_SCHEMA_TABLES,
+  checkSupabaseHealth,
+  isSupabaseClientReady,
+  mapFirestoreSnapshotToSupabaseBundle
+} from './supabase-client.js';
 import {
   assembleVideoChunksToObjectUrl,
   compressFileToBase64,
@@ -80,16 +97,11 @@ const GIFT_CATALOG = [
   { key: 'crown', name: 'Studio Crown', credits: 200 }
 ];
 
-const PERK_CATALOG = [
-  { key: 'PRIORITY_VERIFICATION', name: 'Creator Pro Review', cost: 250, desc: 'Fast-track creator verification review & profile badge.' },
-  { key: 'CUSTOM_THEMES', name: 'VIP Studio Flair', cost: 100, desc: 'Unlock VIP supporter flair in live chat & comments.' },
-  { key: 'CREATOR_ANALYTICS', name: 'Audience Insights', cost: 500, desc: 'Unlock extended creator reach & view counters.' }
-];
-
 const state = {
   user: null,
   profile: null,
   wallet: null,
+  monetizationConfig: { ...DEFAULT_MONETIZATION_CONFIG },
   creators: [],
   posts: [],
   stories: [],
@@ -111,6 +123,7 @@ const state = {
   exploreCategory: 'For You',
   exploreLayout: 'rednote',
   profileTab: 'posts',
+  ownerConsoleTab: 'monetizers',
   viewedProfileUid: null,
   carouselIndex: {},
   videoCache: {},
@@ -128,6 +141,11 @@ const state = {
   syncError: null,
   isLoadingFeed: true,
   showcaseBusy: false,
+  adminBusy: false,
+  supabaseBusy: false,
+  supabaseStatus: isSupabaseClientReady(SUPABASE_WEB_CONFIG)
+    ? 'Supabase web config ready — test connection after running supabase/schema.sql.'
+    : 'Waiting for SUPABASE_WEB_CONFIG (url + anonKey). Firebase stays live.',
   pendingDeepLink: parseDeepLinkFromLocation(window.location.search, window.location.hash),
   studio: {
     imageKey: 'img_post_coastal',
@@ -415,8 +433,19 @@ function startRealtimeSync(uid) {
     if (state.nav === 'explore' || state.nav === 'create') renderMainStage();
   }, (err) => handleSyncError(err, 'Creators sync')));
 
+  pushUnsub(onSnapshot(doc(db, 'appConfig', 'monetization'), (snap) => {
+    state.monetizationConfig = snap.exists()
+      ? { ...DEFAULT_MONETIZATION_CONFIG, ...snap.data() }
+      : { ...DEFAULT_MONETIZATION_CONFIG };
+    syncMonetagWebIntegration(state.monetizationConfig);
+    if (state.nav === 'home' || state.nav === 'explore' || state.nav === 'marketplace' || state.nav === 'profile') {
+      renderMainStage();
+    }
+  }, () => undefined));
+
   pushUnsub(onSnapshot(query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(40)), (snap) => {
-    state.posts = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+    const raw = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
+    state.posts = sortFeedWithBoostPriority(raw);
     state.isLoadingFeed = false;
     state.syncError = null;
     renderMainStage();
@@ -735,6 +764,99 @@ function getFilteredHomePosts() {
   return state.posts;
 }
 
+function isOwnerAdmin() {
+  return state.user?.email === ADMIN_OWNER_EMAIL && Boolean(state.user?.emailVerified);
+}
+
+function syncMonetagWebIntegration(cfg) {
+  const existingMeta = document.querySelector('meta[name="monetag"]');
+  const metaToken = cfg?.monetagEnabled ? String(cfg.monetagWebMetaTag || '').trim() : '';
+  if (metaToken) {
+    const meta = existingMeta || document.createElement('meta');
+    meta.name = 'monetag';
+    meta.content = metaToken.slice(0, 120);
+    if (!existingMeta) document.head.appendChild(meta);
+  } else if (existingMeta) {
+    existingMeta.remove();
+  }
+
+  const zoneId = cfg?.monetagEnabled ? sanitizeMonetagZoneId(cfg.monetagWebZoneId) : '';
+  const activeScript = document.querySelector('script[data-momi-monetag-zone]');
+  if (zoneId) {
+    if (!activeScript || activeScript.dataset.momiMonetagZone !== zoneId) {
+      if (activeScript) activeScript.remove();
+      const script = document.createElement('script');
+      script.async = true;
+      script.dataset.cfasync = 'false';
+      script.dataset.momiMonetagZone = zoneId;
+      script.dataset.zone = zoneId;
+      script.src = 'https://fpyf8.com/88/tag.min.js';
+      document.head.appendChild(script);
+    }
+  } else if (activeScript) {
+    activeScript.remove();
+  }
+}
+
+function renderSponsoredPartnerBannerHtml(placement = 'feed') {
+  const cfg = state.monetizationConfig || DEFAULT_MONETIZATION_CONFIG;
+  const directUrl = cfg.monetagEnabled ? normalizeMonetagDirectUrl(cfg.monetagDirectLinkUrl) : '';
+  if (!directUrl) return '';
+  const title = cfg.partnerPromoTitle || DEFAULT_MONETIZATION_CONFIG.partnerPromoTitle;
+  const subtitle = cfg.partnerPromoSubtitle || DEFAULT_MONETIZATION_CONFIG.partnerPromoSubtitle;
+  const cta = cfg.partnerPromoCta || DEFAULT_MONETIZATION_CONFIG.partnerPromoCta;
+  return `
+    <aside class="partner-sponsor-card" data-partner-placement="${escapeHtml(placement)}">
+      <div class="partner-sponsor-head">
+        <span class="sponsored-tag">Sponsored</span>
+        <span class="muted small">Monetag Partner Showcase</span>
+      </div>
+      <div>
+        <div style="font-weight:700;font-size:0.98rem;">${escapeHtml(title)}</div>
+        <div class="muted small" style="margin-top:4px;line-height:1.45;">${escapeHtml(subtitle)}</div>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <span class="muted small">Verified https:// partner destination</span>
+        <a class="btn-primary btn-sm" href="${escapeHtml(directUrl)}" target="_blank" rel="noopener noreferrer sponsored" style="text-decoration:none;">
+          ${escapeHtml(cta)} &#8599;
+        </a>
+      </div>
+    </aside>
+  `;
+}
+
+function renderGamezopArcadeBannerHtml(placement = 'feed') {
+  const cfg = state.monetizationConfig || DEFAULT_MONETIZATION_CONFIG;
+  const gamezopUrl = resolveGamezopUrl(cfg);
+  if (!gamezopUrl) return '';
+  const title = cfg.gamezopBannerTitle || DEFAULT_MONETIZATION_CONFIG.gamezopBannerTitle;
+  return `
+    <aside class="arcade-partner-card" data-arcade-placement="${escapeHtml(placement)}">
+      <div class="arcade-partner-icon" aria-hidden="true">&#127918;</div>
+      <div style="flex:1;min-width:180px;">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <span class="arcade-badge">Partner Games</span>
+          <span class="muted small">Gamezop Arcade</span>
+        </div>
+        <div style="font-weight:700;font-size:0.96rem;margin-top:4px;">${escapeHtml(title)}</div>
+        <div class="muted small" style="margin-top:2px;">Instant HTML5 mini-games · Play right in your browser</div>
+      </div>
+      <a class="btn-primary btn-sm" href="${escapeHtml(gamezopUrl)}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;white-space:nowrap;">
+        Play Games &#8599;
+      </a>
+    </aside>
+  `;
+}
+
+function boostBadgeLabelForPost(post) {
+  if (!post) return '';
+  if (post.recommendedLabel) return post.recommendedLabel;
+  if (post.boostTier === 'OWNER_RECOMMENDED') return 'Recommended by Momi';
+  if (post.boostTier === 'SUPER_BOOST') return 'Super Boosted';
+  if (post.boostTier === 'SPOTLIGHT' || post.isBoosted) return 'Boosted Spotlight';
+  return '';
+}
+
 function renderPostCardHtml(post) {
   const frames = [
     ...(post.imageData || post.imageKey ? [{ imageData: post.imageData, imageKey: post.imageKey }] : []),
@@ -750,6 +872,8 @@ function renderPostCardHtml(post) {
   const cachedVideoUrl = state.videoCache[post.id];
   const ratio = aspectRatioCss(post.aspectRatio);
   const filterCss = filterCssForTag(post.filterTag);
+  const boostBadge = boostBadgeLabelForPost(post);
+  const isRecommended = post.boostTier === 'OWNER_RECOMMENDED' || Boolean(post.recommendedLabel);
 
   const tags = Array.isArray(post.hashtags) ? post.hashtags : [];
   const tagged = Array.isArray(post.taggedUsernames) ? post.taggedUsernames : [];
@@ -767,7 +891,10 @@ function renderPostCardHtml(post) {
             <span class="muted small">${escapeHtml(post.location || post.category || 'Momi Feed')}</span>
           </div>
         </button>
-        <div style="display:flex;align-items:center;gap:8px;">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
+          ${boostBadge ? `<span class="boost-pill ${isRecommended ? 'recommended' : ''}">&#9733; ${escapeHtml(boostBadge)}</span>` : ''}
+          ${isOwnerAdmin() && !post.id.startsWith('showcase_') ? `<button type="button" class="btn-outline btn-sm" data-admin-recommend="${escapeHtml(post.id)}">${isRecommended ? 'Unfeature' : 'Recommend'}</button>` : ''}
+          ${isMine && !post.id.startsWith('showcase_') ? `<button type="button" class="btn-outline btn-sm" data-boost-post="${escapeHtml(post.id)}">Boost</button>` : ''}
           ${!isMine ? `<button type="button" class="btn-sm ${isFollowing ? 'btn-outline' : 'btn-primary'}" data-follow-uid="${escapeHtml(post.userId)}" data-follow-name="${escapeHtml(post.authorUsername)}">${isFollowing ? 'Following' : 'Follow'}</button>` : ''}
           ${isMine ? `<button type="button" class="btn-ghost btn-sm" data-delete-post="${escapeHtml(post.id)}" title="Delete post">Delete</button>` : ''}
         </div>
@@ -862,6 +989,9 @@ function renderHome() {
         `).join('')}
       </section>
 
+      ${renderGamezopArcadeBannerHtml('home')}
+      ${renderSponsoredPartnerBannerHtml('home')}
+
       ${
         posts.length === 0
           ? `<div class="card-panel" style="text-align:center;padding:36px;">
@@ -944,21 +1074,28 @@ function renderExplore() {
         `).join('')}
       </div>
 
+      ${renderGamezopArcadeBannerHtml('explore')}
+      ${renderSponsoredPartnerBannerHtml('explore')}
+
       ${
         state.exploreLayout === 'rednote'
           ? `<div class="rednote-grid">
-              ${filteredPosts.map((p) => `
-                <article class="rednote-card" data-open-post="${escapeHtml(p.id)}">
-                  <img class="rednote-thumb" src="${resolveImageSrc(p)}" alt="${escapeHtml(p.caption || '')}" style="filter:${filterCssForTag(p.filterTag)};" loading="lazy" />
-                  <div class="rednote-meta">
-                    <div class="rednote-title">${escapeHtml(p.caption || 'Visual Note')}</div>
-                    <div class="rednote-footer">
-                      <span>@${escapeHtml(p.authorUsername)}</span>
-                      <span>&#9829; ${formatCount(p.likesCount)}</span>
+              ${filteredPosts.map((p) => {
+                const badge = boostBadgeLabelForPost(p);
+                return `
+                  <article class="rednote-card" data-open-post="${escapeHtml(p.id)}">
+                    <img class="rednote-thumb" src="${resolveImageSrc(p)}" alt="${escapeHtml(p.caption || '')}" style="filter:${filterCssForTag(p.filterTag)};" loading="lazy" />
+                    <div class="rednote-meta">
+                      ${badge ? `<span class="boost-pill ${p.boostTier === 'OWNER_RECOMMENDED' ? 'recommended' : ''}">${escapeHtml(badge)}</span>` : ''}
+                      <div class="rednote-title">${escapeHtml(p.caption || 'Visual Note')}</div>
+                      <div class="rednote-footer">
+                        <span>@${escapeHtml(p.authorUsername)}</span>
+                        <span>&#9829; ${formatCount(p.likesCount)}</span>
+                      </div>
                     </div>
-                  </div>
-                </article>
-              `).join('')}
+                  </article>
+                `;
+              }).join('')}
             </div>`
           : `<div class="ig-grid-3">
               ${filteredPosts.map((p) => `
@@ -1299,6 +1436,7 @@ function renderMarketplace() {
         <h2>Momi Marketplace</h2>
         <span class="muted small">${state.products.length} listings &middot; ${state.orders.length} your orders</span>
       </div>
+      ${renderSponsoredPartnerBannerHtml('marketplace')}
       <div class="rednote-grid">
         ${
           state.products.length === 0
@@ -1541,10 +1679,13 @@ function renderNotifications() {
 
 function renderWallet() {
   const w = state.wallet || { balance: 0, totalEarned: 0, totalSpent: 0, totalPurchased: 0, accountTier: 'STANDARD', verificationTier: 'NONE', unlockedPerks: [] };
+  const consentOn = Boolean(state.profile?.partnerConsent);
+  const myPosts = state.posts.filter((p) => p.userId === state.user?.uid && !p.id.startsWith('showcase_')).slice(0, 6);
+
   mainStage.innerHTML = `
     <div class="stage-column">
       <div class="section-header">
-        <h2>Wallet, Gifts &amp; Account Perks</h2>
+        <h2>Wallet, Boosts &amp; Account Perks</h2>
       </div>
       <div class="card-panel" style="background:var(--gradient);color:#fff;border:none;">
         <div class="small" style="opacity:0.9;">Available Balance</div>
@@ -1559,8 +1700,44 @@ function renderWallet() {
       </div>
 
       <div class="card-panel">
+        <div class="consent-row">
+          <div>
+            <strong>Creator Growth &amp; Owner Perks Consent</strong>
+            <div class="muted small">Opt in to allow Momi's owner to grant bonus credits, recommended post spotlights, and exclusive perks to your account.</div>
+          </div>
+          <label style="display:flex;align-items:center;gap:8px;font-weight:700;cursor:pointer;">
+            <input id="walletConsentToggle" type="checkbox" ${consentOn ? 'checked' : ''} />
+            <span>${consentOn ? 'Opted In' : 'Off'}</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="card-panel">
+        <h3 style="margin:0;">Boost Your Posts with Credits</h3>
+        <div class="muted small">Elevate your photos &amp; clips higher in For You &amp; Search across Android &amp; Web.</div>
+        ${
+          myPosts.length === 0
+            ? '<p class="muted small" style="margin:0;">Publish a post first, then boost it right here or from the Home Feed.</p>'
+            : myPosts.map((p) => {
+              const badge = boostBadgeLabelForPost(p);
+              return `
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);">
+                  <div style="min-width:0;flex:1;">
+                    <div style="font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(p.caption || 'Momi Post')}</div>
+                    <div class="muted small">${badge ? escapeHtml(badge) : 'Standard Feed Placement'} &middot; ${formatCount(p.likesCount)} likes</div>
+                  </div>
+                  <button type="button" class="btn-sm btn-primary" data-boost-post="${escapeHtml(p.id)}">
+                    ${p.isBoosted ? 'Upgrade Boost' : 'Boost'}
+                  </button>
+                </div>
+              `;
+            }).join('')
+        }
+      </div>
+
+      <div class="card-panel">
         <h3 style="margin:0;">Unlock Account Perks with Credits</h3>
-        ${PERK_CATALOG.map((perk) => {
+        ${WEB_PERK_CATALOG.map((perk) => {
           const unlocked = (w.unlockedPerks || []).includes(perk.key);
           return `
             <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);">
@@ -1568,7 +1745,7 @@ function renderWallet() {
                 <div style="font-weight:700;">${escapeHtml(perk.name)}</div>
                 <div class="muted small">${escapeHtml(perk.desc)}</div>
               </div>
-              <button type="button" class="btn-sm ${unlocked ? 'btn-outline' : 'btn-primary'}" data-unlock-perk="${perk.key}:${perk.cost}" ${unlocked ? 'disabled' : ''}>
+              <button type="button" class="btn-sm ${unlocked ? 'btn-outline' : 'btn-primary'}" data-unlock-perk="${perk.key}" ${unlocked ? 'disabled' : ''}>
                 ${unlocked ? 'Unlocked' : `${perk.cost} Credits`}
               </button>
             </div>
@@ -1581,33 +1758,54 @@ function renderWallet() {
         ${
           state.transactions.length === 0
             ? '<p class="muted small" style="margin:0;">No credit transactions yet.</p>'
-            : state.transactions.slice(0, 12).map((tx) => `
-              <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:0.88rem;">
-                <span>${escapeHtml(tx.type)} &middot; @${escapeHtml(tx.senderUsername)} &rarr; @${escapeHtml(tx.recipientUsername)}</span>
-                <strong>${tx.creditsAmount} cr</strong>
-              </div>
-            `).join('')
+            : state.transactions.slice(0, 12).map((tx) => {
+              const isCredit = tx.type === 'TOP_UP' || tx.type === 'OWNER_GRANT' || (tx.type === 'GIFT' && tx.recipientUid === state.user?.uid);
+              const label = tx.type === 'POST_BOOST'
+                ? 'Post Boost Activated'
+                : tx.type === 'OWNER_GRANT'
+                  ? `Owner Grant${tx.perkKey ? ` (${tx.perkKey})` : ''}`
+                  : tx.type === 'PERK_UNLOCK'
+                    ? `Perk Unlocked (${tx.perkKey || 'Perk'})`
+                    : `${tx.type} &middot; @${escapeHtml(tx.senderUsername)} &rarr; @${escapeHtml(tx.recipientUsername)}`;
+              return `
+                <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:0.88rem;">
+                  <span>${label}</span>
+                  <strong>${isCredit ? '+' : '-'}${tx.creditsAmount} cr</strong>
+                </div>
+              `;
+            }).join('')
         }
       </div>
     </div>
   `;
 
+  document.getElementById('walletConsentToggle').onchange = (e) => updatePartnerConsent(e.target.checked);
+
+  mainStage.querySelectorAll('[data-boost-post]').forEach((b) => {
+    b.onclick = () => {
+      const target = state.posts.find((p) => p.id === b.dataset.boostPost);
+      if (target) openPostBoostModal(target);
+    };
+  });
+
   mainStage.querySelectorAll('[data-unlock-perk]').forEach((b) => {
     b.onclick = async () => {
-      const [perkKey, costStr] = b.dataset.unlockPerk.split(':');
-      const cost = Number(costStr);
-      if ((w.balance || 0) < cost) {
+      const perk = WEB_PERK_CATALOG.find((p) => p.key === b.dataset.unlockPerk);
+      if (!perk) return;
+      if ((w.balance || 0) < perk.cost) {
         showToast('Not enough credits yet. Top up credits in the Momi Android app.');
         return;
       }
       const txId = makeClientId('perk');
       const batch = writeBatch(db);
-      const nextPerks = [...(w.unlockedPerks || []), perkKey];
+      const nextPerks = [...new Set([...(w.unlockedPerks || []), perk.key])];
+      const nextTier = tierForTotalPurchased(w.totalPurchased || 0, nextPerks);
+      const nextVerif = verificationTierForPerks(w.verificationTier || 'NONE', nextPerks);
       batch.update(doc(db, 'wallets', state.user.uid), {
-        balance: w.balance - cost,
-        totalSpent: (w.totalSpent || 0) + cost,
-        accountTier: perkKey === 'CREATOR_ANALYTICS' ? 'CREATOR_PRO' : w.accountTier,
-        verificationTier: perkKey === 'PRIORITY_VERIFICATION' ? 'PENDING_PERK' : w.verificationTier,
+        balance: w.balance - perk.cost,
+        totalSpent: (w.totalSpent || 0) + perk.cost,
+        accountTier: nextTier,
+        verificationTier: nextVerif,
         unlockedPerks: nextPerks,
         lastTxId: txId,
         updatedAt: serverTimestamp()
@@ -1619,17 +1817,17 @@ function renderWallet() {
         senderUsername: state.profile.username,
         recipientUid: state.user.uid,
         recipientUsername: state.profile.username,
-        creditsAmount: cost,
+        creditsAmount: perk.cost,
         priceUsd: 0,
         paymentMethod: 'WALLET_CREDITS',
-        perkKey,
+        perkKey: perk.key,
         recipientClaimed: true,
         status: 'COMPLETED',
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       });
       await batch.commit();
-      showToast(`Unlocked ${perkKey}!`);
+      showToast(`Unlocked ${perk.name}!`);
     };
   });
 }
@@ -1648,9 +1846,12 @@ function renderProfile() {
   const displayed = state.profileTab === 'saved' && isOwn ? savedPosts : userPosts;
   const isFollowing = state.followingUids.has(profile.userId);
 
-  const isOwnerAdmin = state.user?.email === ADMIN_OWNER_EMAIL && Boolean(state.user?.emailVerified);
+  const ownerAdmin = isOwnerAdmin();
   const showcasePostCount = state.posts.filter((p) => p.id.startsWith('showcase_')).length;
   const showcaseStoryCount = state.stories.filter((s) => s.id.startsWith('showcase_')).length;
+  const cfg = state.monetizationConfig || DEFAULT_MONETIZATION_CONFIG;
+  const consentingCreators = state.creators.filter((c) => Boolean(c.partnerConsent));
+  const recommendCandidates = state.posts.filter((p) => !p.id.startsWith('showcase_')).slice(0, 12);
 
   mainStage.innerHTML = `
     <div class="stage-wide">
@@ -1687,7 +1888,178 @@ function renderProfile() {
         ${profile.website ? `<a href="${escapeHtml(profile.website)}" target="_blank" rel="noopener noreferrer" style="color:var(--primary);font-size:0.88rem;">${escapeHtml(profile.website)}</a>` : ''}
       </div>
 
-      ${isOwn && isOwnerAdmin ? `
+      ${isOwn ? `
+        <div class="card-panel">
+          <div class="consent-row">
+            <div>
+              <strong>Partner Boost &amp; Owner Perks Consent</strong>
+              <div class="muted small">Allow Momi's owner to award bonus credits, VIP perks, and verified status when unlocked.</div>
+            </div>
+            <label style="display:flex;align-items:center;gap:8px;font-weight:700;cursor:pointer;">
+              <input id="profileConsentToggle" type="checkbox" ${profile.partnerConsent ? 'checked' : ''} />
+              <span>${profile.partnerConsent ? 'Opted In' : 'Off'}</span>
+            </label>
+          </div>
+        </div>
+      ` : ''}
+
+      ${isOwn && ownerAdmin ? `
+        <div class="card-panel">
+          <div class="section-header">
+            <div>
+              <strong>Owner Studio Console (${escapeHtml(ADMIN_OWNER_EMAIL)})</strong>
+              <div class="muted small">Live-manage AdMob, Start.io, Monetag, Consent Grants, Post Recommendations &amp; Starter Activity.</div>
+            </div>
+            <div class="chip-row">
+              <button type="button" class="chip ${state.ownerConsoleTab === 'monetizers' ? 'active' : ''}" data-owner-tab="monetizers">Monetizers Setup</button>
+              <button type="button" class="chip ${state.ownerConsoleTab === 'grants' ? 'active' : ''}" data-owner-tab="grants">Grants (${consentingCreators.length})</button>
+              <button type="button" class="chip ${state.ownerConsoleTab === 'recommend' ? 'active' : ''}" data-owner-tab="recommend">Recommend Posts</button>
+              <button type="button" class="chip ${state.ownerConsoleTab === 'supabase' ? 'active' : ''}" data-owner-tab="supabase">Supabase Migration</button>
+            </div>
+          </div>
+
+          ${state.ownerConsoleTab === 'monetizers' ? `
+            <form id="ownerMonetizationForm" style="display:grid;gap:12px;">
+              <div class="owner-form-grid">
+                <label class="consent-row"><span>Enable AdMob (Android)</span><input id="cfgAdmobEnabled" type="checkbox" ${cfg.admobEnabled ? 'checked' : ''} /></label>
+                <label class="consent-row"><span>Enable Start.io (Android)</span><input id="cfgStartIoEnabled" type="checkbox" ${cfg.startIoEnabled ? 'checked' : ''} /></label>
+                <label class="consent-row"><span>Enable Monetag (Android + Web)</span><input id="cfgMonetagEnabled" type="checkbox" ${cfg.monetagEnabled ? 'checked' : ''} /></label>
+                <label class="consent-row"><span>Enable Gamezop Arcade (Android + Web)</span><input id="cfgGamezopEnabled" type="checkbox" ${cfg.gamezopEnabled ? 'checked' : ''} /></label>
+              </div>
+              <div class="owner-form-grid">
+                <div>
+                  <label class="small muted">AdMob Banner Unit ID</label>
+                  <input id="cfgAdmobBanner" class="input" placeholder="ca-app-pub-.../..." value="${escapeHtml(cfg.admobBannerUnitId || '')}" />
+                </div>
+                <div>
+                  <label class="small muted">AdMob MREC Unit ID</label>
+                  <input id="cfgAdmobMrec" class="input" placeholder="ca-app-pub-.../..." value="${escapeHtml(cfg.admobMrecUnitId || '')}" />
+                </div>
+                <div>
+                  <label class="small muted">AdMob Interstitial Unit ID</label>
+                  <input id="cfgAdmobInterstitial" class="input" placeholder="ca-app-pub-.../..." value="${escapeHtml(cfg.admobInterstitialUnitId || '')}" />
+                </div>
+              </div>
+              <div class="owner-form-grid">
+                <div>
+                  <label class="small muted">Monetag Direct SmartLink URL (https://)</label>
+                  <input id="cfgMonetagDirectUrl" class="input" placeholder="https://otieu.com/4/..." value="${escapeHtml(cfg.monetagDirectLinkUrl || '')}" />
+                </div>
+                <div>
+                  <label class="small muted">Monetag Web Zone ID</label>
+                  <input id="cfgMonetagZoneId" class="input" placeholder="e.g. 9012345" value="${escapeHtml(cfg.monetagWebZoneId || '')}" />
+                </div>
+                <div>
+                  <label class="small muted">Monetag Meta Verification Content</label>
+                  <input id="cfgMonetagMeta" class="input" placeholder="content value from Monetag <meta>" value="${escapeHtml(cfg.monetagWebMetaTag || '')}" />
+                </div>
+              </div>
+              <div class="owner-form-grid">
+                <div>
+                  <label class="small muted">Gamezop Publisher / Property ID</label>
+                  <input id="cfgGamezopPubId" class="input" placeholder="e.g. 9012" value="${escapeHtml(cfg.gamezopPublisherId || '')}" />
+                </div>
+                <div>
+                  <label class="small muted">Gamezop Portal URL (optional https://)</label>
+                  <input id="cfgGamezopPortalUrl" class="input" placeholder="https://www.gamezop.com/?id=..." value="${escapeHtml(cfg.gamezopPortalUrl || '')}" />
+                </div>
+                <div>
+                  <label class="small muted">Gamezop Arcade Card Title</label>
+                  <input id="cfgGamezopTitle" class="input" placeholder="Momi Arcade · Play Instant Games" value="${escapeHtml(cfg.gamezopBannerTitle || '')}" />
+                </div>
+              </div>
+              <div class="owner-form-grid">
+                <div>
+                  <label class="small muted">Sponsored Card Title</label>
+                  <input id="cfgPromoTitle" class="input" value="${escapeHtml(cfg.partnerPromoTitle || '')}" />
+                </div>
+                <div>
+                  <label class="small muted">Sponsored Card CTA</label>
+                  <input id="cfgPromoCta" class="input" value="${escapeHtml(cfg.partnerPromoCta || '')}" />
+                </div>
+              </div>
+              <div>
+                <label class="small muted">Sponsored Card Subtitle</label>
+                <input id="cfgPromoSubtitle" class="input" value="${escapeHtml(cfg.partnerPromoSubtitle || '')}" />
+              </div>
+              <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+                <button type="submit" class="btn-primary" ${state.adminBusy ? 'disabled' : ''}>Save Live Monetization Config</button>
+                <a class="btn-outline btn-sm" href="https://business.gamezop.com" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Gamezop Business Portal &#8599;</a>
+                <a class="btn-outline btn-sm" href="https://publishers.monetag.com" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Monetag Dashboard &#8599;</a>
+              </div>
+            </form>
+          ` : ''}
+
+          ${state.ownerConsoleTab === 'grants' ? `
+            <div style="display:grid;gap:10px;">
+              ${
+                consentingCreators.length === 0
+                  ? '<p class="muted small" style="margin:0;">No consenting creators opted in yet. Creators can opt in from Wallet or Profile.</p>'
+                  : consentingCreators.map((c) => `
+                    <div class="creator-grant-row">
+                      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+                        <div>
+                          <strong>@${escapeHtml(c.username)}</strong> ${c.isVerified ? '<span class="verified-dot">&#10003;</span>' : ''}
+                          <div class="muted small">${escapeHtml(c.displayName)} &middot; Partner Consent Opted In</div>
+                        </div>
+                        <button type="button" class="btn-outline btn-sm" data-grant-open="${escapeHtml(c.userId)}">Grant Credits / Perk</button>
+                      </div>
+                    </div>
+                  `).join('')
+              }
+            </div>
+          ` : ''}
+
+          ${state.ownerConsoleTab === 'recommend' ? `
+            <div style="display:grid;gap:10px;">
+              ${
+                recommendCandidates.length === 0
+                  ? '<p class="muted small" style="margin:0;">No creator posts synced yet.</p>'
+                  : recommendCandidates.map((p) => {
+                    const isRec = p.boostTier === 'OWNER_RECOMMENDED' || Boolean(p.recommendedLabel);
+                    return `
+                      <div class="consent-row">
+                        <div style="min-width:0;flex:1;">
+                          <strong>@${escapeHtml(p.authorUsername)}</strong>
+                          <div class="muted small" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(p.caption || p.category || 'Post')}</div>
+                        </div>
+                        <button type="button" class="btn-sm ${isRec ? 'btn-outline' : 'btn-primary'}" data-admin-recommend="${escapeHtml(p.id)}">
+                          ${isRec ? 'Remove Rec' : 'Recommend'}
+                        </button>
+                      </div>
+                    `;
+                  }).join('')
+              }
+            </div>
+          ` : ''}
+
+          ${state.ownerConsoleTab === 'supabase' ? `
+            <div style="display:grid;gap:12px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+                <div>
+                  <strong>Supabase PostgreSQL + RLS Migration (Phase 1)</strong>
+                  <div class="muted small">${escapeHtml(state.supabaseStatus)}</div>
+                </div>
+                <span class="pill">${isSupabaseClientReady(SUPABASE_WEB_CONFIG) ? 'Configured' : 'Waiting for Keys'}</span>
+              </div>
+              <div class="muted small">
+                Ready tables in <code>supabase/schema.sql</code> (${SUPABASE_SCHEMA_TABLES.length}): ${SUPABASE_SCHEMA_TABLES.map((t) => `<code>${escapeHtml(t)}</code>`).join(' ')}
+              </div>
+              <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+                <button type="button" class="btn-outline btn-sm" id="testSupabaseWebBtn" ${state.supabaseBusy ? 'disabled' : ''}>
+                  ${state.supabaseBusy ? 'Checking...' : 'Test Supabase Connection'}
+                </button>
+                <button type="button" class="btn-primary btn-sm" id="downloadSupabaseJsonBtn">
+                  Download Migration Snapshot JSON
+                </button>
+                <a class="btn-outline btn-sm" href="https://supabase.com/dashboard" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">
+                  Supabase Dashboard &#8599;
+                </a>
+              </div>
+            </div>
+          ` : ''}
+        </div>
+
         <div class="card-panel">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
             <div>
@@ -1732,12 +2104,34 @@ function renderProfile() {
   `;
 
   document.getElementById('shareProfileBtn').onclick = () => shareProfileExternally(profile);
+  const consentToggle = document.getElementById('profileConsentToggle');
+  if (consentToggle) consentToggle.onchange = (e) => updatePartnerConsent(e.target.checked);
+  mainStage.querySelectorAll('[data-owner-tab]').forEach((b) => {
+    b.onclick = () => { state.ownerConsoleTab = b.dataset.ownerTab; renderProfile(); };
+  });
+  const monForm = document.getElementById('ownerMonetizationForm');
+  if (monForm) {
+    monForm.onsubmit = async (e) => {
+      e.preventDefault();
+      await saveAdMonetizationConfigFromForm();
+    };
+  }
+  mainStage.querySelectorAll('[data-grant-open]').forEach((b) => {
+    b.onclick = () => {
+      const target = state.creators.find((c) => c.userId === b.dataset.grantOpen);
+      if (target) openOwnerGrantModal(target);
+    };
+  });
   const burstBtn = document.getElementById('showcaseBurstBtn');
   if (burstBtn) burstBtn.onclick = () => publishShowcaseBurst(state.user.uid);
   const engageBtn = document.getElementById('showcaseEngageBtn');
   if (engageBtn) engageBtn.onclick = () => engagePostsWithShowcase(state.user.uid);
   const removeBtn = document.getElementById('showcaseRemoveBtn');
   if (removeBtn) removeBtn.onclick = () => removeAllShowcaseContent();
+  const testSupaBtn = document.getElementById('testSupabaseWebBtn');
+  if (testSupaBtn) testSupaBtn.onclick = () => runSupabaseWebHealthCheck();
+  const dlSupaBtn = document.getElementById('downloadSupabaseJsonBtn');
+  if (dlSupaBtn) dlSupaBtn.onclick = () => downloadSupabaseMigrationSnapshot();
   const editBtn = document.getElementById('editProfileBtn');
   if (editBtn) editBtn.onclick = () => openEditProfileModal();
   const createBtn = document.getElementById('profileCreateBtn');
@@ -1933,6 +2327,20 @@ function bindFeedInteractions(container) {
   });
   container.querySelectorAll('[data-bookmark-post]').forEach((b) => {
     b.onclick = (e) => { e.stopPropagation(); toggleBookmark(b.dataset.bookmarkPost); };
+  });
+  container.querySelectorAll('[data-boost-post]').forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      const post = state.posts.find((p) => p.id === b.dataset.boostPost);
+      if (post) openPostBoostModal(post);
+    };
+  });
+  container.querySelectorAll('[data-admin-recommend]').forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      const post = state.posts.find((p) => p.id === b.dataset.adminRecommend);
+      if (post) await adminToggleRecommendPost(post);
+    };
   });
   container.querySelectorAll('[data-delete-post]').forEach((b) => {
     b.onclick = async (e) => {
@@ -2544,3 +2952,327 @@ function openWatchLiveModal(streamId) {
     };
   });
 }
+
+async function updatePartnerConsent(enabled) {
+  if (!state.user) return;
+  await updateDoc(doc(db, 'users', state.user.uid), {
+    partnerConsent: Boolean(enabled),
+    consentUpdatedAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+  showToast(enabled ? 'Partner Boost & Owner Perks consent enabled' : 'Partner consent turned off');
+}
+
+function openPostBoostModal(post) {
+  const balance = state.wallet?.balance || 0;
+  openModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <h3 style="margin:0;">Boost Your Post</h3>
+      <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+    </div>
+    <p class="muted small" style="margin-top:0;">Available balance: <strong>${formatCount(balance)} Credits</strong></p>
+    <div style="display:grid;gap:12px;">
+      ${POST_BOOST_OPTIONS.map((opt) => `
+        <div class="consent-row">
+          <div>
+            <strong>${escapeHtml(opt.title)}</strong>
+            <div class="muted small">${escapeHtml(opt.subtitle)}</div>
+          </div>
+          <button type="button" class="btn-primary btn-sm" data-confirm-boost="${opt.tier}">${opt.creditsCost} cr</button>
+        </div>
+      `).join('')}
+    </div>
+  `);
+  document.getElementById('closeModalBtn').onclick = closeModal;
+  modalContent.querySelectorAll('[data-confirm-boost]').forEach((b) => {
+    b.onclick = async () => {
+      const opt = POST_BOOST_OPTIONS.find((o) => o.tier === b.dataset.confirmBoost);
+      if (!opt || !state.user || !state.profile) return;
+      const w = state.wallet;
+      if (!w || (w.balance || 0) < opt.creditsCost) {
+        showToast('Not enough credits. Buy credits in the Momi Android app.');
+        return;
+      }
+      const txId = makeClientId('boost');
+      const batch = writeBatch(db);
+      batch.update(doc(db, 'wallets', state.user.uid), {
+        balance: w.balance - opt.creditsCost,
+        totalSpent: (w.totalSpent || 0) + opt.creditsCost,
+        lastTxId: txId,
+        updatedAt: serverTimestamp()
+      });
+      batch.set(doc(db, 'creditTransactions', txId), {
+        txId,
+        type: 'POST_BOOST',
+        senderUid: state.user.uid,
+        senderUsername: state.profile.username,
+        recipientUid: state.user.uid,
+        recipientUsername: state.profile.username,
+        creditsAmount: opt.creditsCost,
+        priceUsd: 0,
+        paymentMethod: 'WALLET_CREDITS',
+        postId: post.id,
+        recipientClaimed: true,
+        status: 'COMPLETED',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      batch.update(doc(db, 'posts', post.id), {
+        isBoosted: true,
+        boostTier: opt.tier,
+        recommendedLabel: opt.badgeLabel,
+        boostedByUid: state.user.uid,
+        boostedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      await batch.commit();
+      closeModal();
+      showToast(`${opt.title} activated across Momi!`);
+    };
+  });
+}
+
+async function adminToggleRecommendPost(post) {
+  if (!isOwnerAdmin() || !state.profile) return;
+  const currentlyRecommended = post.boostTier === 'OWNER_RECOMMENDED' || Boolean(post.recommendedLabel);
+  const batch = writeBatch(db);
+  if (currentlyRecommended) {
+    batch.update(doc(db, 'posts', post.id), {
+      isBoosted: false,
+      boostTier: '',
+      recommendedLabel: '',
+      boostedByUid: null,
+      boostedAt: null,
+      updatedAt: serverTimestamp()
+    });
+  } else {
+    batch.update(doc(db, 'posts', post.id), {
+      isBoosted: true,
+      boostTier: 'OWNER_RECOMMENDED',
+      recommendedLabel: 'Recommended by Momi',
+      boostedByUid: state.user.uid,
+      boostedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    if (post.userId && post.userId !== state.user.uid) {
+      batch.set(doc(db, 'users', post.userId, 'notifications', makeClientId('notif')), {
+        userId: post.userId,
+        actorUid: state.user.uid,
+        actorUsername: state.profile.username,
+        actorAvatarKey: state.profile.avatarKey || 'avatar_aria',
+        message: 'featured your post under Recommended by Momi!',
+        timeLabel: 'Just now',
+        section: 'Today',
+        previewImageKey: post.imageKey || 'img_post_coastal',
+        isFollowAction: false,
+        isFollowingBack: false,
+        isUnread: true,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+    }
+  }
+  await batch.commit();
+  showToast(currentlyRecommended ? 'Removed Momi recommendation' : 'Post featured as Recommended by Momi!');
+}
+
+async function saveAdMonetizationConfigFromForm() {
+  if (!isOwnerAdmin() || state.adminBusy) return;
+  const directRaw = document.getElementById('cfgMonetagDirectUrl').value.trim();
+  const normalizedDirect = normalizeMonetagDirectUrl(directRaw);
+  if (directRaw && !normalizedDirect) {
+    showToast('Monetag Direct Link must start with https://');
+    return;
+  }
+  const gamezopRaw = document.getElementById('cfgGamezopPortalUrl').value.trim();
+  const normalizedGamezop = normalizeMonetagDirectUrl(gamezopRaw);
+  if (gamezopRaw && !normalizedGamezop) {
+    showToast('Gamezop Portal URL must start with https://');
+    return;
+  }
+  state.adminBusy = true;
+  renderProfile();
+  try {
+    await setDoc(doc(db, 'appConfig', 'monetization'), {
+      admobEnabled: Boolean(document.getElementById('cfgAdmobEnabled').checked),
+      admobBannerUnitId: document.getElementById('cfgAdmobBanner').value.trim().slice(0, 120),
+      admobMrecUnitId: document.getElementById('cfgAdmobMrec').value.trim().slice(0, 120),
+      admobInterstitialUnitId: document.getElementById('cfgAdmobInterstitial').value.trim().slice(0, 120),
+      startIoEnabled: Boolean(document.getElementById('cfgStartIoEnabled').checked),
+      monetagEnabled: Boolean(document.getElementById('cfgMonetagEnabled').checked),
+      monetagDirectLinkUrl: normalizedDirect,
+      monetagWebZoneId: sanitizeMonetagZoneId(document.getElementById('cfgMonetagZoneId').value),
+      monetagWebMetaTag: document.getElementById('cfgMonetagMeta').value.trim().slice(0, 120),
+      partnerPromoTitle: (document.getElementById('cfgPromoTitle').value.trim() || DEFAULT_MONETIZATION_CONFIG.partnerPromoTitle).slice(0, 80),
+      partnerPromoSubtitle: (document.getElementById('cfgPromoSubtitle').value.trim() || DEFAULT_MONETIZATION_CONFIG.partnerPromoSubtitle).slice(0, 180),
+      partnerPromoCta: (document.getElementById('cfgPromoCta').value.trim() || DEFAULT_MONETIZATION_CONFIG.partnerPromoCta).slice(0, 40),
+      gamezopEnabled: Boolean(document.getElementById('cfgGamezopEnabled').checked),
+      gamezopPortalUrl: normalizedGamezop,
+      gamezopPublisherId: sanitizeGamezopPublisherId(document.getElementById('cfgGamezopPubId').value),
+      gamezopBannerTitle: (document.getElementById('cfgGamezopTitle').value.trim() || DEFAULT_MONETIZATION_CONFIG.gamezopBannerTitle).slice(0, 80),
+      updatedByEmail: ADMIN_OWNER_EMAIL,
+      updatedAt: serverTimestamp()
+    });
+    showToast('Live Monetization config saved across Android & Web!');
+  } catch (err) {
+    showToast(err?.message || 'Failed saving monetization config');
+  } finally {
+    state.adminBusy = false;
+    renderProfile();
+  }
+}
+
+function openOwnerGrantModal(creator) {
+  if (!isOwnerAdmin()) return;
+  openModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <h3 style="margin:0;">Owner Grant for @${escapeHtml(creator.username)}</h3>
+      <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+    </div>
+    <p class="muted small" style="margin-top:0;">This creator opted into Partner Boost &amp; Owner Perks consent.</p>
+    <form id="ownerGrantForm" style="display:grid;gap:12px;">
+      <div>
+        <label class="small muted">Bonus Credits (0 - 5000)</label>
+        <input id="grantCreditsInput" type="number" min="0" max="5000" value="100" class="input" />
+      </div>
+      <div>
+        <label class="small muted">Unlock In-App Perk</label>
+        <select id="grantPerkSelect" class="select">
+          <option value="">None</option>
+          ${WEB_PERK_CATALOG.map((p) => `<option value="${p.key}">${escapeHtml(p.name)}</option>`).join('')}
+        </select>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;">
+        <input id="grantVerifyCheck" type="checkbox" ${creator.isVerified ? 'checked' : ''} />
+        <span>Grant Verified Creator Checkmark</span>
+      </label>
+      <button type="submit" class="btn-primary">Send Owner Grant</button>
+    </form>
+  `);
+  document.getElementById('closeModalBtn').onclick = closeModal;
+  document.getElementById('ownerGrantForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const credits = Math.max(0, Math.min(5000, Number(document.getElementById('grantCreditsInput').value) || 0));
+    const perkKey = document.getElementById('grantPerkSelect').value || null;
+    const grantVerified = Boolean(document.getElementById('grantVerifyCheck').checked);
+    if (credits === 0 && !perkKey && !grantVerified) {
+      showToast('Select credits, a perk, or verified status to grant.');
+      return;
+    }
+    const walletRef = doc(db, 'wallets', creator.userId);
+    const walletSnap = await getDoc(walletRef);
+    const existingWallet = walletSnap.exists() ? walletSnap.data() : null;
+    const txId = makeClientId('grant');
+    const prevPerks = existingWallet?.unlockedPerks || [];
+    const nextPerks = perkKey ? [...new Set([...prevPerks, perkKey])] : prevPerks;
+    const nextTier = tierForTotalPurchased(existingWallet?.totalPurchased || 0, nextPerks);
+    const nextVerif = verificationTierForPerks(grantVerified ? 'VERIFIED' : (existingWallet?.verificationTier || 'NONE'), nextPerks);
+
+    const batch = writeBatch(db);
+    if (!walletSnap.exists()) {
+      batch.set(walletRef, {
+        userId: creator.userId,
+        balance: credits,
+        totalEarned: credits,
+        totalSpent: 0,
+        totalPurchased: 0,
+        accountTier: nextTier,
+        verificationTier: nextVerif,
+        unlockedPerks: nextPerks,
+        lastTxId: txId,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+    } else {
+      batch.update(walletRef, {
+        balance: (existingWallet.balance || 0) + credits,
+        totalEarned: (existingWallet.totalEarned || 0) + credits,
+        accountTier: nextTier,
+        verificationTier: nextVerif,
+        unlockedPerks: nextPerks,
+        lastTxId: txId,
+        updatedAt: serverTimestamp()
+      });
+    }
+    batch.set(doc(db, 'creditTransactions', txId), {
+      txId,
+      type: 'OWNER_GRANT',
+      senderUid: state.user.uid,
+      senderUsername: state.profile.username,
+      recipientUid: creator.userId,
+      recipientUsername: creator.username,
+      creditsAmount: credits,
+      priceUsd: 0,
+      paymentMethod: 'OWNER_ADMIN',
+      perkKey,
+      recipientClaimed: true,
+      status: 'COMPLETED',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    if (grantVerified && !creator.isVerified) {
+      batch.update(doc(db, 'users', creator.userId), {
+        isVerified: true,
+        updatedAt: serverTimestamp()
+      });
+    }
+    if (creator.userId !== state.user.uid) {
+      batch.set(doc(db, 'users', creator.userId, 'notifications', makeClientId('notif')), {
+        userId: creator.userId,
+        actorUid: state.user.uid,
+        actorUsername: state.profile.username,
+        actorAvatarKey: state.profile.avatarKey || 'avatar_aria',
+        message: 'granted you an official Momi Creator Perk & Bonus!',
+        timeLabel: 'Just now',
+        section: 'Today',
+        isFollowAction: false,
+        isFollowingBack: false,
+        isUnread: true,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+    }
+    await batch.commit();
+    closeModal();
+    showToast(`Sent Owner Grant to @${creator.username}!`);
+  };
+}
+
+async function runSupabaseWebHealthCheck() {
+  if (!isOwnerAdmin() || state.supabaseBusy) return;
+  state.supabaseBusy = true;
+  if (state.nav === 'profile') renderProfile();
+  try {
+    const res = await checkSupabaseHealth(SUPABASE_WEB_CONFIG);
+    state.supabaseStatus = res.message;
+    showToast(res.message);
+  } finally {
+    state.supabaseBusy = false;
+    if (state.nav === 'profile') renderProfile();
+  }
+}
+
+function downloadSupabaseMigrationSnapshot() {
+  if (!isOwnerAdmin()) return;
+  const bundle = mapFirestoreSnapshotToSupabaseBundle({
+    profile: state.profile,
+    creators: state.creators,
+    posts: state.posts,
+    stories: state.stories,
+    merchants: [],
+    products: state.products,
+    monetizationConfig: state.monetizationConfig,
+    wallet: state.wallet
+  });
+  const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `momi-supabase-migration-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showToast('Downloaded Supabase migration JSON snapshot!');
+}
+

@@ -20,15 +20,23 @@ android {
     versionCode = 11
     versionName = "2.0"
 
-    val dotEnvProps = java.util.Properties().apply {
+    val dotEnvMap = buildMap<String, String> {
       val envFile = rootProject.file(".env")
       if (envFile.exists()) {
-        envFile.inputStream().use { load(it) }
+        envFile.readLines()
+          .map { it.trim() }
+          .filter { it.isNotEmpty() && !it.startsWith("#") && '=' in it }
+          .forEach { line ->
+            val idx = line.indexOf('=')
+            val k = line.substring(0, idx).trim()
+            val v = line.substring(idx + 1).trim().removeSurrounding("\"")
+            if (k.isNotEmpty() && v.isNotEmpty()) put(k, v)
+          }
       }
     }
     fun resolveEnv(key: String, fallback: String = ""): String {
       val fromEnv = System.getenv(key)?.trim()?.takeIf { it.isNotEmpty() }
-      val fromFile = dotEnvProps.getProperty(key)?.trim()?.removeSurrounding("\"")?.takeIf { it.isNotEmpty() }
+      val fromFile = dotEnvMap[key]?.takeIf { it.isNotEmpty() }
       return (fromEnv ?: fromFile ?: fallback).replace("\\", "\\\\").replace("\"", "\\\"")
     }
 
@@ -38,6 +46,8 @@ android {
     val admobMrecUnitId = resolveEnv("ADMOB_MREC_UNIT_ID", "ca-app-pub-3940256099942544/6300978111")
     val admobInterstitialUnitId = resolveEnv("ADMOB_INTERSTITIAL_UNIT_ID", "ca-app-pub-3940256099942544/1033173712")
     val monetagDirectLinkUrl = resolveEnv("MONETAG_DIRECT_LINK_URL", "")
+    val supabaseUrl = resolveEnv("SUPABASE_URL", "")
+    val supabaseAnonKey = resolveEnv("SUPABASE_ANON_KEY", "")
 
     manifestPlaceholders["startIoAppId"] = startIoAppId
     manifestPlaceholders["admobAppId"] = admobAppId
@@ -47,6 +57,8 @@ android {
     buildConfigField("String", "ADMOB_MREC_UNIT_ID", "\"$admobMrecUnitId\"")
     buildConfigField("String", "ADMOB_INTERSTITIAL_UNIT_ID", "\"$admobInterstitialUnitId\"")
     buildConfigField("String", "MONETAG_DIRECT_LINK_URL", "\"$monetagDirectLinkUrl\"")
+    buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
+    buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -112,7 +124,9 @@ secrets {
       "ADMOB_BANNER_UNIT_ID",
       "ADMOB_MREC_UNIT_ID",
       "ADMOB_INTERSTITIAL_UNIT_ID",
-      "MONETAG_DIRECT_LINK_URL"
+      "MONETAG_DIRECT_LINK_URL",
+      "SUPABASE_URL",
+      "SUPABASE_ANON_KEY"
     )
   )
 }

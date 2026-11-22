@@ -450,6 +450,10 @@ service cloud.firestore {
              data.partnerPromoTitle is string && data.partnerPromoTitle.size() <= 80 &&
              data.partnerPromoSubtitle is string && data.partnerPromoSubtitle.size() <= 180 &&
              data.partnerPromoCta is string && data.partnerPromoCta.size() <= 40 &&
+             (!('gamezopEnabled' in data) || data.gamezopEnabled is bool) &&
+             (!('gamezopPortalUrl' in data) || (data.gamezopPortalUrl is string && data.gamezopPortalUrl.size() <= 300 && (data.gamezopPortalUrl == '' || data.gamezopPortalUrl.matches('^https://.*')))) &&
+             (!('gamezopPublisherId' in data) || (data.gamezopPublisherId is string && data.gamezopPublisherId.size() <= 40)) &&
+             (!('gamezopBannerTitle' in data) || (data.gamezopBannerTitle is string && data.gamezopBannerTitle.size() <= 80)) &&
              data.updatedByEmail is string && data.updatedByEmail.size() <= 120 &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
@@ -1199,6 +1203,7 @@ service cloud.firestore {
                                  'admobEnabled', 'admobBannerUnitId', 'admobMrecUnitId', 'admobInterstitialUnitId',
                                  'startIoEnabled', 'monetagEnabled', 'monetagDirectLinkUrl', 'monetagWebZoneId',
                                  'monetagWebMetaTag', 'partnerPromoTitle', 'partnerPromoSubtitle', 'partnerPromoCta',
+                                 'gamezopEnabled', 'gamezopPortalUrl', 'gamezopPublisherId', 'gamezopBannerTitle',
                                  'updatedByEmail', 'updatedAt'
                                ]) &&
                                isValidAppConfig(incoming());

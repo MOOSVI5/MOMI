@@ -1281,6 +1281,12 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
         require(cleanDirectLink.isEmpty() || cleanDirectLink.startsWith("https://")) {
             "Monetag Direct Link URL must start with https://"
         }
+        val cleanGamezopPortal = config.gamezopPortalUrl.trim().take(300)
+        require(cleanGamezopPortal.isEmpty() || cleanGamezopPortal.startsWith("https://")) {
+            "Gamezop Portal URL must start with https://"
+        }
+        val cleanGamezopPubId = config.gamezopPublisherId.trim().replace(Regex("[^a-zA-Z0-9_-]"), "").take(40)
+        val cleanGamezopTitle = config.gamezopBannerTitle.trim().ifBlank { "Momi Arcade · Play Instant Games" }.take(80)
         val docRef = monetizationDoc()
         val payload = mapOf(
             "admobEnabled" to config.admobEnabled,
@@ -1295,6 +1301,10 @@ class MomiFirestoreRepository(private val db: FirebaseFirestore) {
             "partnerPromoTitle" to config.partnerPromoTitle.trim().ifBlank { "Featured Creator Deals & Partner Showcase" }.take(80),
             "partnerPromoSubtitle" to config.partnerPromoSubtitle.trim().ifBlank { "Explore verified creator collections & partner perks." }.take(180),
             "partnerPromoCta" to config.partnerPromoCta.trim().ifBlank { "Explore Partner" }.take(40),
+            "gamezopEnabled" to config.gamezopEnabled,
+            "gamezopPortalUrl" to cleanGamezopPortal,
+            "gamezopPublisherId" to cleanGamezopPubId,
+            "gamezopBannerTitle" to cleanGamezopTitle,
             "updatedByEmail" to adminEmail.trim().take(120),
             "updatedAt" to FieldValue.serverTimestamp()
         )

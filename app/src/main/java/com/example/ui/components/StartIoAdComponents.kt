@@ -46,6 +46,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.Campaign
 import androidx.compose.material3.Button
@@ -67,6 +68,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -82,6 +84,7 @@ import coil.compose.AsyncImage
 import com.example.BuildConfig
 import com.example.data.model.AdMonetizationConfig
 import com.example.data.model.normalizeMonetagDirectUrl
+import com.example.data.model.resolveGamezopLaunchUrl
 import com.google.android.gms.ads.AdListener
 import com.google.android.gms.ads.AdRequest
 import com.google.android.gms.ads.AdSize
@@ -119,6 +122,7 @@ data class StartIoDiagnostics(
     val mrecStatus: String = "Standby",
     val bannerStatus: String = "Waiting for SDK",
     val monetagStatus: String = "Standby",
+    val gamezopStatus: String = "Standby",
     val interstitialStatus: String = "Waiting for SDK"
 )
 
@@ -161,6 +165,10 @@ object MomiStartIoSession {
 
     fun updateMonetag(status: String) {
         _diagnostics.update { it.copy(monetagStatus = status) }
+    }
+
+    fun updateGamezop(status: String) {
+        _diagnostics.update { it.copy(gamezopStatus = status) }
     }
 
     fun updateInterstitial(status: String) {
@@ -1724,3 +1732,133 @@ private fun StartIoAnchoredStrip(
         }
     }
 }
+
+@Composable
+fun MomiGamezopArcadeCard(
+    monetizationConfig: AdMonetizationConfig = AdMonetizationConfig(),
+    modifier: Modifier = Modifier
+) {
+    val gamezopUrl = remember(monetizationConfig) { resolveGamezopLaunchUrl(monetizationConfig) }
+    if (gamezopUrl.isEmpty()) {
+        LaunchedEffect(monetizationConfig.gamezopEnabled) {
+            MomiStartIoSession.updateGamezop(
+                if (monetizationConfig.gamezopEnabled) "Enabled (needs Publisher ID or URL)" else "Standby"
+            )
+        }
+        return
+    }
+
+    val uriHandler = LocalUriHandler.current
+    LaunchedEffect(gamezopUrl) {
+        MomiStartIoSession.updateGamezop("Arcade Ready")
+    }
+
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.38f),
+        tonalElevation = 1.dp,
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .border(
+                width = 0.75.dp,
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
+                shape = RoundedCornerShape(16.dp)
+            )
+            .clip(RoundedCornerShape(16.dp))
+            .clickable { runCatching { uriHandler.openUri(gamezopUrl) } }
+            .testTag("gamezop_arcade_card")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(46.dp)
+                    .clip(RoundedCornerShape(13.dp))
+                    .background(
+                        Brush.linearGradient(
+                            colors = listOf(
+                                MaterialTheme.colorScheme.primary,
+                                MaterialTheme.colorScheme.tertiary
+                            )
+                        )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.SportsEsports,
+                    contentDescription = "Gamezop Instant Games Arcade",
+                    tint = Color.White,
+                    modifier = Modifier.size(26.dp)
+                )
+            }
+
+            Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "Partner Games",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Text(
+                        text = "Gamezop",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(
+                    text = monetizationConfig.gamezopBannerTitle.ifBlank { "Momi Arcade · Play Instant Games" },
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "Instant HTML5 mini-games · Play in browser",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Button(
+                onClick = { runCatching { uriHandler.openUri(gamezopUrl) } },
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("gamezop_play_button")
+            ) {
+                Text(
+                    text = "Play",
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                    contentDescription = "Launch Gamezop Arcade",
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
+    }
+}
+

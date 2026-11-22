@@ -182,6 +182,12 @@ fun ProfileScreen(
     onUpdatePartnerConsent: (Boolean) -> Unit = {},
     onGrantConsentingUser: (UserProfile, Long, AccountPerkItem?, Boolean) -> Unit = { _, _, _, _ -> },
     onAdminSetPostRecommended: (Post, Boolean, String) -> Unit = { _, _, _ -> },
+    isSupabaseConfigured: Boolean = false,
+    supabaseStatus: String? = null,
+    isSupabaseBusy: Boolean = false,
+    onTestSupabaseConnection: () -> Unit = {},
+    onSyncSupabaseSnapshot: () -> Unit = {},
+    onBuildSupabaseExportJson: () -> String = { "{}" },
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -902,6 +908,12 @@ fun ProfileScreen(
             currentConfig = monetizationConfig,
             isSaving = isSavingMonetization,
             onSaveConfig = onSaveMonetizationConfig,
+            isSupabaseConfigured = isSupabaseConfigured,
+            supabaseStatus = supabaseStatus,
+            isSupabaseBusy = isSupabaseBusy,
+            onTestSupabaseConnection = onTestSupabaseConnection,
+            onSyncSupabaseSnapshot = onSyncSupabaseSnapshot,
+            onBuildSupabaseExportJson = onBuildSupabaseExportJson,
             onDismiss = { showPlayReadinessSheet = false }
         )
     }

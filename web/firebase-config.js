@@ -11,6 +11,12 @@ export const FIRESTORE_DATABASE_ID = 'ai-studio-android-momi-6f066cf0-37b6-444a-
 export const ADMIN_OWNER_EMAIL = 'syali6511@gmail.com';
 export const MAX_IMAGE_BASE64_CHARS = 650000;
 
+// Populate url & anonKey after running supabase/schema.sql (NEVER place service_role / sb_secret_ keys here)
+export const SUPABASE_WEB_CONFIG = {
+  url: '',
+  anonKey: ''
+};
+
 export const PRESET_IMAGE_MAP = {
   img_post_coastal: './assets/img_post_coastal.jpg',
   img_post_coffee: './assets/img_post_coffee.jpg',
@@ -306,3 +312,133 @@ export function renderRichCaptionHtml(caption = '') {
     )
     .replace(/\n/g, '<br>');
 }
+
+export const DEFAULT_MONETIZATION_CONFIG = {
+  admobEnabled: true,
+  admobBannerUnitId: '',
+  admobMrecUnitId: '',
+  admobInterstitialUnitId: '',
+  startIoEnabled: true,
+  monetagEnabled: true,
+  monetagDirectLinkUrl: '',
+  monetagWebZoneId: '',
+  monetagWebMetaTag: '',
+  partnerPromoTitle: 'Featured Creator Deals & Partner Showcase',
+  partnerPromoSubtitle: 'Explore verified creator collections, partner offers & exclusive community perks.',
+  partnerPromoCta: 'Explore Partner',
+  gamezopEnabled: false,
+  gamezopPortalUrl: '',
+  gamezopPublisherId: '',
+  gamezopBannerTitle: 'Momi Arcade · Play Instant Games',
+  updatedByEmail: ''
+};
+
+export const POST_BOOST_OPTIONS = [
+  {
+    tier: 'SPOTLIGHT',
+    title: 'Spotlight Boost',
+    badgeLabel: 'Boosted Spotlight',
+    subtitle: 'Elevate your post higher in For You & Search discovery',
+    creditsCost: 100
+  },
+  {
+    tier: 'SUPER_BOOST',
+    title: 'Super Boost',
+    badgeLabel: 'Super Boosted',
+    subtitle: 'Priority placement across Home Feed, Explore & Creator Spotlight',
+    creditsCost: 250
+  }
+];
+
+export const WEB_PERK_CATALOG = [
+  {
+    key: 'SUPPORTER_FRAME',
+    name: 'Supporter Profile Badge & Live Glow',
+    desc: 'Stand out in creator live chat & unlock Supporter account tier.',
+    cost: 100,
+    tierGranted: 'SUPPORTER',
+    verificationStageGranted: 'NONE'
+  },
+  {
+    key: 'CREATOR_BOOST',
+    name: 'Creator Spotlight Boost',
+    desc: 'Featured badge in Creator Discovery & elevated Creator Pro status.',
+    cost: 250,
+    tierGranted: 'CREATOR_PRO',
+    verificationStageGranted: 'CREATOR_PRO'
+  },
+  {
+    key: 'PRIORITY_VERIFICATION',
+    name: 'Priority Verification Fast-Track',
+    desc: 'Queue your account for official identity & creator verification review.',
+    cost: 500,
+    tierGranted: 'CREATOR_PRO',
+    verificationStageGranted: 'PENDING_PERK'
+  },
+  {
+    key: 'VIP_PATRON_PASS',
+    name: 'Momi VIP Patron Pass',
+    desc: 'Top VIP patron tier with priority support & subscriber perks.',
+    cost: 1000,
+    tierGranted: 'VIP',
+    verificationStageGranted: 'CREATOR_PRO'
+  }
+];
+
+export function normalizeMonetagDirectUrl(raw = '') {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed.startsWith('https://')) return '';
+  return trimmed.slice(0, 300);
+}
+
+export function sanitizeMonetagZoneId(raw = '') {
+  const clean = String(raw || '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+  return clean.slice(0, 40);
+}
+
+export function sanitizeGamezopPublisherId(raw = '') {
+  const clean = String(raw || '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+  return clean.slice(0, 40);
+}
+
+export function resolveGamezopUrl(cfg = {}) {
+  if (!cfg?.gamezopEnabled) return '';
+  const direct = normalizeMonetagDirectUrl(cfg.gamezopPortalUrl);
+  if (direct) return direct;
+  const pubId = sanitizeGamezopPublisherId(cfg.gamezopPublisherId);
+  return pubId ? `https://www.gamezop.com/?id=${pubId}` : '';
+}
+
+export function sortFeedWithBoostPriority(posts = []) {
+  if (!Array.isArray(posts) || posts.length <= 1) return Array.isArray(posts) ? posts : [];
+  const tierRank = (p) => {
+    const id = String(p?.id || '');
+    const isPrioritized = Boolean(p?.isBoosted || p?.recommendedLabel) && !id.startsWith('showcase_');
+    if (!isPrioritized) return 0;
+    if (p?.boostTier === 'OWNER_RECOMMENDED') return 4;
+    if (p?.boostTier === 'SUPER_BOOST') return 3;
+    if (p?.boostTier === 'SPOTLIGHT') return 2;
+    return 1;
+  };
+  return posts
+    .map((p, idx) => ({ p, idx, rank: tierRank(p) }))
+    .sort((a, b) => (b.rank !== a.rank ? b.rank - a.rank : a.idx - b.idx))
+    .map((entry) => entry.p);
+}
+
+export function tierForTotalPurchased(totalPurchased = 0, unlockedPerks = []) {
+  const perks = Array.isArray(unlockedPerks) ? unlockedPerks : [];
+  if (perks.includes('VIP_PATRON_PASS') || totalPurchased >= 3000) return 'VIP';
+  if (perks.includes('CREATOR_BOOST') || perks.includes('PRIORITY_VERIFICATION') || totalPurchased >= 1200) return 'CREATOR_PRO';
+  if (perks.includes('SUPPORTER_FRAME') || totalPurchased >= 200) return 'SUPPORTER';
+  return 'STANDARD';
+}
+
+export function verificationTierForPerks(current = 'NONE', unlockedPerks = []) {
+  if (current === 'VERIFIED') return 'VERIFIED';
+  const perks = Array.isArray(unlockedPerks) ? unlockedPerks : [];
+  if (perks.includes('PRIORITY_VERIFICATION')) return 'PENDING_PERK';
+  if (perks.includes('CREATOR_BOOST') || perks.includes('VIP_PATRON_PASS')) return 'CREATOR_PRO';
+  return 'NONE';
+}
+

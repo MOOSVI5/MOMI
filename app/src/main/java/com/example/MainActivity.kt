@@ -76,6 +76,7 @@ import androidx.compose.ui.unit.dp
 import androidx.credentials.CredentialManager
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -137,6 +138,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.PersistentCacheSettings
 import com.google.firebase.firestore.firestoreSettings
 import com.startapp.sdk.adsbase.StartAppSDK
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 private object LumaRoutes {
@@ -194,12 +196,14 @@ class MainActivity : ComponentActivity() {
         configureAppCheck(this, intent)
         latestIncomingIntent.value = intent
 
-        runCatching {
-            MobileAds.initialize(this) {
-                MomiStartIoSession.updateAdMob("SDK initialized")
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                MobileAds.initialize(this@MainActivity) {
+                    MomiStartIoSession.updateAdMob("SDK initialized")
+                }
+            }.onFailure { err ->
+                MomiStartIoSession.updateAdMob("Init skipped: ${err.message ?: "error"}")
             }
-        }.onFailure { err ->
-            MomiStartIoSession.updateAdMob("Init skipped: ${err.message ?: "error"}")
         }
 
         runCatching {
@@ -969,6 +973,8 @@ private fun LumaApp(
                             val showcasePostsCount by viewModel.showcasePostsCount.collectAsStateWithLifecycle()
                             val showcaseStoriesCount by viewModel.showcaseStoriesCount.collectAsStateWithLifecycle()
                             val isShowcaseBusy by viewModel.isShowcaseActionBusy.collectAsStateWithLifecycle()
+                            val supabaseStatus by viewModel.supabaseStatus.collectAsStateWithLifecycle()
+                            val isSupabaseBusy by viewModel.isSupabaseBusy.collectAsStateWithLifecycle()
                             ProfileScreen(
                                 profile = profile,
                                 allCreators = allCreators,
@@ -1080,6 +1086,12 @@ private fun LumaApp(
                                 onAdminSetPostRecommended = { post, recommended, label ->
                                     viewModel.adminSetPostRecommended(post, recommended, label)
                                 },
+                                isSupabaseConfigured = viewModel.isSupabaseConfigured,
+                                supabaseStatus = supabaseStatus,
+                                isSupabaseBusy = isSupabaseBusy,
+                                onTestSupabaseConnection = viewModel::testSupabaseConnection,
+                                onSyncSupabaseSnapshot = viewModel::syncLiveSnapshotToSupabase,
+                                onBuildSupabaseExportJson = viewModel::buildSupabaseMigrationSnapshotJson,
                                 onSignOut = onSignOut
                             )
                         }

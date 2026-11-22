@@ -25,6 +25,8 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CloudSync
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.WorkspacePremium
 import androidx.compose.material3.Button
@@ -51,8 +53,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -72,9 +76,18 @@ fun OwnerMonetizationAndPlaySheet(
     currentConfig: AdMonetizationConfig,
     isSaving: Boolean,
     onSaveConfig: (AdMonetizationConfig, (Boolean) -> Unit) -> Unit,
+    isSupabaseConfigured: Boolean = false,
+    supabaseStatus: String? = null,
+    isSupabaseBusy: Boolean = false,
+    onTestSupabaseConnection: () -> Unit = {},
+    onSyncSupabaseSnapshot: () -> Unit = {},
+    onBuildSupabaseExportJson: () -> String = { "{}" },
     onDismiss: () -> Unit
 ) {
     val uriHandler = LocalUriHandler.current
+    @Suppress("DEPRECATION")
+    val clipboardManager = LocalClipboardManager.current
+    var copiedMigrationNotice by remember { mutableStateOf(false) }
     val isDebugAds = BuildConfig.DEBUG
     val adDiagnostics by MomiStartIoSession.diagnostics.collectAsStateWithLifecycle()
 
@@ -90,6 +103,10 @@ fun OwnerMonetizationAndPlaySheet(
     var partnerPromoTitle by remember(currentConfig) { mutableStateOf(currentConfig.partnerPromoTitle) }
     var partnerPromoSubtitle by remember(currentConfig) { mutableStateOf(currentConfig.partnerPromoSubtitle) }
     var partnerPromoCta by remember(currentConfig) { mutableStateOf(currentConfig.partnerPromoCta) }
+    var gamezopEnabled by remember(currentConfig) { mutableStateOf(currentConfig.gamezopEnabled) }
+    var gamezopPublisherId by remember(currentConfig) { mutableStateOf(currentConfig.gamezopPublisherId) }
+    var gamezopPortalUrl by remember(currentConfig) { mutableStateOf(currentConfig.gamezopPortalUrl) }
+    var gamezopBannerTitle by remember(currentConfig) { mutableStateOf(currentConfig.gamezopBannerTitle) }
     var validationError by remember { mutableStateOf<String?>(null) }
 
     ModalBottomSheet(
@@ -120,7 +137,7 @@ fun OwnerMonetizationAndPlaySheet(
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Live 3-tier waterfall (AdMob -> Start.io -> Monetag Partner) synced across Android & Web.",
+                    text = "Live AdMob, Start.io, Monetag & Gamezop synced across Android & Web.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -146,6 +163,7 @@ fun OwnerMonetizationAndPlaySheet(
                         PlayInfoLine("Start.io Feed / MREC", "${adDiagnostics.nativeStatus} | ${adDiagnostics.mrecStatus}")
                         PlayInfoLine("Start.io Banner", adDiagnostics.bannerStatus)
                         PlayInfoLine("Monetag Direct / Web", adDiagnostics.monetagStatus)
+                        PlayInfoLine("Gamezop Arcade", adDiagnostics.gamezopStatus)
                         PlayInfoLine("Interstitial", adDiagnostics.interstitialStatus)
                         PlayInfoLine(
                             "Ad Serving Mode",
@@ -170,7 +188,7 @@ fun OwnerMonetizationAndPlaySheet(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Text(
-                            text = "Configure AdMob, Start.io & Monetag",
+                            text = "Configure AdMob, Start.io, Monetag & Gamezop",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
@@ -297,6 +315,57 @@ fun OwnerMonetizationAndPlaySheet(
                             )
                         }
 
+                        HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant)
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Gamezop Arcade (HTML5 Mini-Games)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                                Text("Instant browser games on Android & Web (no extra SDK bloat)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Switch(checked = gamezopEnabled, onCheckedChange = { gamezopEnabled = it })
+                        }
+
+                        if (gamezopEnabled) {
+                            OutlinedTextField(
+                                value = gamezopPublisherId,
+                                onValueChange = {
+                                    gamezopPublisherId = it
+                                    validationError = null
+                                },
+                                label = { Text("Gamezop Publisher / Property ID (e.g. 9012)") },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("gamezop_pub_id_input")
+                            )
+                            OutlinedTextField(
+                                value = gamezopPortalUrl,
+                                onValueChange = {
+                                    gamezopPortalUrl = it
+                                    validationError = null
+                                },
+                                label = { Text("Gamezop Portal URL (optional https://...)") },
+                                placeholder = { Text("https://www.gamezop.com/?id=...") },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("gamezop_portal_url_input")
+                            )
+                            OutlinedTextField(
+                                value = gamezopBannerTitle,
+                                onValueChange = { gamezopBannerTitle = it },
+                                label = { Text("Arcade Card Title") },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("gamezop_title_input")
+                            )
+                        }
+
                         if (!validationError.isNullOrBlank()) {
                             Text(
                                 text = validationError.orEmpty(),
@@ -313,6 +382,11 @@ fun OwnerMonetizationAndPlaySheet(
                                     validationError = "Monetag Direct SmartLink URL must start with https://"
                                     return@Button
                                 }
+                                val trimmedGamezopUrl = gamezopPortalUrl.trim()
+                                if (trimmedGamezopUrl.isNotEmpty() && !trimmedGamezopUrl.startsWith("https://")) {
+                                    validationError = "Gamezop Portal URL must start with https://"
+                                    return@Button
+                                }
                                 onSaveConfig(
                                     currentConfig.copy(
                                         admobEnabled = admobEnabled,
@@ -326,7 +400,11 @@ fun OwnerMonetizationAndPlaySheet(
                                         monetagWebMetaTag = monetagWebMetaTag.trim(),
                                         partnerPromoTitle = partnerPromoTitle.trim(),
                                         partnerPromoSubtitle = partnerPromoSubtitle.trim(),
-                                        partnerPromoCta = partnerPromoCta.trim()
+                                        partnerPromoCta = partnerPromoCta.trim(),
+                                        gamezopEnabled = gamezopEnabled,
+                                        gamezopPublisherId = gamezopPublisherId.trim(),
+                                        gamezopPortalUrl = trimmedGamezopUrl,
+                                        gamezopBannerTitle = gamezopBannerTitle.trim()
                                     )
                                 ) { ok ->
                                     if (ok) onDismiss()
@@ -371,6 +449,128 @@ fun OwnerMonetizationAndPlaySheet(
             }
 
             item {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.42f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Filled.CloudSync,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Supabase Migration (Phase 1)",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (isSupabaseConfigured) {
+                                    Color(0xFF16A34A).copy(alpha = 0.16f)
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                }
+                            ) {
+                                Text(
+                                    text = if (isSupabaseConfigured) "Configured ✓" else "Waiting for Secrets",
+                                    color = if (isSupabaseConfigured) Color(0xFF16A34A) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = supabaseStatus ?: "Add SUPABASE_URL & SUPABASE_ANON_KEY in AI Studio Secrets after running supabase/schema.sql. Firebase stays live during migration.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                enabled = !isSupabaseBusy,
+                                onClick = onTestSupabaseConnection,
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = 48.dp)
+                                    .testTag("supabase_test_connection_btn")
+                            ) {
+                                Text(
+                                    text = if (isSupabaseBusy) "Checking..." else "Test Connection",
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Button(
+                                enabled = isSupabaseConfigured && !isSupabaseBusy,
+                                onClick = onSyncSupabaseSnapshot,
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = 48.dp)
+                                    .testTag("supabase_sync_data_btn")
+                            ) {
+                                Text(
+                                    text = "Sync Data",
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                val json = onBuildSupabaseExportJson()
+                                clipboardManager.setText(AnnotatedString(json))
+                                copiedMigrationNotice = true
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .testTag("supabase_copy_json_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.ContentCopy,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (copiedMigrationNotice) {
+                                    "Copied Supabase JSON Snapshot ✓"
+                                } else {
+                                    "Copy Full Migration Snapshot JSON"
+                                },
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+
+            item {
                 Text(
                     text = "Open Management Portals",
                     style = MaterialTheme.typography.titleSmall,
@@ -380,6 +580,16 @@ fun OwnerMonetizationAndPlaySheet(
 
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PortalLinkButton(
+                        title = "Supabase Dashboard & SQL Editor",
+                        subtitle = "Run supabase/schema.sql, enable Google Auth & copy URL + anon key",
+                        onClick = { runCatching { uriHandler.openUri("https://supabase.com/dashboard") } }
+                    )
+                    PortalLinkButton(
+                        title = "Gamezop Business Portal",
+                        subtitle = "Copy your Gamezop Publisher ID or https:// Arcade Portal URL",
+                        onClick = { runCatching { uriHandler.openUri("https://business.gamezop.com") } }
+                    )
                     PortalLinkButton(
                         title = "Monetag Publisher Dashboard",
                         subtitle = "Create Direct SmartLink & Web MultiTag / Meta token",

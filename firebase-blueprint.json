@@ -414,6 +414,10 @@
         "partnerPromoTitle": { "type": "string" },
         "partnerPromoSubtitle": { "type": "string" },
         "partnerPromoCta": { "type": "string" },
+        "gamezopEnabled": { "type": "boolean" },
+        "gamezopPortalUrl": { "type": "string" },
+        "gamezopPublisherId": { "type": "string" },
+        "gamezopBannerTitle": { "type": "string" },
         "updatedByEmail": { "type": "string" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Must be FieldValue.serverTimestamp()" }
       },
