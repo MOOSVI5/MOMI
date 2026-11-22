@@ -34,7 +34,8 @@ import {
   verificationTierForPerks,
   WEB_APP_URL,
   WEB_PERK_CATALOG,
-  DEFAULT_MONETIZATION_CONFIG
+  DEFAULT_MONETIZATION_CONFIG,
+  SUPABASE_WEB_CONFIG
 } from '../firebase-config.js';
 import {
   SUPABASE_SCHEMA_TABLES,
@@ -273,4 +274,6 @@ test('Supabase web auth headers omit Authorization Bearer for sb_publishable_ ke
   assert.equal(health.connected, true);
   assert.equal(seenHeaders.apikey, 'sb_publishable_LbrQBb_example_123456');
   assert.equal('Authorization' in seenHeaders, false);
+  assert.equal(isSupabaseClientReady(SUPABASE_WEB_CONFIG), true);
+  assert.equal(normalizeSupabaseUrl(SUPABASE_WEB_CONFIG.url), 'https://qotuvugkapaspowhbsbf.supabase.co');
 });

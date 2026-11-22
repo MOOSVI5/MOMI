@@ -13,8 +13,8 @@ export const MAX_IMAGE_BASE64_CHARS = 650000;
 
 // Populate url & anonKey after running supabase/schema.sql (NEVER place service_role / sb_secret_ keys here)
 export const SUPABASE_WEB_CONFIG = {
-  url: '',
-  anonKey: ''
+  url: 'https://qotuvugkapaspowhbsbf.supabase.co',
+  anonKey: 'sb_publishable_LbrQBbU_4qH18qjopmNwIg_ALsMhlln'
 };
 
 export const PRESET_IMAGE_MAP = {
