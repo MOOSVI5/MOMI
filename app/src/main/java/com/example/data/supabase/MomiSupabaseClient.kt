@@ -544,7 +544,9 @@ class MomiSupabaseClient(
 
         runCatching {
             httpClient.newCall(request).execute().use { response ->
+                val bodyString = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
+                    android.util.Log.e("MomiSupabase", "Upsert into $table failed HTTP ${response.code}: $bodyString")
                     error("Upsert into $table failed (HTTP ${response.code})")
                 }
                 rows.size
