@@ -492,7 +492,7 @@ ALTER TABLE public.app_config ENABLE ROW LEVEL SECURITY;
 -- Profiles
 DROP POLICY IF EXISTS profiles_select_auth ON public.profiles;
 CREATE POLICY profiles_select_auth ON public.profiles
-  FOR SELECT TO authenticated USING (true);
+  FOR SELECT TO anon, authenticated USING (true);
 
 DROP POLICY IF EXISTS profiles_insert_owner ON public.profiles;
 CREATE POLICY profiles_insert_owner ON public.profiles
@@ -520,7 +520,7 @@ CREATE POLICY profiles_update_owner_or_admin ON public.profiles
 -- Posts
 DROP POLICY IF EXISTS posts_select_auth ON public.posts;
 CREATE POLICY posts_select_auth ON public.posts
-  FOR SELECT TO authenticated USING (true);
+  FOR SELECT TO anon, authenticated USING (true);
 
 DROP POLICY IF EXISTS posts_insert_owner ON public.posts;
 CREATE POLICY posts_insert_owner ON public.posts
@@ -555,7 +555,7 @@ CREATE POLICY posts_delete_owner_or_staff ON public.posts
 
 -- Comments
 DROP POLICY IF EXISTS comments_select_auth ON public.comments;
-CREATE POLICY comments_select_auth ON public.comments FOR SELECT TO authenticated USING (true);
+CREATE POLICY comments_select_auth ON public.comments FOR SELECT TO anon, authenticated USING (true);
 DROP POLICY IF EXISTS comments_insert_owner ON public.comments;
 CREATE POLICY comments_insert_owner ON public.comments FOR INSERT TO authenticated WITH CHECK (user_id = auth.uid()::text);
 DROP POLICY IF EXISTS comments_delete_owner_or_staff ON public.comments;
@@ -565,7 +565,7 @@ CREATE POLICY comments_delete_owner_or_staff ON public.comments
 
 -- Stories
 DROP POLICY IF EXISTS stories_select_auth ON public.stories;
-CREATE POLICY stories_select_auth ON public.stories FOR SELECT TO authenticated USING (true);
+CREATE POLICY stories_select_auth ON public.stories FOR SELECT TO anon, authenticated USING (true);
 DROP POLICY IF EXISTS stories_insert_owner ON public.stories;
 CREATE POLICY stories_insert_owner ON public.stories FOR INSERT TO authenticated WITH CHECK (user_id = auth.uid()::text);
 DROP POLICY IF EXISTS stories_delete_owner_or_admin ON public.stories;
@@ -627,7 +627,7 @@ CREATE POLICY live_comments_insert_auth ON public.live_comments FOR INSERT TO au
 
 -- Marketplace Merchants, Products & Private Orders
 DROP POLICY IF EXISTS merchants_select_auth ON public.merchants;
-CREATE POLICY merchants_select_auth ON public.merchants FOR SELECT TO authenticated USING (true);
+CREATE POLICY merchants_select_auth ON public.merchants FOR SELECT TO anon, authenticated USING (true);
 DROP POLICY IF EXISTS merchants_insert_owner ON public.merchants;
 CREATE POLICY merchants_insert_owner ON public.merchants FOR INSERT TO authenticated WITH CHECK (user_id = auth.uid()::text AND (is_verified = false OR public.is_momi_admin()));
 DROP POLICY IF EXISTS merchants_update_owner_or_admin ON public.merchants;
@@ -637,7 +637,7 @@ CREATE POLICY merchants_update_owner_or_admin ON public.merchants
   WITH CHECK (public.is_momi_admin() OR (user_id = auth.uid()::text AND is_verified = (SELECT m.is_verified FROM public.merchants m WHERE m.user_id = auth.uid()::text)));
 
 DROP POLICY IF EXISTS products_select_auth ON public.market_products;
-CREATE POLICY products_select_auth ON public.market_products FOR SELECT TO authenticated USING (true);
+CREATE POLICY products_select_auth ON public.market_products FOR SELECT TO anon, authenticated USING (true);
 DROP POLICY IF EXISTS products_insert_seller ON public.market_products;
 CREATE POLICY products_insert_seller ON public.market_products FOR INSERT TO authenticated WITH CHECK (seller_uid = auth.uid()::text);
 DROP POLICY IF EXISTS products_update_seller_or_editor ON public.market_products;

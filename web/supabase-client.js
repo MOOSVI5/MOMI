@@ -340,3 +340,30 @@ export async function upsertSupabaseTable(cfg = SUPABASE_WEB_CONFIG, table, rows
   }
   return rows.length;
 }
+
+export async function fetchSupabaseFeed(cfg = SUPABASE_WEB_CONFIG, fetchImpl = globalThis.fetch) {
+  const baseUrl = normalizeSupabaseUrl(cfg?.url);
+  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) return null;
+  const anonKey = String(cfg.anonKey).trim();
+  const headers = {
+    ...buildSupabaseAuthHeaders(anonKey),
+    Accept: 'application/json'
+  };
+  try {
+    const [postsRes, storiesRes, profilesRes, productsRes] = await Promise.all([
+      fetchImpl(`${baseUrl}/rest/v1/posts?select=*&order=created_at.desc&limit=50`, { headers }),
+      fetchImpl(`${baseUrl}/rest/v1/stories?select=*&order=created_at.desc&limit=20`, { headers }),
+      fetchImpl(`${baseUrl}/rest/v1/profiles?select=*&limit=50`, { headers }),
+      fetchImpl(`${baseUrl}/rest/v1/market_products?select=*&order=created_at.desc&limit=30`, { headers })
+    ]);
+    if (!postsRes.ok) return null;
+    const posts = await postsRes.json();
+    const stories = storiesRes.ok ? await storiesRes.json() : [];
+    const profiles = profilesRes.ok ? await profilesRes.json() : [];
+    const products = productsRes.ok ? await productsRes.json() : [];
+    return { posts, stories, profiles, products };
+  } catch {
+    return null;
+  }
+}
+
