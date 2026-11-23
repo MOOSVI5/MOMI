@@ -9,6 +9,7 @@ import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
 import com.example.R
+import com.example.data.supabase.MomiSupabaseClient
 import com.example.ui.theme.AppearancePrefs
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
@@ -79,6 +80,9 @@ fun attemptAutoSignIn(
             val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
             Firebase.auth.signInWithCredential(authCredential).await()
             AppearancePrefs.setAutoSignInEnabled(context, true)
+            scope.launch {
+                runCatching { MomiSupabaseClient().signInWithGoogleIdToken(googleIdToken) }
+            }
             return true
         }
         return false
@@ -139,6 +143,9 @@ fun onGoogleSignInClicked(
                 val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
                 Firebase.auth.signInWithCredential(authCredential).await()
                 AppearancePrefs.setAutoSignInEnabled(context, true)
+                scope.launch {
+                    runCatching { MomiSupabaseClient().signInWithGoogleIdToken(googleIdToken) }
+                }
                 onAuthSuccess()
             } else {
                 onAuthError("Unexpected credential type returned.")
@@ -167,6 +174,7 @@ fun signOut(
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to clear credential state: ${e.message}")
             } finally {
+                MomiSupabaseClient.activeSession = null
                 Firebase.auth.signOut()
                 onSignOutComplete()
             }

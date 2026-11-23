@@ -15,6 +15,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URI
 import java.net.URLEncoder
@@ -37,6 +38,14 @@ data class SupabaseAuthSession(
     val refreshToken: String,
     val userId: String,
     val email: String?
+)
+
+data class SupabaseFeedBundle(
+    val profiles: List<UserProfile> = emptyList(),
+    val posts: List<Post> = emptyList(),
+    val stories: List<Story> = emptyList(),
+    val products: List<MarketProduct> = emptyList(),
+    val monetizationConfig: AdMonetizationConfig? = null
 )
 
 object MomiSupabaseSchema {
@@ -502,12 +511,14 @@ class MomiSupabaseClient(
                     require(access.isNotBlank() && userId.isNotBlank()) {
                         "Invalid Supabase auth session response"
                     }
-                    SupabaseAuthSession(
+                    val session = SupabaseAuthSession(
                         accessToken = access,
                         refreshToken = refresh,
                         userId = userId,
                         email = email
                     )
+                    activeSession = session
+                    session
                 }
             }
         }
@@ -547,7 +558,8 @@ class MomiSupabaseClient(
                 val bodyString = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
                     android.util.Log.e("MomiSupabase", "Upsert into $table failed HTTP ${response.code}: $bodyString")
-                    error("Upsert into $table failed (HTTP ${response.code})")
+                    val detail = bodyString.take(120).takeIf { it.isNotBlank() }?.let { " — $it" }.orEmpty()
+                    error("Upsert into $table failed (HTTP ${response.code})$detail")
                 }
                 rows.size
             }
@@ -614,47 +626,279 @@ class MomiSupabaseClient(
         if (!health.connected) {
             return Result.failure(IllegalStateException(health.message))
         }
+        val resolvedToken = accessToken?.takeIf { it.isNotBlank() } ?: activeSession?.accessToken
         var totalUpserted = 0
         val errors = mutableListOf<String>()
-        if (profiles.isNotEmpty()) {
-            upsertRows("profiles", profiles.map(MomiSupabaseSchema::toProfileRow), accessToken = accessToken, onConflict = "user_id")
+
+        val seenUids = mutableSetOf<String>()
+        val seenUsernames = mutableSetOf<String>()
+        val uniqueProfiles = profiles.mapNotNull { p ->
+            val row = MomiSupabaseSchema.toProfileRow(p)
+            val uid = (row["user_id"] as? String).orEmpty()
+            val uname = (row["username"] as? String).orEmpty().lowercase(Locale.US)
+            if (uid.isNotBlank() && uname.isNotBlank() && seenUids.add(uid) && seenUsernames.add(uname)) {
+                row
+            } else {
+                null
+            }
+        }
+        if (uniqueProfiles.isNotEmpty()) {
+            upsertRows("profiles", uniqueProfiles, accessToken = resolvedToken, onConflict = "user_id")
                 .onSuccess { totalUpserted += it }
                 .onFailure { errors.add("profiles: ${it.localizedMessage}") }
         }
-        val realPosts = posts.filterNot { it.id.startsWith("showcase_") }
+        val knownUids = uniqueProfiles.mapNotNull { it["user_id"] as? String }.toSet()
+        val realPosts = posts.filter { !it.id.startsWith("showcase_") && (knownUids.isEmpty() || it.userId in knownUids) }
         if (realPosts.isNotEmpty()) {
-            upsertRows("posts", realPosts.map(MomiSupabaseSchema::toPostRow), accessToken = accessToken, onConflict = "id")
+            upsertRows("posts", realPosts.map(MomiSupabaseSchema::toPostRow), accessToken = resolvedToken, onConflict = "id")
                 .onSuccess { totalUpserted += it }
                 .onFailure { errors.add("posts: ${it.localizedMessage}") }
         }
-        val realStories = stories.filterNot { it.id.startsWith("showcase_") }
+        val realStories = stories.filter { !it.id.startsWith("showcase_") && (knownUids.isEmpty() || it.userId in knownUids) }
         if (realStories.isNotEmpty()) {
-            upsertRows("stories", realStories.map(MomiSupabaseSchema::toStoryRow), accessToken = accessToken, onConflict = "id")
+            upsertRows("stories", realStories.map(MomiSupabaseSchema::toStoryRow), accessToken = resolvedToken, onConflict = "id")
                 .onSuccess { totalUpserted += it }
                 .onFailure { errors.add("stories: ${it.localizedMessage}") }
         }
-        if (merchants.isNotEmpty()) {
-            upsertRows("merchants", merchants.map(MomiSupabaseSchema::toMerchantRow), accessToken = accessToken, onConflict = "user_id")
+        val validMerchants = merchants.filter { knownUids.isEmpty() || it.userId.ifBlank { it.id } in knownUids }
+        if (validMerchants.isNotEmpty()) {
+            upsertRows("merchants", validMerchants.map(MomiSupabaseSchema::toMerchantRow), accessToken = resolvedToken, onConflict = "user_id")
                 .onSuccess { totalUpserted += it }
                 .onFailure { errors.add("merchants: ${it.localizedMessage}") }
         }
-        if (products.isNotEmpty()) {
-            upsertRows("market_products", products.map(MomiSupabaseSchema::toMarketProductRow), accessToken = accessToken, onConflict = "id")
+        val validProducts = products.filter { knownUids.isEmpty() || it.sellerUid in knownUids }
+        if (validProducts.isNotEmpty()) {
+            upsertRows("market_products", validProducts.map(MomiSupabaseSchema::toMarketProductRow), accessToken = resolvedToken, onConflict = "id")
                 .onSuccess { totalUpserted += it }
                 .onFailure { errors.add("market_products: ${it.localizedMessage}") }
         }
-        upsertRows("app_config", listOf(MomiSupabaseSchema::toAppConfigRow.invoke(monetizationConfig)), accessToken = accessToken, onConflict = "id")
+        upsertRows("app_config", listOf(MomiSupabaseSchema::toAppConfigRow.invoke(monetizationConfig)), accessToken = resolvedToken, onConflict = "id")
             .onSuccess { totalUpserted += it }
             .onFailure { errors.add("app_config: ${it.localizedMessage}") }
 
         if (errors.isNotEmpty()) {
-            return Result.failure(IllegalStateException("Supabase write blocked (HTTP 401/403/RLS): ${errors.first()}"))
+            return Result.failure(IllegalStateException("Supabase write blocked: ${errors.first()}"))
         }
 
         return Result.success("Synced $totalUpserted records to Supabase (${health.latencyMs} ms)!")
     }
 
+    suspend fun fetchFeedBundle(): Result<SupabaseFeedBundle> = withContext(Dispatchers.IO) {
+        if (!isConfigured()) {
+            return@withContext Result.failure(IllegalStateException("Supabase is not configured yet."))
+        }
+        runCatching {
+            val profilesJson = fetchJsonArray("$baseUrl/rest/v1/profiles?select=*&limit=50")
+            val postsJson = fetchJsonArray("$baseUrl/rest/v1/posts?select=*&order=created_at.desc&limit=30")
+            val storiesJson = fetchJsonArray("$baseUrl/rest/v1/stories?select=*&order=created_at.desc&limit=20")
+            val productsJson = fetchJsonArray("$baseUrl/rest/v1/market_products?select=*&order=created_at.desc&limit=30")
+            val configJson = fetchJsonArray("$baseUrl/rest/v1/app_config?select=*&id=eq.monetization&limit=1")
+
+            SupabaseFeedBundle(
+                profiles = parseProfiles(profilesJson),
+                posts = parsePosts(postsJson),
+                stories = parseStories(storiesJson),
+                products = parseProducts(productsJson),
+                monetizationConfig = parseAppConfig(configJson)
+            )
+        }
+    }
+
+    private fun fetchJsonArray(url: String): JSONArray {
+        val requestBuilder = Request.Builder()
+            .url(url)
+            .header("Accept", "application/json")
+            .get()
+        MomiSupabaseSchema.buildAuthHeaders(anonKey, activeSession?.accessToken).forEach { (k, v) ->
+            requestBuilder.header(k, v)
+        }
+        httpClient.newCall(requestBuilder.build()).execute().use { response ->
+            if (!response.isSuccessful) return JSONArray()
+            val text = response.body?.string().orEmpty()
+            return if (text.trimStart().startsWith("[")) JSONArray(text) else JSONArray()
+        }
+    }
+
+    private fun parseIsoTimestamp(raw: String?): Timestamp? {
+        if (raw.isNullOrBlank()) return null
+        val formats = listOf(
+            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+            "yyyy-MM-dd'T'HH:mm:ssXXX",
+            "yyyy-MM-dd'T'HH:mm:ss'Z'"
+        )
+        for (fmt in formats) {
+            runCatching {
+                val sdf = SimpleDateFormat(fmt, Locale.US)
+                sdf.timeZone = TimeZone.getTimeZone("UTC")
+                val d = sdf.parse(raw) ?: return@runCatching null
+                return Timestamp(d)
+            }
+        }
+        return null
+    }
+
+    private fun JSONObject.optStringList(key: String): List<String> {
+        val arr = optJSONArray(key) ?: return emptyList()
+        return buildList(arr.length()) {
+            for (i in 0 until arr.length()) {
+                val item = arr.optString(i)
+                if (item.isNotBlank()) add(item)
+            }
+        }
+    }
+
+    private fun parseProfiles(arr: JSONArray): List<UserProfile> = buildList {
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val uid = o.optString("user_id")
+            if (uid.isBlank()) continue
+            add(
+                UserProfile(
+                    id = uid,
+                    userId = uid,
+                    username = o.optString("username", "momi.creator"),
+                    displayName = o.optString("display_name", "Momi Creator"),
+                    category = o.optString("category"),
+                    bio = o.optString("bio"),
+                    website = o.optString("website"),
+                    avatarKey = o.optString("avatar_key", "avatar_aria"),
+                    avatarData = o.optString("avatar_data").takeIf { it.isNotBlank() && it != "null" },
+                    followersCount = o.optLong("followers_count", 0L),
+                    followingCount = o.optLong("following_count", 0L),
+                    isVerified = o.optBoolean("is_verified", false),
+                    role = o.optString("role", "USER"),
+                    moderationScopes = o.optStringList("moderation_scopes"),
+                    assignedByEmail = o.optString("assigned_by_email").takeIf { it.isNotBlank() && it != "null" },
+                    partnerConsent = o.optBoolean("partner_consent", false),
+                    createdAt = parseIsoTimestamp(o.optString("created_at"))
+                )
+            )
+        }
+    }
+
+    private fun parsePosts(arr: JSONArray): List<Post> = buildList {
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val id = o.optString("id")
+            if (id.isBlank()) continue
+            add(
+                Post(
+                    id = id,
+                    userId = o.optString("user_id"),
+                    authorUsername = o.optString("author_username", "momi.creator"),
+                    authorDisplayName = o.optString("author_display_name", "Momi Creator"),
+                    authorAvatarKey = o.optString("author_avatar_key", "avatar_aria"),
+                    authorVerified = o.optBoolean("author_verified", false),
+                    location = o.optString("location"),
+                    imageKey = o.optString("image_key", "img_post_coastal"),
+                    imageData = o.optString("image_data").takeIf { it.isNotBlank() && it != "null" },
+                    extraImageDatas = o.optStringList("extra_image_datas"),
+                    mediaType = o.optString("media_type", "IMAGE"),
+                    videoData = o.optString("video_data").takeIf { it.isNotBlank() && it != "null" },
+                    videoDurationMs = o.optLong("video_duration_ms", 0L),
+                    filterTag = o.optString("filter_tag", "NONE"),
+                    aspectRatio = o.optString("aspect_ratio", "1:1"),
+                    taggedUsernames = o.optStringList("tagged_usernames"),
+                    hashtags = o.optStringList("hashtags"),
+                    caption = o.optString("caption"),
+                    likesCount = o.optLong("likes_count", 0L),
+                    viewsCount = o.optLong("views_count", 0L),
+                    commentsCount = o.optLong("comments_count", 0L),
+                    category = o.optString("category", "For You"),
+                    isReel = o.optBoolean("is_reel", false),
+                    audioTitle = o.optString("audio_title"),
+                    audioData = o.optString("audio_data").takeIf { it.isNotBlank() && it != "null" },
+                    isBoosted = o.optBoolean("is_boosted", false),
+                    boostTier = o.optString("boost_tier"),
+                    recommendedLabel = o.optString("recommended_label"),
+                    createdAt = parseIsoTimestamp(o.optString("created_at"))
+                )
+            )
+        }
+    }
+
+    private fun parseStories(arr: JSONArray): List<Story> = buildList {
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val id = o.optString("id")
+            if (id.isBlank()) continue
+            add(
+                Story(
+                    id = id,
+                    userId = o.optString("user_id"),
+                    username = o.optString("username", "momi.creator"),
+                    avatarKey = o.optString("avatar_key", "avatar_aria"),
+                    imageKey = o.optString("image_key", "img_post_coastal"),
+                    imageData = o.optString("image_data").takeIf { it.isNotBlank() && it != "null" },
+                    mediaType = o.optString("media_type", "IMAGE"),
+                    videoData = o.optString("video_data").takeIf { it.isNotBlank() && it != "null" },
+                    videoDurationMs = o.optLong("video_duration_ms", 0L),
+                    audioTitle = o.optString("audio_title"),
+                    audioData = o.optString("audio_data").takeIf { it.isNotBlank() && it != "null" },
+                    caption = o.optString("caption"),
+                    createdAt = parseIsoTimestamp(o.optString("created_at"))
+                )
+            )
+        }
+    }
+
+    private fun parseProducts(arr: JSONArray): List<MarketProduct> = buildList {
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val id = o.optString("id")
+            if (id.isBlank()) continue
+            add(
+                MarketProduct(
+                    id = id,
+                    sellerUid = o.optString("seller_uid"),
+                    sellerUsername = o.optString("seller_username", "momi.seller"),
+                    storeName = o.optString("store_name", "Momi Store"),
+                    title = o.optString("title", "Momi Item"),
+                    description = o.optString("description"),
+                    category = o.optString("category", "Collectibles"),
+                    priceUsd = o.optDouble("price_usd", 0.0),
+                    originalPriceUsd = o.optDouble("original_price_usd", 0.0),
+                    discountPercent = o.optLong("discount_percent", 0L),
+                    freeShipping = o.optBoolean("free_shipping", true),
+                    imageKey = o.optString("image_key", "img_post_coastal"),
+                    imageData = o.optString("image_data").takeIf { it.isNotBlank() && it != "null" },
+                    extraImageDatas = o.optStringList("extra_image_datas"),
+                    videoData = o.optString("video_data").takeIf { it.isNotBlank() && it != "null" },
+                    videoDurationMs = o.optLong("video_duration_ms", 0L),
+                    stockCount = o.optLong("stock_count", 0L),
+                    isFeatured = o.optBoolean("is_featured", false),
+                    createdAt = parseIsoTimestamp(o.optString("created_at"))
+                )
+            )
+        }
+    }
+
+    private fun parseAppConfig(arr: JSONArray): AdMonetizationConfig? {
+        val o = arr.optJSONObject(0) ?: return null
+        return AdMonetizationConfig(
+            admobEnabled = o.optBoolean("admob_enabled", true),
+            admobBannerUnitId = o.optString("admob_banner_unit_id"),
+            admobMrecUnitId = o.optString("admob_mrec_unit_id"),
+            admobInterstitialUnitId = o.optString("admob_interstitial_unit_id"),
+            startIoEnabled = o.optBoolean("start_io_enabled", true),
+            monetagEnabled = o.optBoolean("monetag_enabled", true),
+            monetagDirectLinkUrl = o.optString("monetag_direct_link_url"),
+            monetagWebZoneId = o.optString("monetag_web_zone_id"),
+            monetagWebMetaTag = o.optString("monetag_web_meta_tag"),
+            partnerPromoTitle = o.optString("partner_promo_title"),
+            partnerPromoSubtitle = o.optString("partner_promo_subtitle"),
+            partnerPromoCta = o.optString("partner_promo_cta"),
+            gamezopEnabled = o.optBoolean("gamezop_enabled", false),
+            gamezopPortalUrl = o.optString("gamezop_portal_url"),
+            gamezopPublisherId = o.optString("gamezop_publisher_id"),
+            gamezopBannerTitle = o.optString("gamezop_banner_title")
+        )
+    }
+
     companion object {
+        @Volatile
+        var activeSession: SupabaseAuthSession? = null
+
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private val defaultHttpClient: OkHttpClient by lazy {
             OkHttpClient.Builder()

@@ -315,7 +315,14 @@ export async function checkSupabaseHealth(cfg = SUPABASE_WEB_CONFIG, fetchImpl =
   }
 }
 
-export async function upsertSupabaseTable(cfg = SUPABASE_WEB_CONFIG, table, rows = [], accessToken = '', fetchImpl = globalThis.fetch) {
+export async function upsertSupabaseTable(
+  cfg = SUPABASE_WEB_CONFIG,
+  table,
+  rows = [],
+  accessToken = '',
+  fetchImpl = globalThis.fetch,
+  onConflict = ''
+) {
   const baseUrl = normalizeSupabaseUrl(cfg?.url);
   if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) {
     throw new Error('Supabase URL and anonKey are not configured yet.');
@@ -325,8 +332,9 @@ export async function upsertSupabaseTable(cfg = SUPABASE_WEB_CONFIG, table, rows
   }
   if (!Array.isArray(rows) || rows.length === 0) return 0;
 
+  const conflictQuery = onConflict ? `?on_conflict=${encodeURIComponent(onConflict)}` : '';
   const anonKey = String(cfg.anonKey).trim();
-  const res = await fetchImpl(`${baseUrl}/rest/v1/${table}`, {
+  const res = await fetchImpl(`${baseUrl}/rest/v1/${table}${conflictQuery}`, {
     method: 'POST',
     headers: {
       ...buildSupabaseAuthHeaders(anonKey, accessToken),
@@ -336,9 +344,63 @@ export async function upsertSupabaseTable(cfg = SUPABASE_WEB_CONFIG, table, rows
     body: JSON.stringify(rows)
   });
   if (!res.ok) {
-    throw new Error(`Upsert ${table} failed (HTTP ${res.status})`);
+    let detail = '';
+    try {
+      detail = await res.text();
+    } catch {
+      detail = '';
+    }
+    throw new Error(`Upsert ${table} failed (HTTP ${res.status})${detail ? `: ${detail.slice(0, 140)}` : ''}`);
   }
   return rows.length;
+}
+
+export async function syncBundleToSupabase(
+  cfg = SUPABASE_WEB_CONFIG,
+  bundle,
+  accessToken = '',
+  fetchImpl = globalThis.fetch
+) {
+  const tables = bundle?.tables || {};
+  let totalSynced = 0;
+
+  // Deduplicate profiles by user_id and username so PostgreSQL UNIQUE constraint never aborts batch
+  const seenUids = new Set();
+  const seenUsernames = new Set();
+  const safeProfiles = (tables.profiles || []).filter((p) => {
+    const uid = String(p?.user_id || '').trim();
+    const uname = String(p?.username || '').trim().toLowerCase();
+    if (!uid || !uname || seenUids.has(uid) || seenUsernames.has(uname)) return false;
+    seenUids.add(uid);
+    seenUsernames.add(uname);
+    return true;
+  });
+
+  if (safeProfiles.length > 0) {
+    totalSynced += await upsertSupabaseTable(cfg, 'profiles', safeProfiles, accessToken, fetchImpl, 'user_id');
+  }
+
+  const knownUids = new Set(safeProfiles.map((p) => p.user_id));
+  const safePosts = (tables.posts || []).filter((p) => p?.id && knownUids.has(p.user_id));
+  if (safePosts.length > 0) {
+    totalSynced += await upsertSupabaseTable(cfg, 'posts', safePosts, accessToken, fetchImpl, 'id');
+  }
+
+  const safeStories = (tables.stories || []).filter((s) => s?.id && knownUids.has(s.user_id));
+  if (safeStories.length > 0) {
+    totalSynced += await upsertSupabaseTable(cfg, 'stories', safeStories, accessToken, fetchImpl, 'id');
+  }
+
+  const safeProducts = (tables.market_products || []).filter((p) => p?.id && knownUids.has(p.seller_uid));
+  if (safeProducts.length > 0) {
+    totalSynced += await upsertSupabaseTable(cfg, 'market_products', safeProducts, accessToken, fetchImpl, 'id');
+  }
+
+  if (Array.isArray(tables.app_config) && tables.app_config.length > 0) {
+    totalSynced += await upsertSupabaseTable(cfg, 'app_config', tables.app_config, accessToken, fetchImpl, 'id');
+  }
+
+  return totalSynced;
 }
 
 export async function fetchSupabaseFeed(cfg = SUPABASE_WEB_CONFIG, fetchImpl = globalThis.fetch) {
@@ -350,18 +412,20 @@ export async function fetchSupabaseFeed(cfg = SUPABASE_WEB_CONFIG, fetchImpl = g
     Accept: 'application/json'
   };
   try {
-    const [postsRes, storiesRes, profilesRes, productsRes] = await Promise.all([
+    const [postsRes, storiesRes, profilesRes, productsRes, configRes] = await Promise.all([
       fetchImpl(`${baseUrl}/rest/v1/posts?select=*&order=created_at.desc&limit=50`, { headers }),
       fetchImpl(`${baseUrl}/rest/v1/stories?select=*&order=created_at.desc&limit=20`, { headers }),
       fetchImpl(`${baseUrl}/rest/v1/profiles?select=*&limit=50`, { headers }),
-      fetchImpl(`${baseUrl}/rest/v1/market_products?select=*&order=created_at.desc&limit=30`, { headers })
+      fetchImpl(`${baseUrl}/rest/v1/market_products?select=*&order=created_at.desc&limit=30`, { headers }),
+      fetchImpl(`${baseUrl}/rest/v1/app_config?select=*&id=eq.monetization&limit=1`, { headers })
     ]);
-    if (!postsRes.ok) return null;
-    const posts = await postsRes.json();
+    if (!postsRes.ok && !profilesRes.ok) return null;
+    const posts = postsRes.ok ? await postsRes.json() : [];
     const stories = storiesRes.ok ? await storiesRes.json() : [];
     const profiles = profilesRes.ok ? await profilesRes.json() : [];
     const products = productsRes.ok ? await productsRes.json() : [];
-    return { posts, stories, profiles, products };
+    const configs = configRes.ok ? await configRes.json() : [];
+    return { posts, stories, profiles, products, appConfig: configs[0] || null };
   } catch {
     return null;
   }
@@ -401,6 +465,70 @@ export function mapSupabasePostToWeb(row = {}) {
     sponsorLabel: String(row.sponsor_label || ''),
     directLinkUrl: String(row.direct_link_url || ''),
     createdAt: row.created_at ? { seconds: Math.floor(new Date(row.created_at).getTime() / 1000) } : null
+  };
+}
+
+export function mapSupabaseStoryToWeb(row = {}) {
+  return {
+    id: String(row.id || ''),
+    userId: String(row.user_id || ''),
+    username: String(row.username || 'momi.creator'),
+    avatarKey: String(row.avatar_key || 'avatar_aria'),
+    imageKey: String(row.image_key || 'img_post_coastal'),
+    imageData: row.image_data || null,
+    mediaType: String(row.media_type || 'IMAGE'),
+    videoData: row.video_data || null,
+    videoDurationMs: Number(row.video_duration_ms || 0),
+    audioTitle: String(row.audio_title || ''),
+    audioData: row.audio_data || null,
+    caption: String(row.caption || ''),
+    createdAt: row.created_at ? { seconds: Math.floor(new Date(row.created_at).getTime() / 1000) } : null
+  };
+}
+
+export function mapSupabaseProductToWeb(row = {}) {
+  return {
+    id: String(row.id || ''),
+    sellerUid: String(row.seller_uid || ''),
+    sellerUsername: String(row.seller_username || 'momi.seller'),
+    storeName: String(row.store_name || 'Momi Store'),
+    title: String(row.title || 'Momi Item'),
+    description: String(row.description || ''),
+    category: String(row.category || 'Collectibles'),
+    priceUsd: Number(row.price_usd || 0),
+    originalPriceUsd: Number(row.original_price_usd || 0),
+    discountPercent: Number(row.discount_percent || 0),
+    freeShipping: Boolean(row.free_shipping ?? true),
+    imageKey: String(row.image_key || 'img_post_coastal'),
+    imageData: row.image_data || null,
+    extraImageDatas: Array.isArray(row.extra_image_datas) ? row.extra_image_datas : [],
+    videoData: row.video_data || null,
+    videoDurationMs: Number(row.video_duration_ms || 0),
+    stockCount: Number(row.stock_count || 0),
+    isFeatured: Boolean(row.is_featured),
+    createdAt: row.created_at ? { seconds: Math.floor(new Date(row.created_at).getTime() / 1000) } : null
+  };
+}
+
+export function mapSupabaseConfigToWeb(row = {}) {
+  return {
+    ...DEFAULT_MONETIZATION_CONFIG,
+    admobEnabled: Boolean(row.admob_enabled ?? DEFAULT_MONETIZATION_CONFIG.admobEnabled),
+    admobBannerUnitId: String(row.admob_banner_unit_id || ''),
+    admobMrecUnitId: String(row.admob_mrec_unit_id || ''),
+    admobInterstitialUnitId: String(row.admob_interstitial_unit_id || ''),
+    startIoEnabled: Boolean(row.start_io_enabled ?? DEFAULT_MONETIZATION_CONFIG.startIoEnabled),
+    monetagEnabled: Boolean(row.monetag_enabled ?? DEFAULT_MONETIZATION_CONFIG.monetagEnabled),
+    monetagDirectLinkUrl: String(row.monetag_direct_link_url || ''),
+    monetagWebZoneId: String(row.monetag_web_zone_id || ''),
+    monetagWebMetaTag: String(row.monetag_web_meta_tag || ''),
+    partnerPromoTitle: String(row.partner_promo_title || DEFAULT_MONETIZATION_CONFIG.partnerPromoTitle),
+    partnerPromoSubtitle: String(row.partner_promo_subtitle || DEFAULT_MONETIZATION_CONFIG.partnerPromoSubtitle),
+    partnerPromoCta: String(row.partner_promo_cta || DEFAULT_MONETIZATION_CONFIG.partnerPromoCta),
+    gamezopEnabled: Boolean(row.gamezop_enabled ?? false),
+    gamezopPortalUrl: String(row.gamezop_portal_url || ''),
+    gamezopPublisherId: String(row.gamezop_publisher_id || ''),
+    gamezopBannerTitle: String(row.gamezop_banner_title || DEFAULT_MONETIZATION_CONFIG.gamezopBannerTitle)
   };
 }
 

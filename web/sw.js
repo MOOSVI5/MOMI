@@ -1,4 +1,4 @@
-const CACHE_NAME = 'momi-web-v3';
+const CACHE_NAME = 'momi-web-v4';
 const SHELL_ASSETS = [
   './',
   './index.html',

@@ -205,6 +205,9 @@ class MomiViewModel(
             }
         }
         viewModelScope.launch {
+            loadFallbackFromSupabaseIfNeeded()
+        }
+        viewModelScope.launch {
             walletRepository.observeUnclaimedGifts(currentUserId)
                 .catch { error ->
                     val root = unwrapOrRethrowCancellation(error)
@@ -239,6 +242,7 @@ class MomiViewModel(
             Log.w(TAG, "Error observing $label", root)
             if (isQuotaExceeded(root)) {
                 quotaCooldownUntilMs = System.currentTimeMillis() + QUOTA_RETRY_COOLDOWN_MS
+                viewModelScope.launch { loadFallbackFromSupabaseIfNeeded(force = true) }
                 if (surfaceQuotaError && !hasNotifiedQuotaError) {
                     hasNotifiedQuotaError = true
                     _statusNotice.value = QUOTA_FRIENDLY_MESSAGE
@@ -478,6 +482,7 @@ class MomiViewModel(
             val fallbackMsg = unwrapErrorMessage(root, "Failed to observe posts")
             if (isQuotaExceeded(root)) {
                 quotaCooldownUntilMs = System.currentTimeMillis() + QUOTA_RETRY_COOLDOWN_MS
+                viewModelScope.launch { loadFallbackFromSupabaseIfNeeded(force = true) }
                 if (!hasNotifiedQuotaError) {
                     hasNotifiedQuotaError = true
                     _statusNotice.value = QUOTA_FRIENDLY_MESSAGE
@@ -2127,6 +2132,35 @@ class MomiViewModel(
             monetizationConfig = cachedMonetizationConfig.value
         )
 
+    private var isSupabaseFallbackInFlight = false
+
+    private suspend fun loadFallbackFromSupabaseIfNeeded(force: Boolean = false) {
+        if (!supabaseClient.isConfigured() || isSupabaseFallbackInFlight) return
+        if (!force && cachedRawPosts.value.isNotEmpty() && cachedProfiles.value.isNotEmpty()) return
+        isSupabaseFallbackInFlight = true
+        try {
+            supabaseClient.fetchFeedBundle().onSuccess { bundle ->
+                if (bundle.profiles.isNotEmpty() && (force || cachedProfiles.value.isEmpty())) {
+                    cachedProfiles.value = bundle.profiles
+                }
+                if (bundle.posts.isNotEmpty() && (force || cachedRawPosts.value.isEmpty())) {
+                    cachedRawPosts.value = bundle.posts
+                }
+                if (bundle.stories.isNotEmpty() && (force || cachedStories.value.isEmpty())) {
+                    cachedStories.value = bundle.stories
+                }
+                if (bundle.products.isNotEmpty() && (force || cachedProducts.value.isEmpty())) {
+                    cachedProducts.value = bundle.products
+                }
+                bundle.monetizationConfig?.let { cfg ->
+                    cachedMonetizationConfig.value = cfg
+                }
+            }
+        } finally {
+            isSupabaseFallbackInFlight = false
+        }
+    }
+
     fun syncLiveSnapshotToSupabase() {
         if (!isOwnerAccount || !isAdminModeActive.value) {
             _errorMessage.value = "Switch to Admin View to manage Supabase migration."
@@ -2141,7 +2175,8 @@ class MomiViewModel(
                 stories = cachedStories.value,
                 merchants = cachedMerchants.value,
                 products = cachedProducts.value,
-                monetizationConfig = cachedMonetizationConfig.value
+                monetizationConfig = cachedMonetizationConfig.value,
+                accessToken = MomiSupabaseClient.activeSession?.accessToken
             ).onSuccess { msg ->
                 _supabaseStatus.value = msg
                 _statusNotice.value = msg

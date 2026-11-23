@@ -498,9 +498,12 @@ DROP POLICY IF EXISTS profiles_insert_owner ON public.profiles;
 CREATE POLICY profiles_insert_owner ON public.profiles
   FOR INSERT TO authenticated
   WITH CHECK (
-    user_id = auth.uid()::text
-    AND (is_verified = false OR public.is_momi_admin())
-    AND (role = 'USER' OR public.is_momi_admin())
+    public.is_momi_admin()
+    OR (
+      user_id = auth.uid()::text
+      AND (is_verified = false)
+      AND (role = 'USER')
+    )
   );
 
 DROP POLICY IF EXISTS profiles_update_owner_or_admin ON public.profiles;
@@ -526,8 +529,11 @@ DROP POLICY IF EXISTS posts_insert_owner ON public.posts;
 CREATE POLICY posts_insert_owner ON public.posts
   FOR INSERT TO authenticated
   WITH CHECK (
-    user_id = auth.uid()::text
-    AND (is_boosted = false OR public.is_momi_admin())
+    public.is_momi_admin()
+    OR (
+      user_id = auth.uid()::text
+      AND is_boosted = false
+    )
   );
 
 DROP POLICY IF EXISTS posts_update_owner_or_admin ON public.posts;
@@ -567,7 +573,7 @@ CREATE POLICY comments_delete_owner_or_staff ON public.comments
 DROP POLICY IF EXISTS stories_select_auth ON public.stories;
 CREATE POLICY stories_select_auth ON public.stories FOR SELECT TO anon, authenticated USING (true);
 DROP POLICY IF EXISTS stories_insert_owner ON public.stories;
-CREATE POLICY stories_insert_owner ON public.stories FOR INSERT TO authenticated WITH CHECK (user_id = auth.uid()::text);
+CREATE POLICY stories_insert_owner ON public.stories FOR INSERT TO authenticated WITH CHECK (user_id = auth.uid()::text OR public.is_momi_admin());
 DROP POLICY IF EXISTS stories_delete_owner_or_admin ON public.stories;
 CREATE POLICY stories_delete_owner_or_admin ON public.stories FOR DELETE TO authenticated USING (user_id = auth.uid()::text OR public.is_momi_admin());
 
@@ -629,7 +635,7 @@ CREATE POLICY live_comments_insert_auth ON public.live_comments FOR INSERT TO au
 DROP POLICY IF EXISTS merchants_select_auth ON public.merchants;
 CREATE POLICY merchants_select_auth ON public.merchants FOR SELECT TO anon, authenticated USING (true);
 DROP POLICY IF EXISTS merchants_insert_owner ON public.merchants;
-CREATE POLICY merchants_insert_owner ON public.merchants FOR INSERT TO authenticated WITH CHECK (user_id = auth.uid()::text AND (is_verified = false OR public.is_momi_admin()));
+CREATE POLICY merchants_insert_owner ON public.merchants FOR INSERT TO authenticated WITH CHECK (public.is_momi_admin() OR (user_id = auth.uid()::text AND is_verified = false));
 DROP POLICY IF EXISTS merchants_update_owner_or_admin ON public.merchants;
 CREATE POLICY merchants_update_owner_or_admin ON public.merchants
   FOR UPDATE TO authenticated
@@ -639,7 +645,7 @@ CREATE POLICY merchants_update_owner_or_admin ON public.merchants
 DROP POLICY IF EXISTS products_select_auth ON public.market_products;
 CREATE POLICY products_select_auth ON public.market_products FOR SELECT TO anon, authenticated USING (true);
 DROP POLICY IF EXISTS products_insert_seller ON public.market_products;
-CREATE POLICY products_insert_seller ON public.market_products FOR INSERT TO authenticated WITH CHECK (seller_uid = auth.uid()::text);
+CREATE POLICY products_insert_seller ON public.market_products FOR INSERT TO authenticated WITH CHECK (seller_uid = auth.uid()::text OR public.is_momi_admin());
 DROP POLICY IF EXISTS products_update_seller_or_editor ON public.market_products;
 CREATE POLICY products_update_seller_or_editor ON public.market_products
   FOR UPDATE TO authenticated

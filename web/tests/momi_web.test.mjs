@@ -44,7 +44,13 @@ import {
   isSafeSupabaseAnonKey,
   isSupabaseClientReady,
   mapFirestoreSnapshotToSupabaseBundle,
-  normalizeSupabaseUrl
+  mapSupabaseConfigToWeb,
+  mapSupabasePostToWeb,
+  mapSupabaseProductToWeb,
+  mapSupabaseProfileToWeb,
+  mapSupabaseStoryToWeb,
+  normalizeSupabaseUrl,
+  syncBundleToSupabase
 } from '../supabase-client.js';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
@@ -168,7 +174,7 @@ test('starter showcase personas and Firestore Web sync resilience are configured
   assert.ok(appJs.includes('browserLocalPersistence'));
 
   const swJs = fs.readFileSync(path.join(REPO_ROOT, 'web', 'sw.js'), 'utf8');
-  assert.ok(swJs.includes('momi-web-v3'));
+  assert.ok(swJs.includes('momi-web-v4'));
 });
 
 test('monetization config defaults, URL sanitization, boost sorting, and web perks align with Firestore rules', () => {
@@ -278,4 +284,46 @@ test('Supabase web auth headers omit Authorization Bearer for sb_publishable_ ke
   assert.equal('Authorization' in seenHeaders, false);
   assert.equal(isSupabaseClientReady(SUPABASE_WEB_CONFIG), true);
   assert.equal(normalizeSupabaseUrl(SUPABASE_WEB_CONFIG.url), 'https://qotuvugkapaspowhbsbf.supabase.co');
+});
+
+test('syncBundleToSupabase deduplicates usernames, orders profiles before child tables, and mappers hydrate cleanly', async () => {
+  const enableSyncSql = fs.readFileSync(path.join(REPO_ROOT, 'supabase', 'enable_sync.sql'), 'utf8');
+  assert.equal(enableSyncSql.includes('CREATE POLICY IF NOT EXISTS'), false);
+  assert.ok(enableSyncSql.includes('DROP POLICY IF EXISTS'));
+
+  const bundle = mapFirestoreSnapshotToSupabaseBundle({
+    creators: [
+      { userId: 'u1', username: 'ali.studio', displayName: 'Ali' },
+      { userId: 'u2', username: 'ALI.STUDIO', displayName: 'Duplicate Username' }
+    ],
+    posts: [
+      { id: 'p1', userId: 'u1', authorUsername: 'ali.studio', authorDisplayName: 'Ali', caption: 'Hi' },
+      { id: 'p_orphan', userId: 'u_missing', authorUsername: 'ghost', authorDisplayName: 'Ghost', caption: 'Skip' }
+    ],
+    stories: [{ id: 's1', userId: 'u1', username: 'ali.studio', caption: 'Story' }],
+    monetizationConfig: { ...DEFAULT_MONETIZATION_CONFIG, gamezopEnabled: true, gamezopPublisherId: '9012' }
+  });
+
+  const calls = [];
+  const total = await syncBundleToSupabase(
+    { url: 'https://qotuvugkapaspowhbsbf.supabase.co', anonKey: 'sb_publishable_LbrQBb_example_123456' },
+    bundle,
+    '',
+    async (url, init) => {
+      calls.push({ url, body: JSON.parse(init.body) });
+      return { ok: true, status: 201 };
+    }
+  );
+
+  assert.equal(total, 4);
+  assert.ok(calls[0].url.includes('/rest/v1/profiles?on_conflict=user_id'));
+  assert.equal(calls[0].body.length, 1);
+  assert.ok(calls[1].url.includes('/rest/v1/posts?on_conflict=id'));
+  assert.equal(calls[1].body.length, 1);
+
+  assert.equal(mapSupabasePostToWeb(bundle.tables.posts[0]).caption, 'Hi');
+  assert.equal(mapSupabaseStoryToWeb(bundle.tables.stories[0]).caption, 'Story');
+  assert.equal(mapSupabaseProfileToWeb(bundle.tables.profiles[0]).username, 'ali.studio');
+  assert.equal(mapSupabaseConfigToWeb(bundle.tables.app_config[0]).gamezopPublisherId, '9012');
+  assert.equal(mapSupabaseProductToWeb({ id: 'pr1', seller_uid: 'u1', price_usd: 25 }).priceUsd, 25);
 });

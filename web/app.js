@@ -75,8 +75,12 @@ import {
   fetchSupabaseFeed,
   isSupabaseClientReady,
   mapFirestoreSnapshotToSupabaseBundle,
+  mapSupabaseConfigToWeb,
   mapSupabasePostToWeb,
-  mapSupabaseProfileToWeb
+  mapSupabaseProductToWeb,
+  mapSupabaseProfileToWeb,
+  mapSupabaseStoryToWeb,
+  syncBundleToSupabase
 } from './supabase-client.js';
 import {
   assembleVideoChunksToObjectUrl,
@@ -431,8 +435,18 @@ async function fallbackLoadFromSupabase() {
     const feed = await fetchSupabaseFeed(SUPABASE_WEB_CONFIG);
     if (feed) {
       if (Array.isArray(feed.posts) && feed.posts.length > 0 && state.posts.length === 0) {
-        state.posts = feed.posts.map(mapSupabasePostToWeb);
+        state.posts = sortFeedWithBoostPriority(feed.posts.map(mapSupabasePostToWeb));
         state.isLoadingFeed = false;
+      }
+      if (Array.isArray(feed.stories) && feed.stories.length > 0 && state.stories.length === 0) {
+        state.stories = feed.stories.map(mapSupabaseStoryToWeb);
+      }
+      if (Array.isArray(feed.products) && feed.products.length > 0 && state.products.length === 0) {
+        state.products = feed.products.map(mapSupabaseProductToWeb);
+      }
+      if (feed.appConfig && !state.monetizationConfig) {
+        state.monetizationConfig = mapSupabaseConfigToWeb(feed.appConfig);
+        syncMonetagWebIntegration(state.monetizationConfig);
       }
       if (Array.isArray(feed.profiles) && feed.profiles.length > 0) {
         const mappedCreators = feed.profiles.map(mapSupabaseProfileToWeb);
@@ -449,6 +463,7 @@ async function fallbackLoadFromSupabase() {
           }
         }
       }
+      state.isLoadingFeed = false;
       renderAll();
     }
   } catch (err) {
@@ -511,6 +526,7 @@ onAuthStateChanged(auth, (user) => {
   mainShell.classList.remove('hidden');
   renderAll();
   startRealtimeSync(user.uid);
+  fallbackLoadFromSupabase();
   ensureUserSeeded(user).catch((err) => handleSyncError(err, 'Account initialization'));
 });
 
@@ -2243,13 +2259,16 @@ function renderProfile() {
               </div>
               <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
                 <button type="button" class="btn-outline btn-sm" id="testSupabaseWebBtn" ${state.supabaseBusy ? 'disabled' : ''}>
-                  ${state.supabaseBusy ? 'Checking...' : 'Test Supabase Connection'}
+                  ${state.supabaseBusy ? 'Checking...' : 'Test Connection'}
                 </button>
-                <button type="button" class="btn-primary btn-sm" id="downloadSupabaseJsonBtn">
-                  Download Migration Snapshot JSON
+                <button type="button" class="btn-primary btn-sm" id="syncSupabaseWebBtn" ${state.supabaseBusy ? 'disabled' : ''}>
+                  ${state.supabaseBusy ? 'Syncing...' : 'Sync Data to Supabase'}
                 </button>
-                <a class="btn-outline btn-sm" href="https://supabase.com/dashboard" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">
-                  Supabase Dashboard &#8599;
+                <button type="button" class="btn-outline btn-sm" id="downloadSupabaseJsonBtn">
+                  Download Snapshot JSON
+                </button>
+                <a class="btn-outline btn-sm" href="https://supabase.com/dashboard/project/qotuvugkapaspowhbsbf/sql/new" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">
+                  SQL Editor &#8599;
                 </a>
               </div>
             </div>
@@ -2326,6 +2345,8 @@ function renderProfile() {
   if (removeBtn) removeBtn.onclick = () => removeAllShowcaseContent();
   const testSupaBtn = document.getElementById('testSupabaseWebBtn');
   if (testSupaBtn) testSupaBtn.onclick = () => runSupabaseWebHealthCheck();
+  const syncSupaBtn = document.getElementById('syncSupabaseWebBtn');
+  if (syncSupaBtn) syncSupaBtn.onclick = () => syncSupabaseDataFromWeb();
   const dlSupaBtn = document.getElementById('downloadSupabaseJsonBtn');
   if (dlSupaBtn) dlSupaBtn.onclick = () => downloadSupabaseMigrationSnapshot();
   const editBtn = document.getElementById('editProfileBtn');
@@ -3442,6 +3463,34 @@ async function runSupabaseWebHealthCheck() {
     const res = await checkSupabaseHealth(SUPABASE_WEB_CONFIG);
     state.supabaseStatus = res.message;
     showToast(res.message);
+  } finally {
+    state.supabaseBusy = false;
+    if (state.nav === 'profile') renderProfile();
+  }
+}
+
+async function syncSupabaseDataFromWeb() {
+  if (!isOwnerAdmin() || state.supabaseBusy) return;
+  state.supabaseBusy = true;
+  state.supabaseStatus = 'Syncing Momi data to Supabase...';
+  if (state.nav === 'profile') renderProfile();
+  try {
+    const bundle = mapFirestoreSnapshotToSupabaseBundle({
+      profile: state.profile,
+      creators: state.creators,
+      posts: state.posts,
+      stories: state.stories,
+      merchants: [],
+      products: state.products,
+      monetizationConfig: state.monetizationConfig,
+      wallet: state.wallet
+    });
+    const count = await syncBundleToSupabase(SUPABASE_WEB_CONFIG, bundle);
+    state.supabaseStatus = `Synced ${count} live records to Supabase!`;
+    showToast(state.supabaseStatus);
+  } catch (err) {
+    state.supabaseStatus = err?.message || 'Supabase sync failed — run supabase/enable_sync.sql in SQL Editor.';
+    showToast(state.supabaseStatus);
   } finally {
     state.supabaseBusy = false;
     if (state.nav === 'profile') renderProfile();
