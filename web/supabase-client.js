@@ -367,3 +367,59 @@ export async function fetchSupabaseFeed(cfg = SUPABASE_WEB_CONFIG, fetchImpl = g
   }
 }
 
+export function mapSupabasePostToWeb(row = {}) {
+  return {
+    id: String(row.id || ''),
+    userId: String(row.user_id || ''),
+    authorUsername: String(row.author_username || 'momi.creator'),
+    authorDisplayName: String(row.author_display_name || row.author_username || 'Creator'),
+    authorAvatarKey: String(row.author_avatar_key || 'avatar_aria'),
+    authorVerified: Boolean(row.author_verified),
+    location: String(row.location || ''),
+    imageKey: String(row.image_key || 'img_post_coastal'),
+    imageData: row.image_data || null,
+    extraImageDatas: Array.isArray(row.extra_image_datas) ? row.extra_image_datas : [],
+    mediaType: String(row.media_type || 'IMAGE'),
+    videoData: row.video_data || null,
+    videoDurationMs: Number(row.video_duration_ms || 0),
+    filterTag: String(row.filter_tag || 'NONE'),
+    aspectRatio: String(row.aspect_ratio || '1:1'),
+    taggedUsernames: Array.isArray(row.tagged_usernames) ? row.tagged_usernames : [],
+    hashtags: Array.isArray(row.hashtags) ? row.hashtags : [],
+    caption: String(row.caption || ''),
+    likesCount: Number(row.likes_count || 0),
+    viewsCount: Number(row.views_count || 0),
+    commentsCount: Number(row.comments_count || 0),
+    category: String(row.category || 'For You'),
+    isReel: Boolean(row.is_reel),
+    audioTitle: String(row.audio_title || ''),
+    audioData: row.audio_data || null,
+    isBoosted: Boolean(row.is_boosted),
+    boostTier: String(row.boost_tier || ''),
+    recommendedLabel: String(row.recommended_label || ''),
+    isSponsored: Boolean(row.is_sponsored),
+    sponsorLabel: String(row.sponsor_label || ''),
+    directLinkUrl: String(row.direct_link_url || ''),
+    createdAt: row.created_at ? { seconds: Math.floor(new Date(row.created_at).getTime() / 1000) } : null
+  };
+}
+
+export function mapSupabaseProfileToWeb(row = {}) {
+  return {
+    userId: String(row.user_id || ''),
+    username: String(row.username || 'momi.creator'),
+    displayName: String(row.display_name || row.username || 'Creator'),
+    category: String(row.category || 'Creator'),
+    bio: String(row.bio || ''),
+    website: String(row.website || ''),
+    avatarKey: String(row.avatar_key || 'avatar_aria'),
+    avatarData: row.avatar_data || null,
+    followersCount: Number(row.followers_count || 0),
+    followingCount: Number(row.following_count || 0),
+    isVerified: Boolean(row.is_verified),
+    role: String(row.role || 'USER'),
+    moderationScopes: Array.isArray(row.moderation_scopes) ? row.moderation_scopes : [],
+    partnerConsent: Boolean(row.partner_consent)
+  };
+}
+

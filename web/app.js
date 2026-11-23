@@ -72,8 +72,11 @@ import {
 import {
   SUPABASE_SCHEMA_TABLES,
   checkSupabaseHealth,
+  fetchSupabaseFeed,
   isSupabaseClientReady,
-  mapFirestoreSnapshotToSupabaseBundle
+  mapFirestoreSnapshotToSupabaseBundle,
+  mapSupabasePostToWeb,
+  mapSupabaseProfileToWeb
 } from './supabase-client.js';
 import {
   assembleVideoChunksToObjectUrl,
@@ -420,12 +423,52 @@ function cleanupSubscriptions() {
   state.initialSnapshotsLoaded = { notifs: false, threads: false };
 }
 
+let isSupabaseFallbackLoading = false;
+async function fallbackLoadFromSupabase() {
+  if (isSupabaseFallbackLoading || !isSupabaseClientReady(SUPABASE_WEB_CONFIG)) return;
+  isSupabaseFallbackLoading = true;
+  try {
+    const feed = await fetchSupabaseFeed(SUPABASE_WEB_CONFIG);
+    if (feed) {
+      if (Array.isArray(feed.posts) && feed.posts.length > 0 && state.posts.length === 0) {
+        state.posts = feed.posts.map(mapSupabasePostToWeb);
+        state.isLoadingFeed = false;
+      }
+      if (Array.isArray(feed.profiles) && feed.profiles.length > 0) {
+        const mappedCreators = feed.profiles.map(mapSupabaseProfileToWeb);
+        const existingMap = new Map(state.creators.map((c) => [c.userId, c]));
+        mappedCreators.forEach((c) => {
+          if (!existingMap.has(c.userId)) {
+            state.creators.push(c);
+          }
+        });
+        if (state.user) {
+          const mySupabaseProfile = mappedCreators.find((p) => p.userId === state.user.uid);
+          if (mySupabaseProfile) {
+            state.profile = { ...state.profile, ...mySupabaseProfile };
+          }
+        }
+      }
+      renderAll();
+    }
+  } catch (err) {
+    console.warn('[Momi Web] Supabase fallback feed load skipped:', err);
+  } finally {
+    isSupabaseFallbackLoading = false;
+  }
+}
+
 function handleSyncError(err, label = 'Firestore sync') {
   console.error(`[Momi Web] ${label}:`, err);
   const code = err?.code || 'sync-error';
   const msg = err?.message || 'Unable to reach Momi cloud feed.';
-  state.syncError = `${label} (${code}): ${msg}`;
+  if (code === 'resource-exhausted') {
+    state.syncError = 'Daily Firebase Spark quota temporarily reached — cached posts remain visible. Quota resets daily or after upgrading to Blaze.';
+  } else {
+    state.syncError = `${label} (${code}): ${msg}`;
+  }
   state.isLoadingFeed = false;
+  fallbackLoadFromSupabase();
   renderMainStage();
 }
 
@@ -1933,10 +1976,64 @@ function renderWallet() {
 
 function renderProfile() {
   const targetUid = state.viewedProfileUid || state.user?.uid;
-  const isOwn = targetUid === state.user?.uid;
-  const profile = isOwn ? state.profile : state.creators.find((c) => c.userId === targetUid);
+  const isOwn = Boolean(state.user?.uid) && targetUid === state.user?.uid;
+  if (isOwn && !state.profile && state.user) {
+    state.profile = buildFallbackProfile(state.user);
+  }
+  let profile = isOwn ? state.profile : state.creators.find((c) => c.userId === targetUid);
+  if (!profile && targetUid) {
+    const postWithAuthor = state.posts.find(
+      (p) => p.userId === targetUid || (p.authorUsername && p.authorUsername.toLowerCase() === targetUid.toLowerCase())
+    );
+    if (postWithAuthor) {
+      profile = {
+        userId: targetUid,
+        username: postWithAuthor.authorUsername || 'creator',
+        displayName: postWithAuthor.authorDisplayName || postWithAuthor.authorUsername || 'Creator',
+        avatarKey: postWithAuthor.authorAvatarKey || 'avatar_aria',
+        avatarData: null,
+        bio: '',
+        website: '',
+        category: postWithAuthor.category || 'Creator',
+        followersCount: 0,
+        followingCount: 0,
+        isVerified: Boolean(postWithAuthor.authorVerified)
+      };
+    }
+  }
+
   if (!profile) {
-    mainStage.innerHTML = '<div class="stage-column"><div class="card-panel"><p class="muted">Loading profile...</p></div></div>';
+    if (!state.user) {
+      mainStage.innerHTML = `
+        <div class="stage-column">
+          <div class="card-panel" style="text-align:center;padding:36px 20px;">
+            <h2 style="margin:0 0 8px;">Welcome to Momi</h2>
+            <p class="muted" style="margin-bottom:20px;">Sign in with Google to view your profile, manage posts, and access the Owner Studio Console.</p>
+            <button type="button" class="btn-primary" id="profileGuestSignInBtn">Sign In with Google</button>
+          </div>
+        </div>
+      `;
+      const gBtn = document.getElementById('profileGuestSignInBtn');
+      if (gBtn) gBtn.onclick = () => document.getElementById('googleSignInBtn')?.click();
+      return;
+    }
+
+    mainStage.innerHTML = `
+      <div class="stage-column">
+        <div class="card-panel" style="text-align:center;padding:32px 20px;">
+          <h3 style="margin:0 0 8px;">Profile Not Found</h3>
+          <p class="muted" style="margin-bottom:18px;">This creator profile is syncing or unavailable.</p>
+          <div class="chip-row" style="justify-content:center;">
+            <button type="button" class="btn-primary" id="goToMyProfileBtn">Go to My Profile</button>
+            <button type="button" class="btn-outline" id="profileBackToFeedBtn">Back to Feed</button>
+          </div>
+        </div>
+      </div>
+    `;
+    const myBtn = document.getElementById('goToMyProfileBtn');
+    if (myBtn) myBtn.onclick = () => { state.viewedProfileUid = state.user?.uid || null; renderProfile(); };
+    const feedBtn = document.getElementById('profileBackToFeedBtn');
+    if (feedBtn) feedBtn.onclick = () => navigateTo('home');
     return;
   }
 
