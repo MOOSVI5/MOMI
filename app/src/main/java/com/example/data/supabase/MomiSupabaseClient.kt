@@ -612,40 +612,50 @@ class MomiSupabaseClient(
         if (!health.connected) {
             return Result.failure(IllegalStateException(health.message))
         }
-        if (accessToken.isNullOrBlank()) {
-            val realPosts = posts.count { !it.id.startsWith("showcase_") }
-            val realStories = stories.count { !it.id.startsWith("showcase_") }
-            return Result.success(
-                "Connected (${health.latencyMs} ms)! Snapshot ready: ${profiles.size} profiles, $realPosts posts, $realStories stories, ${products.size} products. Use Copy JSON or sign in via Supabase Google Auth to push RLS-protected rows."
-            )
-        }
         var totalUpserted = 0
+        var writeErrors = 0
         if (profiles.isNotEmpty()) {
             upsertRows("profiles", profiles.map(MomiSupabaseSchema::toProfileRow), accessToken = accessToken, onConflict = "user_id")
                 .onSuccess { totalUpserted += it }
+                .onFailure { writeErrors++ }
         }
         val realPosts = posts.filterNot { it.id.startsWith("showcase_") }
         if (realPosts.isNotEmpty()) {
             upsertRows("posts", realPosts.map(MomiSupabaseSchema::toPostRow), accessToken = accessToken, onConflict = "id")
                 .onSuccess { totalUpserted += it }
+                .onFailure { writeErrors++ }
         }
         val realStories = stories.filterNot { it.id.startsWith("showcase_") }
         if (realStories.isNotEmpty()) {
             upsertRows("stories", realStories.map(MomiSupabaseSchema::toStoryRow), accessToken = accessToken, onConflict = "id")
                 .onSuccess { totalUpserted += it }
+                .onFailure { writeErrors++ }
         }
         if (merchants.isNotEmpty()) {
             upsertRows("merchants", merchants.map(MomiSupabaseSchema::toMerchantRow), accessToken = accessToken, onConflict = "user_id")
                 .onSuccess { totalUpserted += it }
+                .onFailure { writeErrors++ }
         }
         if (products.isNotEmpty()) {
             upsertRows("market_products", products.map(MomiSupabaseSchema::toMarketProductRow), accessToken = accessToken, onConflict = "id")
                 .onSuccess { totalUpserted += it }
+                .onFailure { writeErrors++ }
         }
         upsertRows("app_config", listOf(MomiSupabaseSchema::toAppConfigRow.invoke(monetizationConfig)), accessToken = accessToken, onConflict = "id")
             .onSuccess { totalUpserted += it }
+            .onFailure { writeErrors++ }
 
-        return Result.success("Synced $totalUpserted records to Supabase (${health.latencyMs} ms).")
+        if (totalUpserted > 0) {
+            return Result.success("Synced $totalUpserted records to Supabase (${health.latencyMs} ms)!")
+        }
+        val realPostsCount = posts.count { !it.id.startsWith("showcase_") }
+        val realStoriesCount = stories.count { !it.id.startsWith("showcase_") }
+        if (writeErrors > 0) {
+            return Result.success(
+                "Connected (${health.latencyMs} ms)! Snapshot ready: ${profiles.size} profiles, $realPostsCount posts, $realStoriesCount stories. Run sync write policy in Supabase SQL Editor to allow push."
+            )
+        }
+        return Result.success("Supabase already in sync (${health.latencyMs} ms).")
     }
 
     companion object {
