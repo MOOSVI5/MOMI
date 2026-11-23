@@ -136,7 +136,7 @@ object AppUpdateChecker {
     private const val PREFS_NAME = "momi_update_prefs"
     private const val KEY_DISMISSED_VERSION = "dismissed_update_version"
     private const val KEY_LAST_AUTO_CHECK_AT_MS = "last_auto_check_at_ms"
-    internal const val AUTO_CHECK_COOLDOWN_MS = 6L * 60L * 60L * 1000L
+    internal const val AUTO_CHECK_COOLDOWN_MS = 1L * 60L * 60L * 1000L
 
     fun playStoreListingUrl(): String = PLAY_STORE_URL
 

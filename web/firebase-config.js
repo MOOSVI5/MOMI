@@ -182,7 +182,7 @@ export function escapeHtml(str = '') {
 }
 
 export const WEB_APP_URL = 'https://moosvi5.github.io/MOMI/';
-export const ANDROID_APK_URL = 'https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-v2.0.apk';
+export const ANDROID_APK_URL = 'https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-v2.1.apk';
 export const ANDROID_RELEASES_URL = 'https://github.com/MOOSVI5/MOMI/releases/latest';
 
 export const SHOWCASE_PERSONAS = [

@@ -120,7 +120,7 @@ test('username, count formatting, and image resolution utilities work accurately
 
 test('share URL builders, deep-link parser, and Android app recommendation links work properly', () => {
   assert.equal(WEB_APP_URL, 'https://moosvi5.github.io/MOMI/');
-  assert.equal(ANDROID_APK_URL, 'https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-v2.0.apk');
+  assert.equal(ANDROID_APK_URL, 'https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-v2.1.apk');
   assert.equal(ANDROID_RELEASES_URL, 'https://github.com/MOOSVI5/MOMI/releases/latest');
 
   const postUrl = buildPostShareUrl('post_17321_abc');

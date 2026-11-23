@@ -10,7 +10,7 @@ sealed class MomiDeepLink {
 
 object MomiLinks {
     const val WEB_APP_URL = "https://moosvi5.github.io/MOMI/"
-    const val ANDROID_APK_URL = "https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-v2.0.apk"
+    const val ANDROID_APK_URL = "https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-v2.1.apk"
     const val ANDROID_RELEASES_URL = "https://github.com/MOOSVI5/MOMI/releases/latest"
 
     private val SAFE_ID_REGEX = Regex("^[a-zA-Z0-9._-]{1,128}$")
