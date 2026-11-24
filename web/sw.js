@@ -1,4 +1,4 @@
-const CACHE_NAME = 'momi-web-v4-supabase';
+const CACHE_NAME = 'momi-web-v4-supabase-auth';
 const SHELL_ASSETS = [
   './',
   './index.html',

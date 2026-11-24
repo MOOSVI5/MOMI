@@ -26,11 +26,11 @@
         </div>
         <h2 class="auth-headline">Your Momi feed, stories, clips, live studio &amp; marketplace — synced in real time.</h2>
         <p class="auth-subtext">
-          Sign in with your Google account to create photo posts &amp; video clips, go live, chat in 2-pane DMs, and browse marketplace listings across Android and Web.
+          Sign in with your Supabase Momi account (Google or Email) to create photo posts &amp; video clips, go live, chat in 2-pane DMs, and browse marketplace listings across Android and Web.
         </p>
 
         <div id="authFeaturePills" class="auth-pills">
-          <span class="pill">Supabase Cloud Sync</span>
+          <span class="pill">Supabase Auth &amp; Sync</span>
           <span class="pill">HD Video &amp; Photo Studio</span>
           <span class="pill">Interactive Live Rooms</span>
           <span class="pill">2-Pane Messages</span>
@@ -43,7 +43,28 @@
           Continue with Google
         </button>
 
+        <div class="auth-divider"><span>or</span></div>
+
+        <button id="toggleEmailAuthBtn" type="button" class="btn-outline full-width">
+          Use Email &amp; Password
+        </button>
+
+        <form id="emailAuthForm" class="auth-email-form hidden" novalidate>
+          <div id="authDisplayNameWrap" class="hidden">
+            <input id="authDisplayNameInput" type="text" class="input" placeholder="Display name (e.g. Aria Studio)" autocomplete="name" />
+          </div>
+          <input id="authEmailInput" type="email" class="input" placeholder="Email address" autocomplete="email" required />
+          <input id="authPasswordInput" type="password" class="input" placeholder="Password (min 6 characters)" autocomplete="current-password" required />
+          <button id="emailSignInBtn" type="submit" class="btn-primary full-width">
+            Sign In with Email
+          </button>
+          <button id="toggleAuthModeBtn" type="button" class="btn-ghost btn-sm full-width">
+            Need an account? Create one
+          </button>
+        </form>
+
         <p id="pendingLinkNotice" class="auth-link-notice hidden"></p>
+        <p id="authInfoBox" class="auth-info hidden" role="status"></p>
         <p id="authErrorBox" class="auth-error hidden" role="alert"></p>
 
         <div class="android-promo-card">

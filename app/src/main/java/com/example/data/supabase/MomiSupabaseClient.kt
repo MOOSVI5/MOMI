@@ -21,6 +21,9 @@ import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
 import com.google.firebase.Timestamp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -48,7 +51,15 @@ data class SupabaseAuthSession(
     val accessToken: String,
     val refreshToken: String,
     val userId: String,
-    val email: String?
+    val email: String?,
+    val displayName: String? = null,
+    val avatarUrl: String? = null
+)
+
+data class SupabaseSignUpResult(
+    val session: SupabaseAuthSession? = null,
+    val confirmationRequired: Boolean = false,
+    val email: String = ""
 )
 
 data class SupabaseFeedBundle(
@@ -690,7 +701,52 @@ class MomiSupabaseClient(
         }
     }
 
-    suspend fun signInWithGoogleIdToken(idToken: String): Result<SupabaseAuthSession> =
+    private fun extractSupabaseAuthError(rawBody: String, fallback: String): String {
+        val msg = runCatching {
+            val o = JSONObject(rawBody)
+            o.optString("msg").takeIf { it.isNotBlank() }
+                ?: o.optString("error_description").takeIf { it.isNotBlank() }
+                ?: o.optString("message").takeIf { it.isNotBlank() }
+                ?: o.optString("error").takeIf { it.isNotBlank() }
+        }.getOrNull()
+        return msg ?: fallback
+    }
+
+    private fun parseAuthSession(
+        json: JSONObject,
+        displayNameHint: String? = null,
+        avatarUrlHint: String? = null
+    ): SupabaseAuthSession {
+        val access = json.optString("access_token")
+        val refresh = json.optString("refresh_token")
+        val userObj = json.optJSONObject("user")
+        val userId = userObj?.optString("id").orEmpty()
+        val email = userObj?.optString("email")?.takeIf { it.isNotBlank() }
+        val meta = userObj?.optJSONObject("user_metadata")
+        val displayName = meta?.optString("full_name")?.takeIf { it.isNotBlank() }
+            ?: meta?.optString("name")?.takeIf { it.isNotBlank() }
+            ?: displayNameHint?.takeIf { it.isNotBlank() }
+        val avatarUrl = meta?.optString("avatar_url")?.takeIf { it.isNotBlank() }
+            ?: meta?.optString("picture")?.takeIf { it.isNotBlank() }
+            ?: avatarUrlHint?.takeIf { it.isNotBlank() }
+        require(access.isNotBlank() && userId.isNotBlank()) {
+            "Invalid Supabase auth session response"
+        }
+        return SupabaseAuthSession(
+            accessToken = access,
+            refreshToken = refresh,
+            userId = userId,
+            email = email,
+            displayName = displayName,
+            avatarUrl = avatarUrl
+        )
+    }
+
+    suspend fun signInWithGoogleIdToken(
+        idToken: String,
+        displayNameHint: String? = null,
+        avatarUrlHint: String? = null
+    ): Result<SupabaseAuthSession> =
         withContext(Dispatchers.IO) {
             if (!isConfigured()) {
                 return@withContext Result.failure(IllegalStateException("Supabase is not configured yet."))
@@ -712,28 +768,142 @@ class MomiSupabaseClient(
                 httpClient.newCall(request).execute().use { response ->
                     val rawBody = response.body?.string().orEmpty()
                     if (!response.isSuccessful) {
-                        error("Supabase Google sign-in failed (HTTP ${response.code})")
+                        val detail = extractSupabaseAuthError(rawBody, "HTTP ${response.code}")
+                        val hint = if (detail.contains("not enabled", ignoreCase = true) ||
+                            detail.contains("audience", ignoreCase = true)
+                        ) {
+                            "Google login needs to be enabled in Supabase Authentication -> Providers -> Google (or sign in with Email below). [$detail]"
+                        } else {
+                            "Supabase Google sign-in failed: $detail"
+                        }
+                        error(hint)
                     }
-                    val json = JSONObject(rawBody)
-                    val access = json.optString("access_token")
-                    val refresh = json.optString("refresh_token")
-                    val userObj = json.optJSONObject("user")
-                    val userId = userObj?.optString("id").orEmpty()
-                    val email = userObj?.optString("email")?.takeIf { it.isNotBlank() }
-                    require(access.isNotBlank() && userId.isNotBlank()) {
-                        "Invalid Supabase auth session response"
-                    }
-                    val session = SupabaseAuthSession(
-                        accessToken = access,
-                        refreshToken = refresh,
-                        userId = userId,
-                        email = email
-                    )
+                    val session = parseAuthSession(JSONObject(rawBody), displayNameHint, avatarUrlHint)
                     activeSession = session
                     session
                 }
             }
         }
+
+    suspend fun signInWithEmailPassword(email: String, password: String): Result<SupabaseAuthSession> =
+        withContext(Dispatchers.IO) {
+            if (!isConfigured()) {
+                return@withContext Result.failure(IllegalStateException("Supabase is not configured yet."))
+            }
+            val cleanEmail = email.trim()
+            if (cleanEmail.isBlank() || password.length < 6) {
+                return@withContext Result.failure(IllegalArgumentException("Enter a valid email and a password of at least 6 characters."))
+            }
+            val payload = MomiSupabaseSchema.toJsonString(
+                linkedMapOf("email" to cleanEmail, "password" to password)
+            )
+            val request = Request.Builder()
+                .url("$baseUrl/auth/v1/token?grant_type=password")
+                .header("apikey", anonKey)
+                .header("Content-Type", "application/json")
+                .post(payload.toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+
+            runCatching {
+                httpClient.newCall(request).execute().use { response ->
+                    val rawBody = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) {
+                        val detail = extractSupabaseAuthError(rawBody, "Invalid email or password (HTTP ${response.code})")
+                        error(detail)
+                    }
+                    val session = parseAuthSession(JSONObject(rawBody))
+                    activeSession = session
+                    session
+                }
+            }
+        }
+
+    suspend fun signUpWithEmailPassword(
+        email: String,
+        password: String,
+        displayName: String? = null
+    ): Result<SupabaseSignUpResult> = withContext(Dispatchers.IO) {
+        if (!isConfigured()) {
+            return@withContext Result.failure(IllegalStateException("Supabase is not configured yet."))
+        }
+        val cleanEmail = email.trim()
+        if (cleanEmail.isBlank() || password.length < 6) {
+            return@withContext Result.failure(IllegalArgumentException("Enter a valid email and password (6+ characters)."))
+        }
+        val bodyMap = linkedMapOf<String, Any?>(
+            "email" to cleanEmail,
+            "password" to password
+        )
+        val cleanName = displayName?.trim()?.takeIf { it.isNotEmpty() }
+        if (cleanName != null) {
+            bodyMap["data"] = linkedMapOf("full_name" to cleanName)
+        }
+        val request = Request.Builder()
+            .url("$baseUrl/auth/v1/signup")
+            .header("apikey", anonKey)
+            .header("Content-Type", "application/json")
+            .post(MomiSupabaseSchema.toJsonString(bodyMap).toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        runCatching {
+            httpClient.newCall(request).execute().use { response ->
+                val rawBody = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val detail = extractSupabaseAuthError(rawBody, "Sign up failed (HTTP ${response.code})")
+                    error(detail)
+                }
+                val json = JSONObject(rawBody)
+                val access = json.optString("access_token")
+                if (access.isNotBlank()) {
+                    val session = parseAuthSession(json, displayNameHint = cleanName)
+                    activeSession = session
+                    SupabaseSignUpResult(session = session, confirmationRequired = false, email = cleanEmail)
+                } else {
+                    SupabaseSignUpResult(session = null, confirmationRequired = true, email = cleanEmail)
+                }
+            }
+        }
+    }
+
+    suspend fun refreshSession(refreshToken: String): Result<SupabaseAuthSession> =
+        withContext(Dispatchers.IO) {
+            if (!isConfigured() || refreshToken.isBlank()) {
+                return@withContext Result.failure(IllegalStateException("Cannot refresh Supabase session."))
+            }
+            val payload = MomiSupabaseSchema.toJsonString(linkedMapOf("refresh_token" to refreshToken))
+            val request = Request.Builder()
+                .url("$baseUrl/auth/v1/token?grant_type=refresh_token")
+                .header("apikey", anonKey)
+                .header("Content-Type", "application/json")
+                .post(payload.toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+
+            runCatching {
+                httpClient.newCall(request).execute().use { response ->
+                    val rawBody = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) {
+                        val detail = extractSupabaseAuthError(rawBody, "Session expired (HTTP ${response.code})")
+                        error("AUTH_EXPIRED:${response.code}:$detail")
+                    }
+                    val session = parseAuthSession(JSONObject(rawBody))
+                    activeSession = session
+                    session
+                }
+            }
+        }
+
+    suspend fun signOutSession(accessToken: String? = null) = withContext(Dispatchers.IO) {
+        val token = resolvedAccessToken(accessToken)
+        activeSession = null
+        if (!isConfigured() || token.isNullOrBlank()) return@withContext
+        val request = Request.Builder()
+            .url("$baseUrl/auth/v1/logout")
+            .header("apikey", anonKey)
+            .header("Authorization", "Bearer $token")
+            .post("".toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+        runCatching { httpClient.newCall(request).execute().close() }
+    }
 
     suspend fun upsertRows(
         table: String,
@@ -1720,8 +1890,14 @@ class MomiSupabaseClient(
     }
 
     companion object {
-        @Volatile
-        var activeSession: SupabaseAuthSession? = null
+        private val _sessionFlow = MutableStateFlow<SupabaseAuthSession?>(null)
+        val sessionFlow: StateFlow<SupabaseAuthSession?> = _sessionFlow.asStateFlow()
+
+        var activeSession: SupabaseAuthSession?
+            get() = _sessionFlow.value
+            set(value) {
+                _sessionFlow.value = value
+            }
 
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private val defaultHttpClient: OkHttpClient by lazy {

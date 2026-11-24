@@ -61,6 +61,8 @@ object AppearancePrefs {
     private const val KEY_SUPA_REFRESH_TOKEN = "supabase_refresh_token"
     private const val KEY_SUPA_USER_ID = "supabase_user_id"
     private const val KEY_SUPA_EMAIL = "supabase_email"
+    private const val KEY_SUPA_DISPLAY_NAME = "supabase_display_name"
+    private const val KEY_SUPA_AVATAR_URL = "supabase_avatar_url"
 
     fun loadThemePreference(context: Context): ThemePreference {
         val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -143,7 +145,9 @@ object AppearancePrefs {
         accessToken: String,
         refreshToken: String,
         userId: String,
-        email: String?
+        email: String?,
+        displayName: String? = null,
+        avatarUrl: String? = null
     ) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
@@ -151,6 +155,8 @@ object AppearancePrefs {
             .putString(KEY_SUPA_REFRESH_TOKEN, refreshToken)
             .putString(KEY_SUPA_USER_ID, userId)
             .putString(KEY_SUPA_EMAIL, email)
+            .putString(KEY_SUPA_DISPLAY_NAME, displayName)
+            .putString(KEY_SUPA_AVATAR_URL, avatarUrl)
             .apply()
     }
 
@@ -160,7 +166,23 @@ object AppearancePrefs {
         val userId = prefs.getString(KEY_SUPA_USER_ID, null)?.takeIf { it.isNotBlank() } ?: return null
         val refresh = prefs.getString(KEY_SUPA_REFRESH_TOKEN, null).orEmpty()
         val email = prefs.getString(KEY_SUPA_EMAIL, null)
-        return listOf(access, refresh, userId, email)
+        val displayName = prefs.getString(KEY_SUPA_DISPLAY_NAME, null)
+        val avatarUrl = prefs.getString(KEY_SUPA_AVATAR_URL, null)
+        return listOf(access, refresh, userId, email, displayName, avatarUrl)
+    }
+
+    fun restoreSupabaseSession(context: Context): com.example.data.supabase.SupabaseAuthSession? {
+        val parts = loadSupabaseSessionRaw(context) ?: return null
+        val session = com.example.data.supabase.SupabaseAuthSession(
+            accessToken = parts[0].orEmpty(),
+            refreshToken = parts[1].orEmpty(),
+            userId = parts[2].orEmpty(),
+            email = parts[3],
+            displayName = parts.getOrNull(4),
+            avatarUrl = parts.getOrNull(5)
+        )
+        com.example.data.supabase.MomiSupabaseClient.activeSession = session
+        return session
     }
 
     fun clearSupabaseSession(context: Context) {
@@ -170,6 +192,8 @@ object AppearancePrefs {
             .remove(KEY_SUPA_REFRESH_TOKEN)
             .remove(KEY_SUPA_USER_ID)
             .remove(KEY_SUPA_EMAIL)
+            .remove(KEY_SUPA_DISPLAY_NAME)
+            .remove(KEY_SUPA_AVATAR_URL)
             .apply()
     }
 }

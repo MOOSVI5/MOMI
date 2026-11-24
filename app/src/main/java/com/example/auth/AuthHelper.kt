@@ -10,34 +10,31 @@ import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
 import com.example.R
 import com.example.data.supabase.MomiSupabaseClient
-import com.example.data.supabase.SupabaseAuthSession
 import com.example.ui.theme.AppearancePrefs
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential.Companion.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
 import com.google.firebase.Firebase
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.auth.FirebaseUser
-import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.auth
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.channels.awaitClose
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 
-private const val TAG = "Auth"
+private const val TAG = "SupabaseAuth"
 
-internal fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
-    val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
-        trySend(firebaseAuth.currentUser)
-    }
-    addAuthStateListener(listener)
-    awaitClose { removeAuthStateListener(listener) }
+private fun persistSession(context: Context, sess: com.example.data.supabase.SupabaseAuthSession) {
+    AppearancePrefs.setAutoSignInEnabled(context, true)
+    AppearancePrefs.saveSupabaseSession(
+        context = context,
+        accessToken = sess.accessToken,
+        refreshToken = sess.refreshToken,
+        userId = sess.userId,
+        email = sess.email,
+        displayName = sess.displayName,
+        avatarUrl = sess.avatarUrl
+    )
 }
 
 fun attemptAutoSignIn(
@@ -47,33 +44,38 @@ fun attemptAutoSignIn(
     onUnauthenticated: () -> Unit,
     scope: CoroutineScope
 ) {
-    AppearancePrefs.loadSupabaseSessionRaw(context)?.let { parts ->
-        if (MomiSupabaseClient.activeSession == null) {
-            MomiSupabaseClient.activeSession = SupabaseAuthSession(
-                accessToken = parts[0].orEmpty(),
-                refreshToken = parts[1].orEmpty(),
-                userId = parts[2].orEmpty(),
-                email = parts[3]
-            )
-        }
-    }
-    if (Firebase.auth.currentUser != null) {
+    val restored = AppearancePrefs.restoreSupabaseSession(context)
+    if (restored != null) {
         AppearancePrefs.setAutoSignInEnabled(context, true)
+        if (restored.refreshToken.isNotBlank()) {
+            scope.launch {
+                MomiSupabaseClient().refreshSession(restored.refreshToken)
+                    .onSuccess { refreshed -> persistSession(context, refreshed) }
+                    .onFailure { err ->
+                        if (err.message?.startsWith("AUTH_EXPIRED:") == true) {
+                            AppearancePrefs.clearSupabaseSession(context)
+                            MomiSupabaseClient.activeSession = null
+                        }
+                    }
+            }
+        }
         onAuthSuccess()
         return
     }
+
     if (!AppearancePrefs.isAutoSignInEnabled(context)) {
         onUnauthenticated()
         return
     }
     val clientId = try {
         context.getString(R.string.default_web_client_id)
-    } catch (e: Exception) {
+    } catch (_: Exception) {
         onUnauthenticated()
         return
     }
 
     val activityContext = context as? Activity ?: context
+    val supabaseClient = MomiSupabaseClient()
 
     suspend fun tryGoogleId(filterAuthorizedOnly: Boolean): Boolean {
         val option = GetGoogleIdOption.Builder()
@@ -87,16 +89,13 @@ fun attemptAutoSignIn(
         val result = credentialManager.getCredential(activityContext, req)
         val credential = result.credential
         if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-            val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
-            val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-            Firebase.auth.signInWithCredential(authCredential).await()
-            AppearancePrefs.setAutoSignInEnabled(context, true)
-            scope.launch {
-                runCatching { MomiSupabaseClient().signInWithGoogleIdToken(googleIdToken) }
-                    .getOrNull()?.getOrNull()?.let { sess ->
-                        AppearancePrefs.saveSupabaseSession(context, sess.accessToken, sess.refreshToken, sess.userId, sess.email)
-                    }
-            }
+            val googleCred = GoogleIdTokenCredential.createFrom(credential.data)
+            val sess = supabaseClient.signInWithGoogleIdToken(
+                idToken = googleCred.idToken,
+                displayNameHint = googleCred.displayName,
+                avatarUrlHint = googleCred.profilePictureUri?.toString()
+            ).getOrThrow()
+            persistSession(context, sess)
             return true
         }
         return false
@@ -112,7 +111,7 @@ fun attemptAutoSignIn(
             onUnauthenticated()
             return@launch
         } catch (_: Exception) {
-            // Fall through to unfiltered Credential Manager auto-select retry for fresh preview launches
+            // Fall through to unfiltered Credential Manager auto-select retry
         }
 
         try {
@@ -137,7 +136,7 @@ fun onGoogleSignInClicked(
 ) {
     val clientId = try {
         context.getString(R.string.default_web_client_id)
-    } catch (e: Exception) {
+    } catch (_: Exception) {
         onAuthError("Google Sign-In configuration missing: default_web_client_id not found")
         return
     }
@@ -153,16 +152,16 @@ fun onGoogleSignInClicked(
             val result = credentialManager.getCredential(activityContext, request)
             val credential = result.credential
             if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
-                val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-                Firebase.auth.signInWithCredential(authCredential).await()
-                AppearancePrefs.setAutoSignInEnabled(context, true)
-                scope.launch {
-                    runCatching { MomiSupabaseClient().signInWithGoogleIdToken(googleIdToken) }
-                        .getOrNull()?.getOrNull()?.let { sess ->
-                            AppearancePrefs.saveSupabaseSession(context, sess.accessToken, sess.refreshToken, sess.userId, sess.email)
-                        }
+                val googleCred = GoogleIdTokenCredential.createFrom(credential.data)
+                val sess = MomiSupabaseClient().signInWithGoogleIdToken(
+                    idToken = googleCred.idToken,
+                    displayNameHint = googleCred.displayName,
+                    avatarUrlHint = googleCred.profilePictureUri?.toString()
+                ).getOrElse { err ->
+                    onAuthError(err.localizedMessage ?: "Supabase Google Sign-In failed.")
+                    return@launch
                 }
+                persistSession(context, sess)
                 onAuthSuccess()
             } else {
                 onAuthError("Unexpected credential type returned.")
@@ -173,6 +172,46 @@ fun onGoogleSignInClicked(
         } catch (e: Exception) {
             Log.e(TAG, "Google Sign-In failed", e)
             onAuthError(e.localizedMessage ?: "Sign in failed. Please try again.")
+        }
+    }
+}
+
+fun onEmailPasswordAuthClicked(
+    context: Context,
+    email: String,
+    password: String,
+    displayName: String,
+    isSignUp: Boolean,
+    onAuthSuccess: () -> Unit,
+    onConfirmationSent: (String) -> Unit,
+    onAuthError: (String) -> Unit,
+    scope: CoroutineScope
+) {
+    val client = MomiSupabaseClient()
+    scope.launch {
+        if (isSignUp) {
+            client.signUpWithEmailPassword(email = email, password = password, displayName = displayName)
+                .onSuccess { res ->
+                    val sess = res.session
+                    if (sess != null) {
+                        persistSession(context, sess)
+                        onAuthSuccess()
+                    } else {
+                        onConfirmationSent("Check ${res.email} for your verification link, then sign in.")
+                    }
+                }
+                .onFailure { err ->
+                    onAuthError(err.localizedMessage ?: "Could not create account.")
+                }
+        } else {
+            client.signInWithEmailPassword(email = email, password = password)
+                .onSuccess { sess ->
+                    persistSession(context, sess)
+                    onAuthSuccess()
+                }
+                .onFailure { err ->
+                    onAuthError(err.localizedMessage ?: "Sign in failed. Check email and password.")
+                }
         }
     }
 }
@@ -191,9 +230,10 @@ fun signOut(
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to clear credential state: ${e.message}")
             } finally {
+                val activeToken = MomiSupabaseClient.activeSession?.accessToken
                 AppearancePrefs.clearSupabaseSession(context)
-                MomiSupabaseClient.activeSession = null
-                Firebase.auth.signOut()
+                MomiSupabaseClient().signOutSession(activeToken)
+                runCatching { Firebase.auth.signOut() }
                 onSignOutComplete()
             }
         }

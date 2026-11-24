@@ -40,16 +40,19 @@ import {
 import {
   SUPABASE_SCHEMA_TABLES,
   buildSupabaseAuthHeaders,
+  buildSupabaseGoogleOAuthUrl,
   checkSupabaseHealth,
   isSafeSupabaseAnonKey,
   isSupabaseClientReady,
   mapFirestoreSnapshotToSupabaseBundle,
+  mapSupabaseAuthUserToWeb,
   mapSupabaseConfigToWeb,
   mapSupabasePostToWeb,
   mapSupabaseProductToWeb,
   mapSupabaseProfileToWeb,
   mapSupabaseStoryToWeb,
   normalizeSupabaseUrl,
+  parseSupabaseOAuthCallback,
   syncBundleToSupabase
 } from '../supabase-client.js';
 
@@ -170,8 +173,12 @@ test('starter showcase personas and Firestore Web sync resilience are configured
   assert.ok(appJs.includes('removeAllShowcaseContent'));
   assert.ok(appJs.includes('publishShowcaseBurst'));
   assert.ok(appJs.includes('syncMonetagWebIntegration'));
-  assert.ok(appJs.includes('getRedirectResult'));
-  assert.ok(appJs.includes('browserLocalPersistence'));
+  assert.equal(appJs.includes('firebase-auth.js'), false);
+  assert.ok(appJs.includes('supabaseSignInWithPassword'));
+  assert.ok(appJs.includes('supabaseSignUpWithEmail'));
+  assert.ok(appJs.includes('buildSupabaseGoogleOAuthUrl'));
+  assert.ok(appJs.includes('parseSupabaseOAuthCallback'));
+  assert.ok(appJs.includes('saveSupabaseAuthSession'));
 
   const swJs = fs.readFileSync(path.join(REPO_ROOT, 'web', 'sw.js'), 'utf8');
   assert.ok(swJs.includes('momi-web-v4'));
@@ -326,4 +333,35 @@ test('syncBundleToSupabase deduplicates usernames, orders profiles before child 
   assert.equal(mapSupabaseProfileToWeb(bundle.tables.profiles[0]).username, 'ali.studio');
   assert.equal(mapSupabaseConfigToWeb(bundle.tables.app_config[0]).gamezopPublisherId, '9012');
   assert.equal(mapSupabaseProductToWeb({ id: 'pr1', seller_uid: 'u1', price_usd: 25 }).priceUsd, 25);
+});
+
+test('Supabase Auth helpers build Google OAuth URLs, parse callbacks, and map user metadata', () => {
+  const oauthUrl = buildSupabaseGoogleOAuthUrl(
+    { url: 'https://qotuvugkapaspowhbsbf.supabase.co' },
+    'https://moosvi5.github.io/MOMI/'
+  );
+  assert.ok(oauthUrl.startsWith('https://qotuvugkapaspowhbsbf.supabase.co/auth/v1/authorize?'));
+  assert.ok(oauthUrl.includes('provider=google'));
+  assert.ok(oauthUrl.includes('redirect_to=https%3A%2F%2Fmoosvi5.github.io%2FMOMI%2F'));
+
+  const parsedToken = parseSupabaseOAuthCallback('#access_token=jwt_abc&refresh_token=ref_123&expires_in=3600', '');
+  assert.equal(parsedToken.accessToken, 'jwt_abc');
+  assert.equal(parsedToken.refreshToken, 'ref_123');
+  assert.equal(parsedToken.expiresIn, 3600);
+  assert.equal(parsedToken.errorDescription, '');
+
+  const parsedError = parseSupabaseOAuthCallback('', '?error=access_denied&error_description=User%20cancelled');
+  assert.equal(parsedError.errorDescription, 'User cancelled');
+
+  const mappedUser = mapSupabaseAuthUserToWeb({
+    id: 'supa-uuid-1',
+    email: 'syali6511@gmail.com',
+    email_confirmed_at: '2026-01-01T00:00:00Z',
+    user_metadata: { full_name: 'Syed Ali', avatar_url: 'https://example.com/a.jpg' }
+  });
+  assert.equal(mappedUser.uid, 'supa-uuid-1');
+  assert.equal(mappedUser.email, 'syali6511@gmail.com');
+  assert.equal(mappedUser.displayName, 'Syed Ali');
+  assert.equal(mappedUser.photoURL, 'https://example.com/a.jpg');
+  assert.equal(mappedUser.emailVerified, true);
 });

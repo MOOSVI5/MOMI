@@ -47,7 +47,9 @@ import com.example.util.AppUpdateChecker
 import com.example.util.AvailableAppUpdate
 import com.example.util.MediaAssets
 import com.example.util.StudioMusicCatalog
+import com.google.firebase.Firebase
 import com.google.firebase.Timestamp
+import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
@@ -222,29 +224,32 @@ class MomiViewModel(
                     }
                 }
             }
-            repository.ensureUserSeeded(
-                displayNameHint = initialDisplayName,
-                emailHint = initialEmail
-            ).onFailure { error ->
-                if (!supabaseClient.isConfigured()) {
-                    if (isQuotaExceeded(error)) {
-                        quotaCooldownUntilMs = System.currentTimeMillis() + QUOTA_RETRY_COOLDOWN_MS
-                        if (!hasNotifiedQuotaError) {
-                            hasNotifiedQuotaError = true
-                            _statusNotice.value = QUOTA_FRIENDLY_MESSAGE
+            if (com.google.firebase.Firebase.auth.currentUser != null) {
+                repository.ensureUserSeeded(
+                    displayNameHint = initialDisplayName,
+                    emailHint = initialEmail
+                ).onFailure { error ->
+                    if (!supabaseClient.isConfigured()) {
+                        if (isQuotaExceeded(error)) {
+                            quotaCooldownUntilMs = System.currentTimeMillis() + QUOTA_RETRY_COOLDOWN_MS
+                            if (!hasNotifiedQuotaError) {
+                                hasNotifiedQuotaError = true
+                                _statusNotice.value = QUOTA_FRIENDLY_MESSAGE
+                            }
+                        } else {
+                            _errorMessage.value = unwrapErrorMessage(error, "Failed to initialize Momi profile")
                         }
                     } else {
-                        _errorMessage.value = unwrapErrorMessage(error, "Failed to initialize Momi profile")
+                        Log.w(TAG, "Background Firestore profile seed skipped", error)
                     }
-                } else {
-                    Log.w(TAG, "Background Firestore profile seed skipped", error)
                 }
-            }
-            walletRepository.ensureWalletInitialized().onFailure { error ->
-                Log.w(TAG, "Wallet initialization deferred", error)
+                walletRepository.ensureWalletInitialized().onFailure { error ->
+                    Log.w(TAG, "Wallet initialization deferred", error)
+                }
             }
         }
         viewModelScope.launch {
+            if (com.google.firebase.Firebase.auth.currentUser == null) return@launch
             walletRepository.observeUnclaimedGifts(currentUserId)
                 .catch { error ->
                     val root = unwrapOrRethrowCancellation(error)

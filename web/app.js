@@ -1,16 +1,5 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.6.0/firebase-app.js';
 import {
-  browserLocalPersistence,
-  getAuth,
-  getRedirectResult,
-  GoogleAuthProvider,
-  onAuthStateChanged,
-  setPersistence,
-  signInWithPopup,
-  signInWithRedirect,
-  signOut
-} from 'https://www.gstatic.com/firebasejs/11.6.0/firebase-auth.js';
-import {
   collection,
   deleteDoc,
   doc,
@@ -60,11 +49,14 @@ import {
   aspectRatioCss
 } from './firebase-config.js';
 import {
+  buildSupabaseGoogleOAuthUrl,
   checkSupabaseHealth,
+  clearSupabaseAuthSession,
   deleteSupabaseRows,
   fetchSupabaseFeed,
   fetchUserSupabaseWorkspace,
   isSupabaseClientReady,
+  loadSupabaseAuthSession,
   mapFirestoreSnapshotToSupabaseBundle,
   mapSupabaseChatMessageToWeb,
   mapSupabaseConfigToWeb,
@@ -79,9 +71,16 @@ import {
   mapSupabaseThreadToWeb,
   mapSupabaseTransactionToWeb,
   mapSupabaseWalletToWeb,
+  parseSupabaseOAuthCallback,
   patchSupabaseRows,
+  saveSupabaseAuthSession,
   selectSupabaseTable,
   SUPABASE_SCHEMA_TABLES,
+  supabaseFetchAuthUser,
+  supabaseRefreshSession,
+  supabaseSignInWithPassword,
+  supabaseSignOut,
+  supabaseSignUpWithEmail,
   syncBundleToSupabase,
   uploadWebFileToStorage,
   upsertSupabaseTable
@@ -95,15 +94,12 @@ import {
 } from './studio.js';
 
 const firebaseApp = initializeApp(FIREBASE_WEB_CONFIG);
-const auth = getAuth(firebaseApp);
 // Secondary best-effort Firestore handle (Supabase is primary; experimentalAutoDetectLongPolling kept for fallback telemetry)
 const db = initializeFirestore(
   firebaseApp,
   { experimentalAutoDetectLongPolling: true },
   FIRESTORE_DATABASE_ID
 );
-const googleProvider = new GoogleAuthProvider();
-googleProvider.setCustomParameters({ prompt: 'select_account' });
 
 const GIFT_CATALOG = [
   { key: 'rose', name: 'Silk Rose', credits: 10 },
@@ -201,16 +197,18 @@ const modalContent = document.getElementById('modalContent');
 const toastBar = document.getElementById('toastBar');
 const mobileDrawerBackdrop = document.getElementById('mobileDrawerBackdrop');
 
+const authInfoBox = document.getElementById('authInfoBox');
+
 const hostnameEl = document.getElementById('currentHostnameLabel');
 if (hostnameEl) hostnameEl.textContent = window.location.hostname || 'localhost';
 
 const pendingLinkNotice = document.getElementById('pendingLinkNotice');
 if (pendingLinkNotice) {
   if (state.pendingDeepLink.postId) {
-    pendingLinkNotice.textContent = 'Shared Momi post ready — sign in with Google to open it directly.';
+    pendingLinkNotice.textContent = 'Shared Momi post ready — sign in to open it directly.';
     pendingLinkNotice.classList.remove('hidden');
   } else if (state.pendingDeepLink.username) {
-    pendingLinkNotice.textContent = `Shared creator @${state.pendingDeepLink.username} — sign in with Google to view their profile.`;
+    pendingLinkNotice.textContent = `Shared creator @${state.pendingDeepLink.username} — sign in to view their profile.`;
     pendingLinkNotice.classList.remove('hidden');
   }
 }
@@ -351,10 +349,20 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !modalBackdrop.classList.contains('hidden')) closeModal();
 });
 
-// Authentication (Firebase Google Auth)
+// Authentication (Supabase Auth: Google OAuth + Email/Password)
 const googleSignInBtn = document.getElementById('googleSignInBtn');
 const defaultGoogleSignInHtml = googleSignInBtn.innerHTML;
+const toggleEmailAuthBtn = document.getElementById('toggleEmailAuthBtn');
+const emailAuthForm = document.getElementById('emailAuthForm');
+const authDisplayNameWrap = document.getElementById('authDisplayNameWrap');
+const authDisplayNameInput = document.getElementById('authDisplayNameInput');
+const authEmailInput = document.getElementById('authEmailInput');
+const authPasswordInput = document.getElementById('authPasswordInput');
+const emailSignInBtn = document.getElementById('emailSignInBtn');
+const toggleAuthModeBtn = document.getElementById('toggleAuthModeBtn');
+
 let signInPending = false;
+let isEmailSignUpMode = false;
 
 function isStandalonePwaMode() {
   return Boolean(
@@ -364,6 +372,7 @@ function isStandalonePwaMode() {
 }
 
 function showAuthError(message, { includeOpenInChrome = false } = {}) {
+  authInfoBox?.classList.add('hidden');
   authErrorBox.textContent = message;
   if (includeOpenInChrome) {
     const link = document.createElement('a');
@@ -380,97 +389,113 @@ function showAuthError(message, { includeOpenInChrome = false } = {}) {
   authErrorBox.classList.remove('hidden');
 }
 
+function showAuthInfo(message) {
+  authErrorBox?.classList.add('hidden');
+  if (!authInfoBox) return;
+  authInfoBox.textContent = message;
+  authInfoBox.classList.remove('hidden');
+}
+
+function clearAuthNotices() {
+  authErrorBox?.classList.add('hidden');
+  authInfoBox?.classList.add('hidden');
+}
+
 function setSignInBusy(busy) {
   signInPending = busy;
   googleSignInBtn.disabled = busy;
+  if (emailSignInBtn) emailSignInBtn.disabled = busy;
   if (busy) {
-    googleSignInBtn.textContent = 'Connecting to Google...';
+    googleSignInBtn.textContent = 'Connecting to Supabase...';
   } else {
     googleSignInBtn.innerHTML = defaultGoogleSignInHtml;
   }
 }
 
-function formatGoogleAuthError(err) {
-  const code = err?.code || '';
-  if (code === 'auth/unauthorized-domain') {
-    const host = window.location.hostname || 'this domain';
-    return {
-      text: `Domain "${host}" is not authorized. Add "${host}" in Firebase Console -> Authentication -> Settings -> Authorized domains.`,
-      openChrome: false
-    };
+function updateEmailAuthModeUi() {
+  if (!authDisplayNameWrap || !emailSignInBtn || !toggleAuthModeBtn) return;
+  authDisplayNameWrap.classList.toggle('hidden', !isEmailSignUpMode);
+  emailSignInBtn.textContent = isEmailSignUpMode ? 'Create Supabase Account' : 'Sign In with Email';
+  toggleAuthModeBtn.textContent = isEmailSignUpMode
+    ? 'Already have an account? Sign in'
+    : 'Need an account? Create one';
+  if (authPasswordInput) {
+    authPasswordInput.autocomplete = isEmailSignUpMode ? 'new-password' : 'current-password';
   }
-  if (code === 'auth/popup-closed-by-user') {
-    return {
-      text: 'Google sign-in closed before finishing. If Google shows a permission screen, scroll down and tap Continue.',
-      openChrome: isStandalonePwaMode()
-    };
-  }
-  return {
-    text: err?.message || 'Google Sign-In did not finish. Try opening Momi directly in Chrome.',
-    openChrome: isStandalonePwaMode()
-  };
 }
 
-const persistenceReady = setPersistence(auth, browserLocalPersistence).catch(() => undefined);
+toggleEmailAuthBtn?.addEventListener('click', () => {
+  clearAuthNotices();
+  emailAuthForm?.classList.toggle('hidden');
+  const open = !emailAuthForm?.classList.contains('hidden');
+  toggleEmailAuthBtn.textContent = open ? 'Hide Email Form' : 'Use Email & Password';
+  if (open) authEmailInput?.focus();
+});
 
-(async () => {
-  await persistenceReady;
-  try {
-    const redirectResult = await getRedirectResult(auth);
-    if (redirectResult?.user) {
-      sessionStorage.removeItem('momi_redirect_pending');
-      return;
-    }
-    if (sessionStorage.getItem('momi_redirect_pending') === '1' && !auth.currentUser) {
-      sessionStorage.removeItem('momi_redirect_pending');
-      showAuthError(
-        'Your browser blocked cross-site sign-in return inside the app window. Tap to finish sign-in in Chrome:',
-        { includeOpenInChrome: true }
-      );
-    }
-  } catch (err) {
-    sessionStorage.removeItem('momi_redirect_pending');
-    const info = formatGoogleAuthError(err);
-    showAuthError(info.text, { includeOpenInChrome: info.openChrome });
-  }
-})();
+toggleAuthModeBtn?.addEventListener('click', () => {
+  clearAuthNotices();
+  isEmailSignUpMode = !isEmailSignUpMode;
+  updateEmailAuthModeUi();
+});
 
-googleSignInBtn.addEventListener('click', async () => {
+googleSignInBtn.addEventListener('click', () => {
   if (signInPending) return;
-  authErrorBox.classList.add('hidden');
+  clearAuthNotices();
+  const redirectTarget = `${window.location.origin}${window.location.pathname}${window.location.search}`;
+  const oauthUrl = buildSupabaseGoogleOAuthUrl(SUPABASE_WEB_CONFIG, redirectTarget);
+  if (!oauthUrl) {
+    showAuthError('Supabase configuration is not ready.');
+    return;
+  }
   setSignInBusy(true);
-  await persistenceReady;
+  sessionStorage.setItem('momi_redirect_pending', '1');
+  window.location.assign(oauthUrl);
+});
+
+emailAuthForm?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (signInPending) return;
+  clearAuthNotices();
+  const email = String(authEmailInput?.value || '').trim();
+  const password = String(authPasswordInput?.value || '');
+  const displayName = String(authDisplayNameInput?.value || '').trim();
+  if (!email.includes('@')) {
+    showAuthError('Enter a valid email address.');
+    return;
+  }
+  if (password.length < 6) {
+    showAuthError('Password must be at least 6 characters.');
+    return;
+  }
+  setSignInBusy(true);
+  if (emailSignInBtn) emailSignInBtn.textContent = isEmailSignUpMode ? 'Creating account...' : 'Signing in...';
   try {
-    if (isStandalonePwaMode()) {
-      sessionStorage.setItem('momi_redirect_pending', '1');
-      await signInWithRedirect(auth, googleProvider);
-      return;
-    }
-    await signInWithPopup(auth, googleProvider);
-    setSignInBusy(false);
-  } catch (err) {
-    if (err?.code === 'auth/popup-blocked' || err?.code === 'auth/cancelled-popup-request') {
-      try {
-        sessionStorage.setItem('momi_redirect_pending', '1');
-        await signInWithRedirect(auth, googleProvider);
-        return;
-      } catch (redirErr) {
-        sessionStorage.removeItem('momi_redirect_pending');
-        const info = formatGoogleAuthError(redirErr);
-        showAuthError(info.text, { includeOpenInChrome: info.openChrome });
+    if (isEmailSignUpMode) {
+      const result = await supabaseSignUpWithEmail(SUPABASE_WEB_CONFIG, email, password, displayName);
+      if (result.session) {
+        applyAuthSession(result.session);
+      } else {
+        isEmailSignUpMode = false;
+        updateEmailAuthModeUi();
+        showAuthInfo('Account created! Check your inbox to confirm your email, then sign in.');
       }
     } else {
-      const info = formatGoogleAuthError(err);
-      showAuthError(info.text, { includeOpenInChrome: info.openChrome });
+      const session = await supabaseSignInWithPassword(SUPABASE_WEB_CONFIG, email, password);
+      applyAuthSession(session);
     }
+  } catch (err) {
+    showAuthError(err?.message || 'Supabase email authentication failed.');
+  } finally {
     setSignInBusy(false);
+    updateEmailAuthModeUi();
   }
 });
 
 async function handleSignOutClick() {
   closeMobileDrawer();
   cleanupSubscriptions();
-  await signOut(auth);
+  await supabaseSignOut(SUPABASE_WEB_CONFIG);
+  applyAuthSession(null);
 }
 
 document.getElementById('signOutBtn')?.addEventListener('click', handleSignOutClick);
@@ -526,8 +551,9 @@ function mirrorFirestoreBestEffort(fn) {
   Promise.resolve().then(fn).catch(() => undefined);
 }
 
-onAuthStateChanged(auth, (user) => {
+function applyAuthSession(session) {
   cleanupSubscriptions();
+  const user = session?.user || null;
   state.user = user;
   state.syncError = null;
   if (!user) {
@@ -543,7 +569,72 @@ onAuthStateChanged(auth, (user) => {
   mainShell.classList.remove('hidden');
   renderAll();
   initializeSupabaseWorkspace(user);
-});
+}
+
+async function bootstrapSupabaseAuth() {
+  try {
+    const oauthCallback = parseSupabaseOAuthCallback(window.location.hash, window.location.search);
+    if (oauthCallback) {
+      sessionStorage.removeItem('momi_redirect_pending');
+      if (oauthCallback.errorDescription) {
+        window.history.replaceState({}, '', `${window.location.pathname}${window.location.search}`);
+        showAuthError(
+          `Google Sign-In via Supabase failed: ${oauthCallback.errorDescription}. Check Supabase Auth -> Google provider or sign in with Email.`,
+          { includeOpenInChrome: isStandalonePwaMode() }
+        );
+        applyAuthSession(null);
+        return;
+      }
+      if (oauthCallback.accessToken) {
+        const fetchedUser = await supabaseFetchAuthUser(SUPABASE_WEB_CONFIG, oauthCallback.accessToken);
+        window.history.replaceState({}, '', `${window.location.pathname}${window.location.search}`);
+        if (fetchedUser) {
+          const session = {
+            accessToken: oauthCallback.accessToken,
+            refreshToken: oauthCallback.refreshToken,
+            expiresAt: Date.now() + oauthCallback.expiresIn * 1000,
+            user: fetchedUser
+          };
+          saveSupabaseAuthSession(session);
+          applyAuthSession(session);
+          return;
+        }
+      }
+    }
+
+    let saved = loadSupabaseAuthSession();
+    if (saved) {
+      const expiringSoon = !saved.expiresAt || Date.now() > saved.expiresAt - 60_000;
+      if (expiringSoon && saved.refreshToken) {
+        const refreshed = await supabaseRefreshSession(SUPABASE_WEB_CONFIG, saved.refreshToken);
+        if (refreshed) {
+          saved = refreshed;
+        } else {
+          clearSupabaseAuthSession();
+          saved = null;
+        }
+      }
+      if (saved) {
+        applyAuthSession(saved);
+        return;
+      }
+    }
+
+    if (sessionStorage.getItem('momi_redirect_pending') === '1') {
+      sessionStorage.removeItem('momi_redirect_pending');
+      showAuthError(
+        'Google Sign-In did not return a Supabase session. Confirm Google OAuth is enabled in Supabase Auth -> Providers -> Google (or use Email & Password).',
+        { includeOpenInChrome: isStandalonePwaMode() }
+      );
+    }
+    applyAuthSession(null);
+  } catch (err) {
+    showAuthError(err?.message || 'Unable to restore Supabase session.');
+    applyAuthSession(null);
+  }
+}
+
+bootstrapSupabaseAuth();
 
 async function initializeSupabaseWorkspace(user) {
   await ensureUserSeededInSupabase(user);
@@ -956,7 +1047,7 @@ function getFilteredHomePosts() {
 }
 
 function isOwnerAdmin() {
-  return state.user?.email === ADMIN_OWNER_EMAIL && Boolean(state.user?.emailVerified);
+  return String(state.user?.email || '').toLowerCase() === ADMIN_OWNER_EMAIL.toLowerCase() && Boolean(state.user?.emailVerified);
 }
 
 function syncMonetagWebIntegration(cfg) {

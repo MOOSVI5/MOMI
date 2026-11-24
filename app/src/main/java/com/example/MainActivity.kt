@@ -87,7 +87,6 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import com.example.auth.authStateFlow
 import com.example.auth.configureAppCheck
 import com.example.auth.signOut
 import com.example.billing.PlayBillingManager
@@ -97,6 +96,7 @@ import com.example.data.model.Post
 import com.example.data.repository.MarketplaceRepository
 import com.example.data.repository.MomiFirestoreRepository
 import com.example.data.repository.WalletRepository
+import com.example.data.supabase.MomiSupabaseClient
 import com.example.ui.components.CommentsBottomSheet
 import com.example.ui.components.FloatingMomiAssistantButton
 import com.example.ui.components.LocalRemoteVideoResolver
@@ -132,8 +132,6 @@ import com.example.util.MomiAlertNotifier
 import com.example.util.MomiDeepLink
 import com.example.util.MomiLinks
 import com.google.android.gms.ads.MobileAds
-import com.google.firebase.Firebase
-import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.PersistentCacheSettings
 import com.google.firebase.firestore.firestoreSettings
@@ -253,19 +251,22 @@ private fun AppNavigation(
     val coroutineScope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
 
-    val currentUser by Firebase.auth.authStateFlow().collectAsStateWithLifecycle(
-        initialValue = Firebase.auth.currentUser
-    )
+    LaunchedEffect(context) {
+        if (MomiSupabaseClient.activeSession == null) {
+            AppearancePrefs.restoreSupabaseSession(context)
+        }
+    }
+    val currentSession by MomiSupabaseClient.sessionFlow.collectAsStateWithLifecycle()
 
-    val user = currentUser
-    if (user == null) {
+    val session = currentSession
+    if (session == null) {
         SignInScreen(
             onAuthSuccess = {
-                // AuthStateListener updates currentUser reactively and switches to LumaApp.
+                // MomiSupabaseClient.sessionFlow updates reactively and switches to LumaApp.
             }
         )
     } else {
-        val uid = user.uid
+        val uid = session.userId
         key(uid) {
             val viewModel: MomiViewModel = viewModel(
                 key = uid,
@@ -280,8 +281,8 @@ private fun AppNavigation(
                             marketplaceRepository = MarketplaceRepository(db),
                             walletRepository = WalletRepository(db),
                             currentUserId = uid,
-                            initialDisplayName = user.displayName,
-                            initialEmail = user.email
+                            initialDisplayName = session.displayName,
+                            initialEmail = session.email
                         )
                     }
                 }
