@@ -117,6 +117,7 @@ jobs:
           STARTIO_APP_ID: ${{ secrets.STARTIO_APP_ID }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: gradle :app:assembleRelease --no-daemon
 
       - name: Prepare Versioned APK for GitHub Release
@@ -124,7 +125,7 @@ jobs:
         shell: bash
         run: |
           VERSION_NAME="$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')"
-          VERSION_NAME="${VERSION_NAME:-1.5}"
+          VERSION_NAME="${VERSION_NAME:-2.2}"
           APK_PATH="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
           if [ -z "$APK_PATH" ]; then
             echo "::error::No release APK found."
@@ -132,6 +133,7 @@ jobs:
           fi
           mkdir -p release-assets
           cp "$APK_PATH" "release-assets/Momi-v${VERSION_NAME}.apk"
+          cp "$APK_PATH" "release-assets/Momi-latest.apk"
           echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
           echo "apk_file=Momi-v${VERSION_NAME}.apk" >> "$GITHUB_OUTPUT"
 
@@ -150,10 +152,10 @@ jobs:
           make_latest: true
           files: release-assets/*.apk
           body: |
-            Signed Android APK for **Momi v${{ steps.release_meta.outputs.version_name }}**.
+            Signed Android APK for **Momi v${{ steps.release_meta.outputs.version_name }}** (CI Build #${{ github.run_number }}).
 
             ### How to install on Android
-            1. Tap **${{ steps.release_meta.outputs.apk_file }}** under Assets below to download directly (no GitHub login needed).
+            1. Tap **${{ steps.release_meta.outputs.apk_file }}** (or **Momi-latest.apk**) under Assets below to download directly (no GitHub login needed).
             2. Open the downloaded `.apk` file and tap **Install** (allow installation from your browser if prompted).
 
       - name: Print Direct APK Link
@@ -161,6 +163,9 @@ jobs:
         run: |
           {
             echo "### Direct Signed Release APK Link"
+            echo "https://github.com/${{ github.repository }}/releases/latest/download/Momi-latest.apk"
+            echo ""
+            echo "### Versioned APK Link"
             echo "https://github.com/${{ github.repository }}/releases/latest/download/${{ steps.release_meta.outputs.apk_file }}"
             echo ""
             echo "### GitHub Releases Page"

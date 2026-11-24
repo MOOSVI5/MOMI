@@ -17,8 +17,8 @@ android {
     applicationId = "com.aistudio.luma.xkpqrm"
     minSdk = 24
     targetSdk = 36
-    versionCode = 12
-    versionName = "2.1"
+    versionCode = 13
+    versionName = "2.2"
 
     val dotEnvMap = buildMap<String, String> {
       val envFile = rootProject.file(".env")
@@ -48,6 +48,9 @@ android {
     val monetagDirectLinkUrl = resolveEnv("MONETAG_DIRECT_LINK_URL", "")
     val supabaseUrl = resolveEnv("SUPABASE_URL", "https://qotuvugkapaspowhbsbf.supabase.co")
     val supabaseAnonKey = resolveEnv("SUPABASE_ANON_KEY", "sb_publishable_LbrQBbU_4qH18qjopmNwIg_ALsMhlln")
+    val geminiApiKey = resolveEnv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
+    val ciBuildNumber = System.getenv("GITHUB_RUN_NUMBER")?.trim()?.toIntOrNull() ?: 0
+    val buildCommit = System.getenv("GITHUB_SHA")?.trim()?.take(7)?.takeIf { it.isNotEmpty() } ?: "local"
 
     manifestPlaceholders["startIoAppId"] = startIoAppId
     manifestPlaceholders["admobAppId"] = admobAppId
@@ -59,6 +62,9 @@ android {
     buildConfigField("String", "MONETAG_DIRECT_LINK_URL", "\"$monetagDirectLinkUrl\"")
     buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
     buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
+    buildConfigField("String", "GEMINI_API_KEY", "\"$geminiApiKey\"")
+    buildConfigField("int", "CI_BUILD_NUMBER", ciBuildNumber.toString())
+    buildConfigField("String", "BUILD_COMMIT", "\"$buildCommit\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -126,7 +132,8 @@ secrets {
       "ADMOB_INTERSTITIAL_UNIT_ID",
       "MONETAG_DIRECT_LINK_URL",
       "SUPABASE_URL",
-      "SUPABASE_ANON_KEY"
+      "SUPABASE_ANON_KEY",
+      "GEMINI_API_KEY"
     )
   )
 }

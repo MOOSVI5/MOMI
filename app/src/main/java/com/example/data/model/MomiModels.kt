@@ -461,7 +461,7 @@ data class AdMonetizationConfig(
     val announcementId: String = "",
     val announcementTitle: String = "",
     val announcementBody: String = "",
-    val latestVersionName: String = "2.1",
+    val latestVersionName: String = "2.2",
     val releaseNotes: String = "",
     val updatedByEmail: String = "",
     @ServerTimestamp val updatedAt: Timestamp? = null

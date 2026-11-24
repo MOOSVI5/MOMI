@@ -2558,7 +2558,7 @@ private fun InAppAnnouncementSheet(
 ) {
     var title by remember(currentConfig) { mutableStateOf(currentConfig.announcementTitle) }
     var body by remember(currentConfig) { mutableStateOf(currentConfig.announcementBody) }
-    var latestVersion by remember(currentConfig) { mutableStateOf(currentConfig.latestVersionName.ifBlank { "2.1" }) }
+    var latestVersion by remember(currentConfig) { mutableStateOf(currentConfig.latestVersionName.ifBlank { "2.2" }) }
     var releaseNotes by remember(currentConfig) { mutableStateOf(currentConfig.releaseNotes) }
 
     ModalBottomSheet(
@@ -2605,7 +2605,7 @@ private fun InAppAnnouncementSheet(
             OutlinedTextField(
                 value = latestVersion,
                 onValueChange = { latestVersion = it },
-                label = { Text("Release Label (e.g. 2.1)") },
+                label = { Text("Release Label (e.g. 2.2)") },
                 singleLine = true,
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth()

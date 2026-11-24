@@ -378,6 +378,8 @@ private fun LumaApp(
     val availableUpdate by viewModel.availableUpdate.collectAsStateWithLifecycle()
     val aiMessages by viewModel.aiMessages.collectAsStateWithLifecycle()
     val aiUiState by viewModel.aiUiState.collectAsStateWithLifecycle()
+    val aiStatus by viewModel.aiStatus.collectAsStateWithLifecycle()
+    val isCheckingAiStatus by viewModel.isCheckingAiStatus.collectAsStateWithLifecycle()
     val isAdminViewActive by viewModel.isAdminModeActive.collectAsStateWithLifecycle()
     val currentUserRole by viewModel.currentUserRole.collectAsStateWithLifecycle()
     val currentModerationScopes by viewModel.currentModerationScopes.collectAsStateWithLifecycle()
@@ -1596,6 +1598,9 @@ private fun LumaApp(
         MomiAiAssistantBottomSheet(
             messages = aiMessages,
             uiState = aiUiState,
+            aiStatus = aiStatus,
+            isCheckingStatus = isCheckingAiStatus,
+            onCheckStatus = { viewModel.checkGoogleAiStatus(force = true) },
             onSendPrompt = viewModel::sendAiPrompt,
             onDismiss = { showAiAssistantSheet = false }
         )
@@ -1632,7 +1637,7 @@ private fun LumaApp(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Installed: v${BuildConfig.VERSION_NAME}",
+                        text = "Installed: v${BuildConfig.VERSION_NAME} · Source: ${update.sourceLabel}",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

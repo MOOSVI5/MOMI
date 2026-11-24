@@ -198,9 +198,28 @@ export function escapeHtml(str = '') {
     .replace(/'/g, '&#39;');
 }
 
+export const APP_VERSION_NAME = '2.2';
+export const APP_VERSION_CODE = 13;
 export const WEB_APP_URL = 'https://moosvi5.github.io/MOMI/';
-export const ANDROID_APK_URL = 'https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-v2.1.apk';
+export const ANDROID_APK_URL = 'https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-latest.apk';
 export const ANDROID_RELEASES_URL = 'https://github.com/MOOSVI5/MOMI/releases/latest';
+
+export function compareSemanticVersions(candidate = '', current = '') {
+  const toNums = (v) => String(v || '')
+    .replace(/^[vV]/, '')
+    .split(/[.\-_]/)
+    .map((p) => Number.parseInt(p.replace(/[^0-9]/g, ''), 10))
+    .filter((n) => Number.isFinite(n));
+  const left = toNums(candidate);
+  const right = toNums(current);
+  const len = Math.max(left.length, right.length);
+  for (let i = 0; i < len; i += 1) {
+    const l = left[i] ?? 0;
+    const r = right[i] ?? 0;
+    if (l !== r) return l > r ? 1 : -1;
+  }
+  return 0;
+}
 
 export const SHOWCASE_PERSONAS = [
   {
@@ -350,7 +369,7 @@ export const DEFAULT_MONETIZATION_CONFIG = {
   announcementId: '',
   announcementTitle: '',
   announcementBody: '',
-  latestVersionName: '2.1',
+  latestVersionName: '2.2',
   releaseNotes: '',
   updatedByEmail: ''
 };

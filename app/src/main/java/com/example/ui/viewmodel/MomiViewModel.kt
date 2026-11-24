@@ -5,6 +5,9 @@ import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.BuildConfig
+import com.example.ai.GoogleAiHealthState
+import com.example.ai.GoogleAiStatus
 import com.example.ai.MomiAiAssistantRepository
 import com.example.data.model.AccountPerkItem
 import com.example.data.model.AdMonetizationConfig
@@ -135,6 +138,12 @@ class MomiViewModel(
     private val _aiUiState = MutableStateFlow<AiAssistantUiState>(AiAssistantUiState.Idle)
     val aiUiState: StateFlow<AiAssistantUiState> = _aiUiState.asStateFlow()
 
+    private val _aiStatus = MutableStateFlow(aiAssistantRepository.currentConfigStatus())
+    val aiStatus: StateFlow<GoogleAiStatus> = _aiStatus.asStateFlow()
+
+    private val _isCheckingAiStatus = MutableStateFlow(false)
+    val isCheckingAiStatus: StateFlow<Boolean> = _isCheckingAiStatus.asStateFlow()
+
     // In-memory stream caches so quota/transient errors NEVER wipe visible posts, profiles, or orders
     private val cachedFollows = MutableStateFlow<List<FollowEdge>>(emptyList())
     private val cachedProfile = MutableStateFlow<UserProfile?>(null)
@@ -212,6 +221,9 @@ class MomiViewModel(
     @Volatile private var hasNotifiedQuotaError = false
     @Volatile private var quotaCooldownUntilMs = 0L
     @Volatile private var hasAutoCheckedUpdatesInSession = false
+    @Volatile private var hasProbedAiStatusInSession = false
+    @Volatile private var knownPlayStoreInstall = false
+    @Volatile private var cachedAppContext: Context? = null
 
     // Optimistic UI overlays + 12s pending mutation protection so background polls NEVER revert recent edits
     private val optimisticPostLikes = MutableStateFlow<Map<String, Boolean>>(emptyMap())
@@ -1134,8 +1146,9 @@ class MomiViewModel(
 
     fun dismissAvailableUpdate(context: Context? = null) {
         val current = _availableUpdate.value
-        if (context != null && current != null) {
-            AppUpdateChecker.dismissVersion(context, current.latestVersionName)
+        val ctx = context ?: cachedAppContext
+        if (ctx != null && current != null) {
+            AppUpdateChecker.dismissVersion(ctx, current.latestVersionName, current.remoteBuildNumber)
         }
         _availableUpdate.value = null
     }
@@ -1145,24 +1158,37 @@ class MomiViewModel(
         manual: Boolean = false,
         isPlayStoreInstall: Boolean = false
     ) {
+        if (context != null) {
+            cachedAppContext = context.applicationContext
+        }
+        knownPlayStoreInstall = isPlayStoreInstall
+        val effectiveContext = context ?: cachedAppContext
+
         if (!manual) {
             if (hasAutoCheckedUpdatesInSession) return
-            if (context != null && !AppUpdateChecker.shouldRunAutoCheck(context)) return
+            if (effectiveContext != null && !AppUpdateChecker.shouldRunAutoCheck(effectiveContext)) return
             hasAutoCheckedUpdatesInSession = true
-            if (context != null) {
-                AppUpdateChecker.recordAutoCheck(context)
+            if (effectiveContext != null) {
+                AppUpdateChecker.recordAutoCheck(effectiveContext)
             }
-        } else if (context != null) {
-            AppUpdateChecker.clearDismissedVersion(context)
+        } else if (effectiveContext != null) {
+            AppUpdateChecker.clearDismissedVersion(effectiveContext)
         }
 
         viewModelScope.launch {
-            AppUpdateChecker.checkForUpdate(isPlayStoreInstall = isPlayStoreInstall)
+            AppUpdateChecker.checkForUpdate(
+                isPlayStoreInstall = isPlayStoreInstall,
+                supabaseConfig = monetizationConfig.value
+            )
                 .onSuccess { result ->
                     val candidate = result.availableUpdate
                     if (candidate != null) {
-                        val isDismissed = context != null &&
-                            AppUpdateChecker.isVersionDismissed(context, candidate.latestVersionName)
+                        val isDismissed = effectiveContext != null &&
+                            AppUpdateChecker.isVersionDismissed(
+                                effectiveContext,
+                                candidate.latestVersionName,
+                                candidate.remoteBuildNumber
+                            )
                         if (manual || !isDismissed) {
                             _availableUpdate.value = candidate
                         }
@@ -1182,37 +1208,82 @@ class MomiViewModel(
         }
     }
 
+    fun checkGoogleAiStatus(force: Boolean = false) {
+        if (_isCheckingAiStatus.value) return
+        if (!force && hasProbedAiStatusInSession && _aiStatus.value.state == GoogleAiHealthState.READY) {
+            return
+        }
+        hasProbedAiStatusInSession = true
+        viewModelScope.launch {
+            _isCheckingAiStatus.value = true
+            _aiStatus.value = _aiStatus.value.copy(
+                state = GoogleAiHealthState.CHECKING,
+                label = "Checking Google AI..."
+            )
+            val result = aiAssistantRepository.probeGoogleAiStatus()
+            _aiStatus.value = result
+            _isCheckingAiStatus.value = false
+        }
+    }
+
     fun sendAiPrompt(prompt: String) {
         val clean = prompt.trim()
         if (clean.isEmpty() || _aiUiState.value is AiAssistantUiState.Generating) return
 
+        val historyPairs = _aiMessages.value
+            .filter { it.id != "welcome_ai" && !it.isError && it.text.isNotBlank() }
+            .map { it.isUser to it.text }
+
         val userTurnId = "user_${UUID.randomUUID()}"
         val botTurnId = "ai_${UUID.randomUUID()}"
         _aiMessages.update {
-            it + AiAssistantTurn(id = userTurnId, isUser = true, text = clean) +
-                AiAssistantTurn(id = botTurnId, isUser = false, text = "")
+            it + AiAssistantTurn(id = userTurnId, isUser = true, text = clean)
         }
         _aiUiState.value = AiAssistantUiState.Generating
 
         viewModelScope.launch {
-            aiAssistantRepository.streamReply(clean).collect { chunkResult ->
-                chunkResult.onSuccess { partialText ->
+            aiAssistantRepository.streamReply(clean, historyPairs).collect { chunkResult ->
+                chunkResult.onSuccess { replyText ->
                     _aiMessages.update { turns ->
-                        turns.map { turn ->
-                            if (turn.id == botTurnId) turn.copy(text = partialText, isError = false) else turn
-                        }
-                    }
-                }.onFailure { err ->
-                    val msg = err.localizedMessage ?: "Assistant is temporarily unavailable."
-                    _aiMessages.update { turns ->
-                        turns.map { turn ->
-                            if (turn.id == botTurnId && turn.text.isBlank()) {
-                                turn.copy(text = msg, isError = true)
-                            } else {
-                                turn
+                        val existing = turns.any { it.id == botTurnId }
+                        if (existing) {
+                            turns.map { turn ->
+                                if (turn.id == botTurnId) turn.copy(text = replyText, isError = false) else turn
                             }
+                        } else {
+                            turns + AiAssistantTurn(id = botTurnId, isUser = false, text = replyText, isError = false)
                         }
                     }
+                    _aiStatus.value = GoogleAiStatus(
+                        state = GoogleAiHealthState.READY,
+                        label = "Google AI Connected",
+                        detail = "Live reply received from Google Gemini"
+                    )
+                }.onFailure { err ->
+                    val msg = err.localizedMessage ?: "Google AI Assistant is temporarily unavailable."
+                    _aiMessages.update { turns ->
+                        val existing = turns.any { it.id == botTurnId }
+                        if (existing) {
+                            turns.map { turn ->
+                                if (turn.id == botTurnId && turn.text.isBlank()) {
+                                    turn.copy(text = msg, isError = true)
+                                } else {
+                                    turn
+                                }
+                            }
+                        } else {
+                            turns + AiAssistantTurn(id = botTurnId, isUser = false, text = msg, isError = true)
+                        }
+                    }
+                    _aiStatus.value = GoogleAiStatus(
+                        state = if (msg.contains("GEMINI_API_KEY", ignoreCase = true)) {
+                            GoogleAiHealthState.MISSING_KEY
+                        } else {
+                            GoogleAiHealthState.ERROR
+                        },
+                        label = "Google AI Not Answering",
+                        detail = msg
+                    )
                     _aiUiState.value = AiAssistantUiState.Error(msg)
                 }
             }
@@ -3880,7 +3951,7 @@ class MomiViewModel(
             announcementId = annId,
             announcementTitle = cleanTitle,
             announcementBody = cleanBody,
-            latestVersionName = latestVersionName.trim().ifBlank { "2.1" }.take(24),
+            latestVersionName = latestVersionName.trim().ifBlank { BuildConfig.VERSION_NAME }.take(24),
             releaseNotes = releaseNotes.trim().take(400),
             updatedByEmail = initialEmail ?: "syali6511@gmail.com",
             updatedAt = Timestamp.now()
@@ -4386,6 +4457,21 @@ class MomiViewModel(
                 bundle.monetizationConfig?.let {
                     supaMonetizationConfig.value = it
                     cachedMonetizationConfig.value = it
+                    val supabaseUpdate = AppUpdateChecker.evaluateSupabaseConfigUpdate(
+                        config = it,
+                        isPlayStoreInstall = knownPlayStoreInstall
+                    )
+                    if (supabaseUpdate != null && _availableUpdate.value == null) {
+                        val ctx = cachedAppContext
+                        val dismissed = ctx != null && AppUpdateChecker.isVersionDismissed(
+                            ctx,
+                            supabaseUpdate.latestVersionName,
+                            supabaseUpdate.remoteBuildNumber
+                        )
+                        if (!dismissed) {
+                            _availableUpdate.value = supabaseUpdate
+                        }
+                    }
                 }
                 supaHasLoadedFeed.value = true
             }

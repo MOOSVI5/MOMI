@@ -11,9 +11,12 @@ import {
   ADMIN_OWNER_EMAIL,
   ANDROID_APK_URL,
   ANDROID_RELEASES_URL,
+  APP_VERSION_CODE,
+  APP_VERSION_NAME,
   ASPECT_RATIOS,
   buildPostShareUrl,
   buildProfileShareUrl,
+  compareSemanticVersions,
   DEFAULT_MONETIZATION_CONFIG,
   escapeHtml,
   EXPLORE_CATEGORIES,
@@ -149,6 +152,10 @@ const state = {
   profileTab: 'posts',
   ownerConsoleTab: 'starters',
   dismissedAnnouncementId: localStorage.getItem('momi_dismissed_ann') || '',
+  dismissedUpdateKey: localStorage.getItem('momi_dismissed_update') || '',
+  availableUpdate: null,
+  loadedBuildMeta: null,
+  swRegistration: null,
   pendingMutations: {
     likes: new Map(),
     bookmarks: new Map(),
@@ -238,9 +245,121 @@ if (pendingLinkNotice) {
   }
 }
 
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js').catch(() => undefined);
+async function applyWebAppReloadUpdate() {
+  try {
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((r) => r.update().catch(() => undefined)));
+      if (state.swRegistration?.waiting) {
+        state.swRegistration.waiting.postMessage({ type: 'SKIP_WAITING' });
+      }
+    }
+    if ('caches' in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    }
+  } catch {
+    // Fallback to hard reload
+  }
+  window.location.reload();
 }
+
+async function checkForWebAndAppUpdates({ manual = false } = {}) {
+  try {
+    if (state.swRegistration) {
+      state.swRegistration.update().catch(() => undefined);
+    }
+    let manifest = null;
+    try {
+      const res = await fetch(`./version.json?t=${Date.now()}`, { cache: 'no-store' });
+      if (res.ok) {
+        manifest = await res.json();
+      }
+    } catch {
+      manifest = null;
+    }
+
+    if (manifest && !state.loadedBuildMeta) {
+      state.loadedBuildMeta = {
+        commitSha: String(manifest.commitSha || ''),
+        buildNumber: Number(manifest.buildNumber || 0),
+        versionName: String(manifest.versionName || APP_VERSION_NAME)
+      };
+    }
+
+    const cfg = state.monetizationConfig || DEFAULT_MONETIZATION_CONFIG;
+    const manifestVer = String(manifest?.versionName || APP_VERSION_NAME).replace(/^[vV]/, '').trim();
+    const manifestCode = Number(manifest?.versionCode || 0);
+    const manifestBuild = Number(manifest?.buildNumber || 0);
+    const manifestSha = String(manifest?.commitSha || '').trim();
+    const supaVer = String(cfg.latestVersionName || APP_VERSION_NAME).replace(/^[vV]/, '').trim();
+
+    const newerVersionFromManifest = compareSemanticVersions(manifestVer, APP_VERSION_NAME) > 0 ||
+      (manifestCode > 0 && manifestCode > APP_VERSION_CODE);
+    const newerVersionFromSupabase = compareSemanticVersions(supaVer, APP_VERSION_NAME) > 0;
+    const pushedNewBuildOnSameVersion = Boolean(
+      state.loadedBuildMeta && manifest && (
+        (manifestBuild > 0 && manifestBuild > (state.loadedBuildMeta.buildNumber || 0)) ||
+        (manifestSha && state.loadedBuildMeta.commitSha && manifestSha !== 'local' && manifestSha !== state.loadedBuildMeta.commitSha)
+      )
+    );
+    const swWaiting = Boolean(state.swRegistration?.waiting);
+
+    const candidateVer = compareSemanticVersions(supaVer, manifestVer) > 0 ? supaVer : manifestVer;
+    const updateKey = `${candidateVer}+${manifestBuild || manifestSha || 'supa'}`;
+
+    if (newerVersionFromManifest || newerVersionFromSupabase || pushedNewBuildOnSameVersion || swWaiting) {
+      const isDismissed = !manual && state.dismissedUpdateKey === updateKey;
+      if (!isDismissed) {
+        state.availableUpdate = {
+          key: updateKey,
+          versionName: candidateVer || APP_VERSION_NAME,
+          buildNumber: manifestBuild,
+          commitSha: manifestSha,
+          releaseNotes: cfg.releaseNotes || manifest?.releaseNotes || 'A newer Momi update is live with fixes and improvements.',
+          apkUrl: manifest?.apkUrl || ANDROID_APK_URL,
+          webReloadRequired: Boolean(newerVersionFromManifest || pushedNewBuildOnSameVersion || swWaiting)
+        };
+        if (state.user) {
+          if (state.nav === 'home') renderHome();
+          renderRightRail();
+        }
+      }
+      if (manual) {
+        showToast(`Update available: Momi v${candidateVer || APP_VERSION_NAME}!`);
+      }
+    } else if (manual) {
+      showToast(`Momi Web is up to date (v${APP_VERSION_NAME}).`);
+    }
+  } catch {
+    if (manual) {
+      showToast(`Running Momi v${APP_VERSION_NAME}.`);
+    }
+  }
+}
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').then((reg) => {
+    state.swRegistration = reg;
+    reg.addEventListener('updatefound', () => {
+      const installing = reg.installing;
+      if (!installing) return;
+      installing.addEventListener('statechange', () => {
+        if (installing.state === 'installed' && navigator.serviceWorker.controller) {
+          checkForWebAndAppUpdates({ manual: false });
+        }
+      });
+    });
+  }).catch(() => undefined);
+}
+
+checkForWebAndAppUpdates({ manual: false });
+setInterval(() => checkForWebAndAppUpdates({ manual: false }), 90_000);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    checkForWebAndAppUpdates({ manual: false });
+  }
+});
 
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();
@@ -1087,8 +1206,8 @@ function renderRightRail() {
   if (rightAndroidCard) {
     rightAndroidCard.innerHTML = `
       <div class="rail-title-row">
-        <h3>Momi for Android</h3>
-        <span class="desktop-badge">APK</span>
+        <h3>Momi v${escapeHtml(APP_VERSION_NAME)}</h3>
+        <span class="desktop-badge">APK &amp; WEB</span>
       </div>
       <p class="muted small" style="margin:0 0 10px;">
         Native mobile camera studio, notifications &amp; Play Billing wallet — synced with Web via Supabase.
@@ -1096,9 +1215,11 @@ function renderRightRail() {
       <div class="android-promo-actions">
         <a class="btn-primary btn-sm" href="${ANDROID_APK_URL}" target="_blank" rel="noopener noreferrer">Download APK</a>
         <a class="btn-outline btn-sm" href="${ANDROID_RELEASES_URL}" target="_blank" rel="noopener noreferrer">Releases</a>
+        <button type="button" class="btn-ghost btn-sm" id="railCheckUpdatesBtn">Check Updates</button>
         <button type="button" class="btn-ghost btn-sm" id="railCopyAndroidLinkBtn">Copy</button>
       </div>
     `;
+    document.getElementById('railCheckUpdatesBtn').onclick = () => checkForWebAndAppUpdates({ manual: true });
     document.getElementById('railCopyAndroidLinkBtn').onclick = async () => {
       await navigator.clipboard?.writeText(ANDROID_APK_URL).catch(() => undefined);
       showToast('Android APK download link copied!');
@@ -1415,11 +1536,30 @@ function renderHome() {
         </div>
       </div>
 
+      ${state.availableUpdate ? `
+        <div class="announcement-banner" role="region" aria-label="Pushed app update available" style="border-color:var(--primary);">
+          <div style="flex:1;min-width:200px;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <span class="badge-pill">New Update · v${escapeHtml(state.availableUpdate.versionName)}</span>
+              <strong>${state.availableUpdate.webReloadRequired ? 'New pushed Momi update is live!' : 'New Android APK release available'}</strong>
+            </div>
+            <div class="small muted" style="margin-top:6px;line-height:1.45;">
+              ${escapeHtml(state.availableUpdate.releaseNotes)} (Running Web v${escapeHtml(APP_VERSION_NAME)})
+            </div>
+            <div class="chip-row" style="margin-top:8px;">
+              ${state.availableUpdate.webReloadRequired ? '<button type="button" class="btn-primary btn-sm" id="reloadUpdatedWebBtn">Update &amp; Reload Web</button>' : ''}
+              <a class="btn-outline btn-sm" href="${escapeHtml(state.availableUpdate.apkUrl || ANDROID_APK_URL)}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Download Android APK</a>
+            </div>
+          </div>
+          <button type="button" class="btn-ghost btn-sm" id="dismissVersionUpdateBtn" data-update-key="${escapeHtml(state.availableUpdate.key)}">Later</button>
+        </div>
+      ` : ''}
+
       ${showAnnouncement ? `
         <div class="announcement-banner" role="region" aria-label="In-app announcement">
           <div style="flex:1;min-width:200px;">
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-              <span class="badge-pill">Momi v${escapeHtml(cfg.latestVersionName || '2.1')}</span>
+              <span class="badge-pill">Momi v${escapeHtml(cfg.latestVersionName || APP_VERSION_NAME)}</span>
               <strong>${escapeHtml(cfg.announcementTitle || 'Momi Update Notice')}</strong>
             </div>
             ${cfg.announcementBody ? `<div class="small" style="margin-top:6px;line-height:1.45;">${escapeHtml(cfg.announcementBody)}</div>` : ''}
@@ -1477,6 +1617,14 @@ function renderHome() {
   document.getElementById('homeOpenCommunitiesChip').onclick = () => navigateTo('communities');
   document.getElementById('homeOpenAiChip').onclick = () => openAiAssistantModal();
   document.getElementById('homeOpenAdminBtn')?.addEventListener('click', () => navigateTo('admin'));
+  document.getElementById('reloadUpdatedWebBtn')?.addEventListener('click', () => applyWebAppReloadUpdate());
+  document.getElementById('dismissVersionUpdateBtn')?.addEventListener('click', (e) => {
+    const k = e.currentTarget.dataset.updateKey || '';
+    state.dismissedUpdateKey = k;
+    localStorage.setItem('momi_dismissed_update', k);
+    state.availableUpdate = null;
+    renderHome();
+  });
   document.getElementById('dismissAnnouncementBtn')?.addEventListener('click', (e) => {
     const id = e.currentTarget.dataset.annId || 'latest';
     state.dismissedAnnouncementId = id;
@@ -2390,7 +2538,7 @@ function renderNotifications() {
         <div class="announcement-banner" role="region" aria-label="Pinned Momi update announcement">
           <div style="flex:1;min-width:200px;">
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-              <span class="badge-pill">In-App Update &middot; v${escapeHtml(cfg.latestVersionName || '2.1')}</span>
+              <span class="badge-pill">In-App Update &middot; v${escapeHtml(cfg.latestVersionName || APP_VERSION_NAME)}</span>
               <strong>${escapeHtml(cfg.announcementTitle || 'Momi Update Notice')}</strong>
             </div>
             ${cfg.announcementBody ? `<div class="small" style="margin-top:6px;line-height:1.45;">${escapeHtml(cfg.announcementBody)}</div>` : ''}
@@ -4302,7 +4450,7 @@ async function saveAdMonetizationConfigFromForm() {
       announcement_id: existingCfg.announcementId || '',
       announcement_title: existingCfg.announcementTitle || '',
       announcement_body: existingCfg.announcementBody || '',
-      latest_version_name: existingCfg.latestVersionName || '2.1',
+      latest_version_name: existingCfg.latestVersionName || APP_VERSION_NAME,
       release_notes: existingCfg.releaseNotes || '',
       updated_by_email: ADMIN_OWNER_EMAIL
     };
@@ -4895,7 +5043,7 @@ function renderAdminConsole() {
             <div class="owner-form-grid">
               <div>
                 <label class="small muted">Latest Version Label</label>
-                <input id="annVersionInput" class="input" value="${escapeHtml(cfg.latestVersionName || '2.1')}" placeholder="2.1" />
+                <input id="annVersionInput" class="input" value="${escapeHtml(cfg.latestVersionName || APP_VERSION_NAME)}" placeholder="${escapeHtml(APP_VERSION_NAME)}" />
               </div>
               <div>
                 <label class="small muted">Announcement Title *</label>
@@ -5380,7 +5528,7 @@ async function saveInAppAnnouncementFromForm({ clear = false } = {}) {
       announcement_id: clear ? '' : `ann_${Date.now()}`,
       announcement_title: clear ? '' : document.getElementById('annTitleInput').value.trim().slice(0, 120),
       announcement_body: clear ? '' : document.getElementById('annBodyInput').value.trim().slice(0, 500),
-      latest_version_name: document.getElementById('annVersionInput')?.value.trim().slice(0, 32) || '2.1',
+      latest_version_name: document.getElementById('annVersionInput')?.value.trim().slice(0, 32) || APP_VERSION_NAME,
       release_notes: clear ? '' : document.getElementById('annNotesInput').value.trim().slice(0, 400),
       updated_by_email: ADMIN_OWNER_EMAIL
     };
@@ -5396,30 +5544,32 @@ async function saveInAppAnnouncementFromForm({ clear = false } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Momi AI Assistant Modal (Honest Web Status + Android Gemini Integration)
+// Momi AI Assistant Modal (Honest Google AI Status + Android Gemini Integration)
 // ---------------------------------------------------------------------------
 
 function openAiAssistantModal() {
   const templates = [
     { label: 'Travel Photo', caption: 'Golden hour shadows and calm streets along the coast today. #travel #momi #goldenhour' },
     { label: 'Video Clip Hook', caption: '3 quick frames from today’s studio session — wait for the final cut! #clips #studio #momi' },
-    { label: 'Community Poll', caption: 'Which color palette fits this weekend’s drop better? Tell me below! #community #design #momi' }
+    { label: 'Community Group Poll', caption: 'Which color palette fits this weekend’s drop better? Tell me below! #community #design #momi' },
+    { label: 'Creator Page Intro', caption: 'Welcome to our official Momi Creator Page — behind-the-scenes drops, live Q&As & tutorials every week. #creator #momi' },
+    { label: 'Marketplace Spotlight', caption: 'Fresh handcrafted release now live in Momi Marketplace — tap to view verified store details. #marketplace #shop #momi' }
   ];
   openModal(`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
       <div style="display:flex;align-items:center;gap:8px;">
-        <h3 style="margin:0;">Momi AI Studio</h3>
-        <span class="badge-pill">Android Gemini 2.5 Flash</span>
+        <h3 style="margin:0;">Momi Google AI Studio</h3>
+        <span class="badge-pill">Gemini 2.5 Flash · v${escapeHtml(APP_VERSION_NAME)}</span>
       </div>
       <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
     </div>
     <div class="card-panel" style="gap:10px;background:var(--surface-alt);">
-      <strong>Live AI Replies Run Securely on Momi Android</strong>
+      <strong>Google AI Status on Web vs Android</strong>
       <div class="small muted" style="line-height:1.5;">
-        Momi does not expose or store secret Gemini API keys inside browser client code. Full conversational Momi AI runs in the Android app when <code>GEMINI_API_KEY</code> is configured in AI Studio Secrets.
+        Browser code never stores or exposes your private Gemini API key. Live Google Gemini replies run inside the Android app with <strong>Test Status</strong> diagnostics and automatic model fallback once <code>GEMINI_API_KEY</code> is added in AI Studio Secrets (and GitHub Secrets for APK releases).
       </div>
       <div class="chip-row">
-        <a class="btn-primary btn-sm" href="${ANDROID_APK_URL}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Get Momi Android APK</a>
+        <a class="btn-primary btn-sm" href="${ANDROID_APK_URL}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Download Momi v${escapeHtml(APP_VERSION_NAME)} APK</a>
       </div>
     </div>
     <div style="margin-top:16px;">

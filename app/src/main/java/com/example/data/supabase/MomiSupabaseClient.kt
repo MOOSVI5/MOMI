@@ -1976,7 +1976,7 @@ class MomiSupabaseClient(
             announcementId = o.optString("announcement_id"),
             announcementTitle = o.optString("announcement_title"),
             announcementBody = o.optString("announcement_body"),
-            latestVersionName = o.optString("latest_version_name").ifBlank { "2.1" },
+            latestVersionName = o.optString("latest_version_name").ifBlank { "2.2" },
             releaseNotes = o.optString("release_notes"),
             updatedByEmail = o.optString("updated_by_email")
         )

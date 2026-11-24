@@ -36,9 +36,34 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          VERSION_NAME="$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')"
+          VERSION_NAME="${VERSION_NAME:-2.2}"
+          VERSION_CODE="$(grep -m1 'versionCode' app/build.gradle.kts | sed -E 's/.*=\s*([0-9]+).*/\1/')"
+          VERSION_CODE="${VERSION_CODE:-13}"
+          SHORT_SHA="$(echo "${{ github.sha }}" | cut -c1-7)"
+          BUILD_NUM="${{ github.run_number }}"
+          BUILT_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
           TMP_DIR="$(mktemp -d)"
           cp -R web/. "$TMP_DIR/"
           touch "$TMP_DIR/.nojekyll"
+          cat > "$TMP_DIR/version.json" <<EOF
+          {
+            "versionName": "$VERSION_NAME",
+            "versionCode": $VERSION_CODE,
+            "buildNumber": $BUILD_NUM,
+            "commitSha": "$SHORT_SHA",
+            "releasedAt": "$BUILT_AT",
+            "releaseTitle": "Momi v$VERSION_NAME",
+            "releaseNotes": "Latest pushed build #$BUILD_NUM ($SHORT_SHA) is live.",
+            "apkUrl": "https://github.com/${{ github.repository }}/releases/latest/download/Momi-latest.apk",
+            "releasesUrl": "https://github.com/${{ github.repository }}/releases/latest",
+            "webUrl": "https://${{ github.repository_owner }}.github.io/${GITHUB_REPOSITORY#*/}/"
+          }
+          EOF
+          if [ -f "$TMP_DIR/sw.js" ]; then
+            sed -i -E "s|const CACHE_NAME = '[^']+';|const CACHE_NAME = 'momi-web-v${VERSION_NAME}-${BUILD_NUM}-${SHORT_SHA}';|" "$TMP_DIR/sw.js"
+          fi
           cd "$TMP_DIR"
           git init -b gh-pages
           git config user.name "github-actions[bot]"

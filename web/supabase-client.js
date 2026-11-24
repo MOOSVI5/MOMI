@@ -294,7 +294,7 @@ export function mapFirestoreSnapshotToSupabaseBundle({
     announcement_id: String(cfg.announcementId || '').slice(0, 80),
     announcement_title: String(cfg.announcementTitle || '').slice(0, 120),
     announcement_body: String(cfg.announcementBody || '').slice(0, 500),
-    latest_version_name: String(cfg.latestVersionName || '2.1').slice(0, 32),
+    latest_version_name: String(cfg.latestVersionName || '2.2').slice(0, 32),
     release_notes: String(cfg.releaseNotes || '').slice(0, 400),
     updated_by_email: String(cfg.updatedByEmail || '').slice(0, 120)
   }];
@@ -797,7 +797,7 @@ export function mapSupabaseConfigToWeb(row = {}) {
     announcementId: String(row.announcement_id || ''),
     announcementTitle: String(row.announcement_title || ''),
     announcementBody: String(row.announcement_body || ''),
-    latestVersionName: String(row.latest_version_name || '2.1'),
+    latestVersionName: String(row.latest_version_name || '2.2'),
     releaseNotes: String(row.release_notes || '')
   };
 }

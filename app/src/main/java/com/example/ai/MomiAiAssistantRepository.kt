@@ -16,6 +16,20 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
+enum class GoogleAiHealthState {
+    CHECKING,
+    READY,
+    MISSING_KEY,
+    ERROR
+}
+
+data class GoogleAiStatus(
+    val state: GoogleAiHealthState,
+    val label: String,
+    val detail: String,
+    val activeModel: String = "gemini-2.5-flash"
+)
+
 class MomiAiAssistantRepository(
     private val httpClient: OkHttpClient = defaultHttpClient
 ) {
@@ -26,7 +40,60 @@ class MomiAiAssistantRepository(
             "Studio Music tracks, voice/video DMs, and guide buyers and verified merchants on Momi Marketplace. " +
             "Keep replies concise, friendly, accurate to Momi, and actionable."
 
-    fun streamReply(userPrompt: String): Flow<Result<String>> = flow {
+    fun currentConfigStatus(): GoogleAiStatus {
+        val apiKey = BuildConfig.GEMINI_API_KEY.trim()
+        return if (apiKey.isEmpty() || apiKey == PLACEHOLDER_KEY) {
+            GoogleAiStatus(
+                state = GoogleAiHealthState.MISSING_KEY,
+                label = "Needs GEMINI_API_KEY",
+                detail = "Set GEMINI_API_KEY in AI Studio Secrets (or GitHub Actions Secrets for APK builds) so Google Gemini can answer."
+            )
+        } else {
+            GoogleAiStatus(
+                state = GoogleAiHealthState.READY,
+                label = "Google AI Ready",
+                detail = "GEMINI_API_KEY configured · Using Gemini 2.5 Flash"
+            )
+        }
+    }
+
+    suspend fun probeGoogleAiStatus(): GoogleAiStatus {
+        val configStatus = currentConfigStatus()
+        if (configStatus.state == GoogleAiHealthState.MISSING_KEY) {
+            return configStatus
+        }
+        val apiKey = BuildConfig.GEMINI_API_KEY.trim()
+        return try {
+            val (modelUsed, _) = withTimeout(20_000L) {
+                requestGeminiReplyWithModel(
+                    apiKey = apiKey,
+                    prompt = "Respond with one word: Ready.",
+                    history = emptyList(),
+                    maxOutputTokens = 32
+                )
+            }
+            GoogleAiStatus(
+                state = GoogleAiHealthState.READY,
+                label = "Google AI Connected",
+                detail = "Live response verified on $modelUsed",
+                activeModel = modelUsed
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            GoogleAiStatus(
+                state = GoogleAiHealthState.ERROR,
+                label = "Google AI Not Answering",
+                detail = e.localizedMessage?.takeIf { it.isNotBlank() }
+                    ?: "Could not reach Google Gemini API. Check GEMINI_API_KEY and internet connection."
+            )
+        }
+    }
+
+    fun streamReply(
+        userPrompt: String,
+        history: List<Pair<Boolean, String>> = emptyList()
+    ): Flow<Result<String>> = flow {
         val cleanPrompt = userPrompt.trim()
         if (cleanPrompt.isEmpty()) {
             emit(Result.failure(IllegalArgumentException("Please enter a question.")))
@@ -34,11 +101,11 @@ class MomiAiAssistantRepository(
         }
 
         val apiKey = BuildConfig.GEMINI_API_KEY.trim()
-        if (apiKey.isEmpty() || apiKey == "YOUR_GEMINI_API_KEY") {
+        if (apiKey.isEmpty() || apiKey == PLACEHOLDER_KEY) {
             emit(
                 Result.failure(
                     IllegalStateException(
-                        "Momi AI Assistant needs GEMINI_API_KEY configured in AI Studio Secrets."
+                        "Google AI is not configured yet: add GEMINI_API_KEY in AI Studio Secrets (and GitHub Secrets if building APK) and rebuild."
                     )
                 )
             )
@@ -46,8 +113,13 @@ class MomiAiAssistantRepository(
         }
 
         try {
-            val reply = withTimeout(45_000L) {
-                requestGeminiReply(apiKey = apiKey, prompt = cleanPrompt)
+            val (_, reply) = withTimeout(45_000L) {
+                requestGeminiReplyWithModel(
+                    apiKey = apiKey,
+                    prompt = cleanPrompt,
+                    history = history,
+                    maxOutputTokens = 1024
+                )
             }
             emit(Result.success(reply))
         } catch (e: CancellationException) {
@@ -60,73 +132,141 @@ class MomiAiAssistantRepository(
         emit(Result.failure(error))
     }
 
-    private suspend fun requestGeminiReply(apiKey: String, prompt: String): String =
-        withContext(Dispatchers.IO) {
-            val payload = JSONObject().apply {
-                put(
-                    "system_instruction",
-                    JSONObject().put(
-                        "parts",
-                        JSONArray().put(JSONObject().put("text", systemPrompt))
-                    )
+    private suspend fun requestGeminiReplyWithModel(
+        apiKey: String,
+        prompt: String,
+        history: List<Pair<Boolean, String>>,
+        maxOutputTokens: Int
+    ): Pair<String, String> = withContext(Dispatchers.IO) {
+        var lastError: Exception? = null
+        for (model in MODEL_CANDIDATES) {
+            try {
+                val reply = executeSingleModelCall(
+                    apiKey = apiKey,
+                    model = model,
+                    prompt = prompt,
+                    history = history,
+                    maxOutputTokens = maxOutputTokens
                 )
-                put(
-                    "contents",
-                    JSONArray().put(
-                        JSONObject()
-                            .put("role", "user")
-                            .put("parts", JSONArray().put(JSONObject().put("text", prompt)))
-                    )
-                )
-                put(
-                    "generationConfig",
-                    JSONObject()
-                        .put("temperature", 0.7)
-                        .put("maxOutputTokens", 700)
-                )
-            }.toString()
-
-            val request = Request.Builder()
-                .url("$GEMINI_ENDPOINT?key=$apiKey")
-                .header("Content-Type", "application/json")
-                .post(payload.toRequestBody(JSON_MEDIA_TYPE))
-                .build()
-
-            httpClient.newCall(request).execute().use { response ->
-                val rawBody = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    val detail = runCatching {
-                        JSONObject(rawBody).optJSONObject("error")?.optString("message")
-                    }.getOrNull()?.takeIf { !it.isNullOrBlank() }
-                    error(detail ?: "Momi AI returned HTTP ${response.code}. Please try again.")
-                }
-
-                val root = JSONObject(rawBody)
-                val candidates = root.optJSONArray("candidates")
-                val parts = candidates?.optJSONObject(0)
-                    ?.optJSONObject("content")
-                    ?.optJSONArray("parts")
-                val textBuilder = StringBuilder()
-                if (parts != null) {
-                    for (i in 0 until parts.length()) {
-                        val segment = parts.optJSONObject(i)?.optString("text").orEmpty()
-                        if (segment.isNotBlank()) {
-                            if (textBuilder.isNotEmpty()) textBuilder.append('\n')
-                            textBuilder.append(segment)
-                        }
-                    }
-                }
-                val result = textBuilder.toString().trim()
-                require(result.isNotEmpty()) {
-                    "No response received from Momi Assistant. Please try again."
-                }
-                result
+                return@withContext model to reply
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: NonRetryableGeminiException) {
+                throw e
+            } catch (e: Exception) {
+                lastError = e
             }
         }
+        throw (lastError ?: IllegalStateException("Google AI did not return a response. Please try again."))
+    }
+
+    private fun executeSingleModelCall(
+        apiKey: String,
+        model: String,
+        prompt: String,
+        history: List<Pair<Boolean, String>>,
+        maxOutputTokens: Int
+    ): String {
+        val contentsArray = JSONArray()
+        history
+            .takeLast(6)
+            .filter { it.second.isNotBlank() }
+            .forEach { (isUser, text) ->
+                contentsArray.put(
+                    JSONObject()
+                        .put("role", if (isUser) "user" else "model")
+                        .put("parts", JSONArray().put(JSONObject().put("text", text.trim())))
+                )
+            }
+        contentsArray.put(
+            JSONObject()
+                .put("role", "user")
+                .put("parts", JSONArray().put(JSONObject().put("text", prompt)))
+        )
+
+        val generationConfig = JSONObject()
+            .put("temperature", 0.7)
+            .put("maxOutputTokens", maxOutputTokens)
+        if (model.startsWith("gemini-2.5")) {
+            // Keep thinking budget at 0 for assistant chat so internal thoughts never consume output tokens
+            generationConfig.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+        }
+
+        val payload = JSONObject().apply {
+            put(
+                "system_instruction",
+                JSONObject().put(
+                    "parts",
+                    JSONArray().put(JSONObject().put("text", systemPrompt))
+                )
+            )
+            put("contents", contentsArray)
+            put("generationConfig", generationConfig)
+        }.toString()
+
+        val request = Request.Builder()
+            .url("$GEMINI_BASE_URL/$model:generateContent?key=$apiKey")
+            .header("Content-Type", "application/json")
+            .post(payload.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        httpClient.newCall(request).execute().use { response ->
+            val rawBody = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                val detail = runCatching {
+                    JSONObject(rawBody).optJSONObject("error")?.optString("message")
+                }.getOrNull()?.takeIf { !it.isNullOrBlank() }
+                val message = detail ?: "Google AI ($model) returned HTTP ${response.code}."
+                if (response.code in setOf(400, 401, 403) &&
+                    detail?.contains("API key", ignoreCase = true) == true
+                ) {
+                    throw NonRetryableGeminiException("Invalid GEMINI_API_KEY: $message")
+                }
+                throw IllegalStateException(message)
+            }
+
+            val root = JSONObject(rawBody)
+            val blockReason = root.optJSONObject("promptFeedback")?.optString("blockReason").orEmpty()
+            if (blockReason.isNotBlank()) {
+                throw NonRetryableGeminiException("Request could not be answered ($blockReason). Try rephrasing.")
+            }
+
+            val firstCandidate = root.optJSONArray("candidates")?.optJSONObject(0)
+            val parts = firstCandidate?.optJSONObject("content")?.optJSONArray("parts")
+            val textBuilder = StringBuilder()
+            if (parts != null) {
+                for (i in 0 until parts.length()) {
+                    val partObj = parts.optJSONObject(i) ?: continue
+                    if (partObj.optBoolean("thought", false)) continue
+                    val segment = partObj.optString("text").orEmpty()
+                    if (segment.isNotBlank()) {
+                        if (textBuilder.isNotEmpty()) textBuilder.append('\n')
+                        textBuilder.append(segment)
+                    }
+                }
+            }
+            val result = textBuilder.toString().trim()
+            if (result.isEmpty()) {
+                val finishReason = firstCandidate?.optString("finishReason").orEmpty()
+                if (finishReason == "SAFETY" || finishReason == "RECITATION") {
+                    throw NonRetryableGeminiException("Response filtered by safety check ($finishReason). Try rephrasing.")
+                }
+                error("Google AI ($model) returned an empty response (${finishReason.ifBlank { "no text" }}).")
+            }
+            return result
+        }
+    }
+
+    private class NonRetryableGeminiException(message: String) : IllegalStateException(message)
 
     companion object {
-        private const val GEMINI_ENDPOINT =
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        private const val PLACEHOLDER_KEY = "YOUR_GEMINI_API_KEY"
+        private const val GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+        private val MODEL_CANDIDATES = listOf(
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash"
+        )
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private val defaultHttpClient: OkHttpClient by lazy {
             OkHttpClient.Builder()

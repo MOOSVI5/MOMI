@@ -1,4 +1,4 @@
-const CACHE_NAME = 'momi-web-v6-custom-icon';
+const CACHE_NAME = 'momi-web-v7-version-sync';
 const SHELL_ASSETS = [
   './',
   './index.html',
@@ -7,6 +7,7 @@ const SHELL_ASSETS = [
   './firebase-config.js',
   './supabase-client.js',
   './manifest.webmanifest',
+  './version.json',
   './assets/momi-icon.jpg',
   './assets/img_post_coastal.jpg',
   './assets/img_post_coffee.jpg',
@@ -33,6 +34,12 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (event.request.method !== 'GET' || url.origin !== self.location.origin) {
+    return;
+  }
+  if (url.pathname.endsWith('/version.json') || url.pathname === '/version.json') {
+    event.respondWith(
+      fetch(event.request, { cache: 'no-store' }).catch(() => caches.match(event.request))
+    );
     return;
   }
   event.respondWith(

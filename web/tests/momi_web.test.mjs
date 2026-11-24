@@ -5,9 +5,12 @@ import path from 'node:path';
 import {
   ANDROID_APK_URL,
   ANDROID_RELEASES_URL,
+  APP_VERSION_CODE,
+  APP_VERSION_NAME,
   aspectRatioCss,
   buildPostShareUrl,
   buildProfileShareUrl,
+  compareSemanticVersions,
   escapeHtml,
   extractHashtags,
   extractMentions,
@@ -86,6 +89,7 @@ test('Web shell assets, PWA manifest, and hosting files exist', () => {
     'web/firebase-config.js',
     'web/manifest.webmanifest',
     'web/sw.js',
+    'web/version.json',
     'web/assets/momi-icon.jpg',
     'web/assets/img_post_coastal.jpg',
     'web/assets/img_post_coffee.jpg',
@@ -96,6 +100,9 @@ test('Web shell assets, PWA manifest, and hosting files exist', () => {
   for (const rel of required) {
     assert.ok(fs.existsSync(path.join(REPO_ROOT, rel)), `Missing web asset: ${rel}`);
   }
+  const versionManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'web', 'version.json'), 'utf8'));
+  assert.equal(versionManifest.versionName, APP_VERSION_NAME);
+  assert.equal(versionManifest.versionCode, APP_VERSION_CODE);
   const appAdsTxt = fs.readFileSync(path.join(REPO_ROOT, 'web', 'app-ads.txt'), 'utf8');
   assert.ok(appAdsTxt.includes('start.io, 120122068, DIRECT'));
 });
@@ -134,10 +141,13 @@ test('username, count formatting, and image resolution utilities work accurately
   assert.equal(escapeHtml('"a&b"'), '&quot;a&amp;b&quot;');
 });
 
-test('share URL builders, deep-link parser, and Android app recommendation links work properly', () => {
+test('share URL builders, deep-link parser, version comparison, and Android app recommendation links work properly', () => {
   assert.equal(WEB_APP_URL, 'https://moosvi5.github.io/MOMI/');
-  assert.equal(ANDROID_APK_URL, 'https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-v2.1.apk');
+  assert.equal(ANDROID_APK_URL, 'https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-latest.apk');
   assert.equal(ANDROID_RELEASES_URL, 'https://github.com/MOOSVI5/MOMI/releases/latest');
+  assert.equal(compareSemanticVersions('2.2', '2.1'), 1);
+  assert.equal(compareSemanticVersions('2.2.0', '2.2'), 0);
+  assert.equal(compareSemanticVersions('2.1', '2.2'), -1);
 
   const postUrl = buildPostShareUrl('post_17321_abc');
   assert.equal(postUrl, 'https://moosvi5.github.io/MOMI/?post=post_17321_abc');
@@ -188,7 +198,7 @@ test('starter showcase personas and Firestore Web sync resilience are configured
   assert.ok(appJs.includes('saveSupabaseAuthSession'));
 
   const swJs = fs.readFileSync(path.join(REPO_ROOT, 'web', 'sw.js'), 'utf8');
-  assert.ok(swJs.includes('momi-web-v6'));
+  assert.ok(swJs.includes('momi-web-v7'));
 });
 
 test('monetization config defaults, URL sanitization, boost sorting, and web perks align with Firestore rules', () => {

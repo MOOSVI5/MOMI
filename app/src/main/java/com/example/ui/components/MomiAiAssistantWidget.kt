@@ -23,10 +23,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.HelpOutline
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -39,6 +44,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -50,12 +56,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.ai.GoogleAiHealthState
+import com.example.ai.GoogleAiStatus
 
 data class AiAssistantTurn(
     val id: String,
@@ -109,6 +117,9 @@ fun FloatingMomiAssistantButton(
 fun MomiAiAssistantBottomSheet(
     messages: List<AiAssistantTurn>,
     uiState: AiAssistantUiState,
+    aiStatus: GoogleAiStatus,
+    isCheckingStatus: Boolean,
+    onCheckStatus: () -> Unit,
     onSendPrompt: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -117,9 +128,21 @@ fun MomiAiAssistantBottomSheet(
     var promptDraft by remember { mutableStateOf("") }
     val isBusy = uiState is AiAssistantUiState.Generating
 
+    LaunchedEffect(Unit) {
+        onCheckStatus()
+    }
+
     LaunchedEffect(messages.size, messages.lastOrNull()?.text?.length) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.lastIndex)
+        }
+    }
+
+    val submitCurrentDraft = {
+        val clean = promptDraft.trim()
+        if (clean.isNotEmpty() && !isBusy) {
+            promptDraft = ""
+            onSendPrompt(clean)
         }
     }
 
@@ -131,7 +154,7 @@ fun MomiAiAssistantBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 380.dp, max = 580.dp)
+                .heightIn(min = 400.dp, max = 600.dp)
                 .imePadding()
         ) {
             Row(
@@ -159,12 +182,12 @@ fun MomiAiAssistantBottomSheet(
                     Spacer(modifier = Modifier.width(10.dp))
                     Column {
                         Text(
-                            text = "Momi Assistant",
+                            text = "Momi AI Assistant",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Captions · Marketplace · Studio help",
+                            text = "Google Gemini · Captions · Studio help",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -178,6 +201,81 @@ fun MomiAiAssistantBottomSheet(
                         imageVector = Icons.Filled.Close,
                         contentDescription = "Close assistant"
                     )
+                }
+            }
+
+            // Google AI Live Status Diagnostic Pill
+            val statusBg = when (aiStatus.state) {
+                GoogleAiHealthState.READY -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                GoogleAiHealthState.CHECKING -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
+                GoogleAiHealthState.MISSING_KEY,
+                GoogleAiHealthState.ERROR -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
+            }
+            val statusTint = when (aiStatus.state) {
+                GoogleAiHealthState.READY -> MaterialTheme.colorScheme.primary
+                GoogleAiHealthState.CHECKING -> MaterialTheme.colorScheme.onSurfaceVariant
+                GoogleAiHealthState.MISSING_KEY,
+                GoogleAiHealthState.ERROR -> MaterialTheme.colorScheme.error
+            }
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = statusBg,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 4.dp)
+                    .testTag("google_ai_status_card")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (isCheckingStatus || aiStatus.state == GoogleAiHealthState.CHECKING) {
+                        CircularProgressIndicator(
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(16.dp),
+                            color = statusTint
+                        )
+                    } else {
+                        Icon(
+                            imageVector = if (aiStatus.state == GoogleAiHealthState.READY) {
+                                Icons.Filled.CheckCircle
+                            } else {
+                                Icons.Filled.ErrorOutline
+                            },
+                            contentDescription = aiStatus.label,
+                            tint = statusTint,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (isCheckingStatus) "Checking Google AI status..." else aiStatus.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = aiStatus.detail,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    TextButton(
+                        onClick = onCheckStatus,
+                        enabled = !isCheckingStatus,
+                        modifier = Modifier.testTag("ai_check_status_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Refresh,
+                            contentDescription = "Test Google AI status",
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Test", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
 
@@ -232,7 +330,7 @@ fun MomiAiAssistantBottomSheet(
                         }
                     }
                 } else {
-                    items(messages, key = { it.id }) { turn ->
+                    items(messages.filter { it.text.isNotBlank() }, key = { it.id }) { turn ->
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = if (turn.isUser) Arrangement.End else Arrangement.Start
@@ -276,7 +374,7 @@ fun MomiAiAssistantBottomSheet(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Thinking...",
+                                text = "Answering with Google Gemini...",
                                 fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -296,6 +394,8 @@ fun MomiAiAssistantBottomSheet(
                     onValueChange = { promptDraft = it },
                     placeholder = { Text("Ask Momi Assistant...") },
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { submitCurrentDraft() }),
                     shape = RoundedCornerShape(24.dp),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = MaterialTheme.colorScheme.primary,
@@ -308,13 +408,7 @@ fun MomiAiAssistantBottomSheet(
                 Spacer(modifier = Modifier.width(8.dp))
                 val canSend = promptDraft.isNotBlank() && !isBusy
                 IconButton(
-                    onClick = {
-                        if (canSend) {
-                            val prompt = promptDraft
-                            promptDraft = ""
-                            onSendPrompt(prompt)
-                        }
-                    },
+                    onClick = submitCurrentDraft,
                     enabled = canSend,
                     modifier = Modifier
                         .size(48.dp)
