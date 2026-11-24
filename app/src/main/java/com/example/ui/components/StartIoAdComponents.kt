@@ -405,15 +405,14 @@ private fun wrapSingleWebViewClient(webView: WebView?, onRendererGone: () -> Uni
 }
 
 private fun hasRenderedAdWebContent(view: View?): Boolean {
-    if (view == null) return false
+    if (view == null || view.visibility != View.VISIBLE) return false
     var foundWebView = false
     var hasRenderedContent = false
     fun inspect(node: View) {
         when (node) {
             is WebView -> {
                 foundWebView = true
-                val url = node.url.orEmpty()
-                if (node.contentHeight > 0 && url != "about:blank") {
+                if (node.visibility == View.VISIBLE) {
                     hasRenderedContent = true
                 }
             }
@@ -425,7 +424,7 @@ private fun hasRenderedAdWebContent(view: View?): Boolean {
         }
     }
     inspect(view)
-    return if (foundWebView) hasRenderedContent else (view.width > 0 && view.height > 0)
+    return if (foundWebView) hasRenderedContent else true
 }
 
 internal fun wrapDescendantWebViews(view: View?, onRendererGone: () -> Unit) {
@@ -1150,17 +1149,15 @@ private fun StartIoMrecSponsoredCard(
                                                     protectBannerStandardWebViews(it, onRendererGone)
                                                 }
                                                 runCatching { (banner as? Mrec)?.showBanner() }
-                                                mainHandler.postDelayed({
-                                                    if (hasRenderedAdWebContent(banner)) {
-                                                        MomiStartIoSession.updateMrec("Loaded (300x250)")
-                                                        mrecFailed = false
-                                                        mrecLoaded = true
-                                                    } else {
-                                                        MomiStartIoSession.updateMrec("Blank MREC — falling back")
-                                                        mrecLoaded = false
-                                                        mrecFailed = true
-                                                    }
-                                                }, 700L)
+                                                if (hasRenderedAdWebContent(banner)) {
+                                                    MomiStartIoSession.updateMrec("Loaded (300x250)")
+                                                    mrecFailed = false
+                                                    mrecLoaded = true
+                                                } else {
+                                                    MomiStartIoSession.updateMrec("Blank MREC — falling back")
+                                                    mrecLoaded = false
+                                                    mrecFailed = true
+                                                }
                                             }
                                         }
 
@@ -1277,16 +1274,14 @@ private fun StartIoStandardFeedBannerCard(
                                                     protectBannerStandardWebViews(it, onRendererGone)
                                                 }
                                                 runCatching { (banner as? Banner)?.showBanner() }
-                                                mainHandler.postDelayed({
-                                                    if (hasRenderedAdWebContent(banner)) {
-                                                        MomiStartIoSession.updateBanner("Loaded (Feed 320x50)")
-                                                        bannerLoaded = true
-                                                    } else {
-                                                        MomiStartIoSession.updateBanner("Blank banner — falling back")
-                                                        bannerLoaded = false
-                                                        onFailed()
-                                                    }
-                                                }, 700L)
+                                                if (hasRenderedAdWebContent(banner)) {
+                                                    MomiStartIoSession.updateBanner("Loaded (Feed 320x50)")
+                                                    bannerLoaded = true
+                                                } else {
+                                                    MomiStartIoSession.updateBanner("Blank banner — falling back")
+                                                    bannerLoaded = false
+                                                    onFailed()
+                                                }
                                             }
                                         }
 
@@ -1735,16 +1730,14 @@ private fun StartIoAnchoredStrip(
                                             protectBannerStandardWebViews(it, onRendererGone)
                                         }
                                         runCatching { (banner as? Banner)?.showBanner() }
-                                        mainHandler.postDelayed({
-                                            if (hasRenderedAdWebContent(banner)) {
-                                                MomiStartIoSession.updateBanner("Loaded ($statusLabel)")
-                                                isLoaded = true
-                                            } else {
-                                                MomiStartIoSession.updateBanner("Blank banner ($statusLabel)")
-                                                isLoaded = false
-                                                onFailedToFill()
-                                            }
-                                        }, 700L)
+                                        if (hasRenderedAdWebContent(banner)) {
+                                            MomiStartIoSession.updateBanner("Loaded ($statusLabel)")
+                                            isLoaded = true
+                                        } else {
+                                            MomiStartIoSession.updateBanner("Blank banner ($statusLabel)")
+                                            isLoaded = false
+                                            onFailedToFill()
+                                        }
                                     }
                                 }
 
