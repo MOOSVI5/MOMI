@@ -3,6 +3,6 @@
     <item
         android:width="66dp"
         android:height="66dp"
-        android:drawable="@drawable/momi_camera_icon_dual"
+        android:drawable="@drawable/momi_launcher_badge"
         android:gravity="center" />
 </layer-list>

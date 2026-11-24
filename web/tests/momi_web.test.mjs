@@ -188,7 +188,7 @@ test('starter showcase personas and Firestore Web sync resilience are configured
   assert.ok(appJs.includes('saveSupabaseAuthSession'));
 
   const swJs = fs.readFileSync(path.join(REPO_ROOT, 'web', 'sw.js'), 'utf8');
-  assert.ok(swJs.includes('momi-web-v5'));
+  assert.ok(swJs.includes('momi-web-v6'));
 });
 
 test('monetization config defaults, URL sanitization, boost sorting, and web perks align with Firestore rules', () => {

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'momi-web-v5-communities-admin';
+const CACHE_NAME = 'momi-web-v6-custom-icon';
 const SHELL_ASSETS = [
   './',
   './index.html',
