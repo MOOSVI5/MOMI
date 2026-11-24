@@ -179,4 +179,56 @@ class SupabaseMigrationTest {
         assertFalse(jsonText.contains("showcase_story_1"))
         assertTrue(MomiSupabaseSchema.TABLES.containsAll(listOf("profiles", "posts", "wallets", "app_config")))
     }
+
+    @Test
+    fun communityPagesGroupsShowcaseAndAnnouncementFieldsAreSupported() {
+        val page = com.example.data.model.MomiPage(
+            id = "pg_1",
+            ownerUid = "u1",
+            ownerUsername = "ali",
+            name = "Momi Lens",
+            category = "Photography",
+            followersCount = 15
+        )
+        val group = com.example.data.model.MomiGroup(
+            id = "gr_1",
+            ownerUid = "u1",
+            ownerUsername = "ali",
+            name = "Film Club",
+            privacy = "PUBLIC",
+            membersCount = 8
+        )
+        val starter = com.example.data.model.ShowcaseAccount(
+            username = "elena.maris",
+            displayName = "Elena Maris",
+            isAuthorized = true
+        )
+        val cfg = AdMonetizationConfig(
+            announcementId = "ann_42",
+            announcementTitle = "Momi v2.2 In-App Notes",
+            announcementBody = "Pages & Groups are live!",
+            latestVersionName = "2.2",
+            releaseNotes = "Smooth live rooms and starter console"
+        )
+        val post = Post(
+            id = "p_comm",
+            userId = "u1",
+            authorUsername = "ali",
+            authorDisplayName = "Ali",
+            pageId = page.id,
+            communityName = page.name
+        )
+
+        assertEquals("Momi Lens", page.name)
+        assertEquals("Film Club", group.name)
+        assertTrue(starter.isAuthorized)
+        assertEquals("ann_42", cfg.announcementId)
+        assertEquals("2.2", cfg.latestVersionName)
+        assertEquals("pg_1", post.pageId)
+        assertTrue(
+            MomiSupabaseSchema.TABLES.containsAll(
+                listOf("pages", "page_follows", "groups", "group_members", "showcase_accounts")
+            )
+        )
+    }
 }

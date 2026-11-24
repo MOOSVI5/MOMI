@@ -25,6 +25,7 @@ import {
   FIRESTORE_DATABASE_ID,
   formatCount,
   initialsForUsername,
+  isOwnerEmail,
   MAX_IMAGE_BASE64_CHARS,
   normalizeMonetagDirectUrl,
   normalizeUsername,
@@ -60,13 +61,16 @@ import {
   mapFirestoreSnapshotToSupabaseBundle,
   mapSupabaseChatMessageToWeb,
   mapSupabaseConfigToWeb,
+  mapSupabaseGroupToWeb,
   mapSupabaseLiveStreamToWeb,
   mapSupabaseMerchantToWeb,
   mapSupabaseNotificationToWeb,
   mapSupabaseOrderToWeb,
+  mapSupabasePageToWeb,
   mapSupabasePostToWeb,
   mapSupabaseProductToWeb,
   mapSupabaseProfileToWeb,
+  mapSupabaseShowcaseAccountToWeb,
   mapSupabaseStoryToWeb,
   mapSupabaseThreadToWeb,
   mapSupabaseTransactionToWeb,
@@ -129,14 +133,32 @@ const state = {
   products: [],
   orders: [],
   transactions: [],
+  pages: [],
+  pageFollowedIds: new Set(),
+  groups: [],
+  groupJoinedIds: new Set(),
+  showcaseAccounts: [],
+  activeCommunityFilter: null,
+  communitiesTab: 'pages',
   nav: 'home',
   homeFilter: 'For You',
   exploreQuery: '',
   exploreCategory: 'For You',
-  exploreLayout: 'rednote',
+  exploreLayout: 'notes',
   marketCategory: 'All',
   profileTab: 'posts',
-  ownerConsoleTab: 'monetizers',
+  ownerConsoleTab: 'starters',
+  dismissedAnnouncementId: localStorage.getItem('momi_dismissed_ann') || '',
+  pendingMutations: {
+    likes: new Map(),
+    bookmarks: new Map(),
+    follows: new Map(),
+    minViews: new Map(),
+    minLikes: new Map(),
+    createdPosts: new Map(),
+    deletedPostIds: new Map(),
+    profile: null
+  },
   viewedProfileUid: null,
   carouselIndex: {},
   videoCache: {},
@@ -178,6 +200,9 @@ const state = {
     caption: '',
     location: '',
     category: 'Travel',
+    pageId: null,
+    groupId: null,
+    communityName: '',
     isReel: false,
     hashtags: [],
     taggedUsernames: [],
@@ -290,6 +315,11 @@ document.getElementById('mobileMenuBtn')?.addEventListener('click', openMobileDr
 document.getElementById('closeMobileDrawerBtn')?.addEventListener('click', closeMobileDrawer);
 mobileDrawerBackdrop?.addEventListener('click', (e) => {
   if (e.target === mobileDrawerBackdrop) closeMobileDrawer();
+});
+document.getElementById('navAiBtn')?.addEventListener('click', () => openAiAssistantModal());
+document.getElementById('drawerAiBtn')?.addEventListener('click', () => {
+  closeMobileDrawer();
+  openAiAssistantModal();
 });
 
 function showToast(message) {
@@ -540,8 +570,8 @@ function buildFallbackProfile(user) {
     avatarData: null,
     followersCount: 0,
     followingCount: 0,
-    isVerified: user.email === ADMIN_OWNER_EMAIL && Boolean(user.emailVerified),
-    role: 'USER',
+    isVerified: isOwnerEmail(user.email),
+    role: isOwnerEmail(user.email) ? 'OWNER' : 'USER',
     moderationScopes: [],
     partnerConsent: false
   };
@@ -559,6 +589,7 @@ function applyAuthSession(session) {
   if (!user) {
     state.profile = null;
     state.isLoadingFeed = false;
+    updateAdminUiVisibility();
     mainShell.classList.add('hidden');
     authGate.classList.remove('hidden');
     return;
@@ -567,6 +598,7 @@ function applyAuthSession(session) {
   state.profile = buildFallbackProfile(user);
   authGate.classList.add('hidden');
   mainShell.classList.remove('hidden');
+  updateAdminUiVisibility();
   renderAll();
   initializeSupabaseWorkspace(user);
 }
@@ -707,9 +739,43 @@ async function ensureUserSeededInSupabase(user) {
   }
 }
 
-async function refreshAllFromSupabase({ showErrors = false } = {}) {
+const PENDING_MUTATION_TTL_MS = 12_000;
+
+function pruneExpiredPendingMutations(now = Date.now()) {
+  const pm = state.pendingMutations;
+  const pruneMap = (map) => {
+    for (const [k, entry] of map.entries()) {
+      if (!entry || entry.expiresAt <= now) map.delete(k);
+    }
+  };
+  pruneMap(pm.likes);
+  pruneMap(pm.bookmarks);
+  pruneMap(pm.follows);
+  pruneMap(pm.minViews);
+  pruneMap(pm.minLikes);
+  pruneMap(pm.createdPosts);
+  pruneMap(pm.deletedPostIds);
+  if (pm.profile && pm.profile.expiresAt <= now) pm.profile = null;
+}
+
+function shouldDeferDomRefresh() {
+  if (state.nav === 'create' || state.nav === 'messages') return true;
+  if (modalBackdrop && !modalBackdrop.classList.contains('hidden')) return true;
+  const activeEl = document.activeElement;
+  if (activeEl && mainStage?.contains(activeEl) && ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeEl.tagName)) {
+    return true;
+  }
+  const playingMedia = mainStage?.querySelectorAll('video, audio') || [];
+  for (const el of playingMedia) {
+    if (!el.paused && !el.ended) return true;
+  }
+  return false;
+}
+
+async function refreshAllFromSupabase({ showErrors = false, forceRender = false } = {}) {
   if (!state.user) return;
   try {
+    pruneExpiredPendingMutations();
     const [feed, workspace] = await Promise.all([
       fetchSupabaseFeed(SUPABASE_WEB_CONFIG),
       fetchUserSupabaseWorkspace(SUPABASE_WEB_CONFIG, state.user.uid)
@@ -725,17 +791,44 @@ async function refreshAllFromSupabase({ showErrors = false } = {}) {
     }
 
     state.syncError = null;
+    const pm = state.pendingMutations;
+
     if (Array.isArray(feed.profiles)) {
       const mappedCreators = feed.profiles.map(mapSupabaseProfileToWeb);
+      if (pm.profile?.data) {
+        const overrideIdx = mappedCreators.findIndex((c) => c.userId === pm.profile.data.userId);
+        if (overrideIdx >= 0) mappedCreators[overrideIdx] = { ...mappedCreators[overrideIdx], ...pm.profile.data };
+      }
       state.creators = mappedCreators;
       const mine = mappedCreators.find((p) => p.userId === state.user.uid);
       if (mine) {
-        state.profile = { ...state.profile, ...mine };
+        state.profile = { ...state.profile, ...mine, ...(pm.profile?.data || {}) };
+      } else if (pm.profile?.data) {
+        state.profile = { ...state.profile, ...pm.profile.data };
       }
     }
 
     if (Array.isArray(feed.posts)) {
-      state.posts = sortFeedWithBoostPriority(feed.posts.map(mapSupabasePostToWeb));
+      const serverPosts = feed.posts
+        .map(mapSupabasePostToWeb)
+        .filter((p) => !pm.deletedPostIds.has(p.id))
+        .map((p) => {
+          const minV = pm.minViews.get(p.id)?.value || 0;
+          const minL = pm.minLikes.get(p.id)?.value || 0;
+          return {
+            ...p,
+            viewsCount: Math.max(p.viewsCount || 0, minV),
+            likesCount: Math.max(p.likesCount || 0, minL)
+          };
+        });
+      const serverIdSet = new Set(serverPosts.map((p) => p.id));
+      const pendingCreated = [];
+      for (const entry of pm.createdPosts.values()) {
+        if (entry?.post && !serverIdSet.has(entry.post.id) && !pm.deletedPostIds.has(entry.post.id)) {
+          pendingCreated.push(entry.post);
+        }
+      }
+      state.posts = sortFeedWithBoostPriority([...pendingCreated, ...serverPosts]);
     }
     if (Array.isArray(feed.stories)) {
       state.stories = feed.stories.map(mapSupabaseStoryToWeb);
@@ -746,8 +839,29 @@ async function refreshAllFromSupabase({ showErrors = false } = {}) {
     if (Array.isArray(feed.merchants)) {
       state.merchants = feed.merchants.map(mapSupabaseMerchantToWeb);
     }
+    if (Array.isArray(feed.pages)) {
+      state.pages = feed.pages.map(mapSupabasePageToWeb);
+    }
+    if (Array.isArray(feed.groups)) {
+      state.groups = feed.groups.map(mapSupabaseGroupToWeb);
+    }
+    if (Array.isArray(feed.showcaseAccounts)) {
+      const mappedAccounts = feed.showcaseAccounts.map(mapSupabaseShowcaseAccountToWeb);
+      const mapByName = new Map(mappedAccounts.map((a) => [a.username, a]));
+      state.showcaseAccounts = SHOWCASE_PERSONAS.map((p) => {
+        const stored = mapByName.get(p.username);
+        return stored || {
+          username: p.username,
+          displayName: p.displayName,
+          avatarKey: p.avatarKey,
+          bio: `${p.category} creator in ${p.location}`,
+          category: p.category,
+          location: p.location,
+          isAuthorized: false
+        };
+      });
+    }
     if (Array.isArray(feed.liveStreams)) {
-      // Show active streams updated within last 15 minutes
       const cutoff = Date.now() - 15 * 60 * 1000;
       state.liveStreams = feed.liveStreams
         .map(mapSupabaseLiveStreamToWeb)
@@ -759,7 +873,13 @@ async function refreshAllFromSupabase({ showErrors = false } = {}) {
     }
 
     if (workspace) {
-      state.followingUids = new Set(workspace.follows.map((f) => f.target_uid));
+      const nextFollows = new Set(workspace.follows.map((f) => f.target_uid));
+      for (const [uid, entry] of pm.follows.entries()) {
+        if (entry.value) nextFollows.add(uid);
+        else nextFollows.delete(uid);
+      }
+      state.followingUids = nextFollows;
+
       const likes = new Set();
       const saves = new Set();
       const seen = new Set();
@@ -768,9 +888,19 @@ async function refreshAllFromSupabase({ showErrors = false } = {}) {
         else if (row.target_type === 'BOOKMARK') saves.add(row.target_id);
         else if (row.target_type === 'SEEN_STORY') seen.add(row.target_id);
       });
+      for (const [pid, entry] of pm.likes.entries()) {
+        if (entry.value) likes.add(pid);
+        else likes.delete(pid);
+      }
+      for (const [pid, entry] of pm.bookmarks.entries()) {
+        if (entry.value) saves.add(pid);
+        else saves.delete(pid);
+      }
       state.likedIds = likes;
       state.bookmarkIds = saves;
       state.seenStoryIds = seen;
+      state.pageFollowedIds = new Set((workspace.pageFollows || []).map((pf) => pf.page_id));
+      state.groupJoinedIds = new Set((workspace.groupMembers || []).map((gm) => gm.group_id));
 
       const notifs = workspace.notifications.map(mapSupabaseNotificationToWeb);
       if (state.initialSnapshotsLoaded.notifs) {
@@ -807,12 +937,10 @@ async function refreshAllFromSupabase({ showErrors = false } = {}) {
     state.isLoadingFeed = false;
     maybeConsumePendingDeepLink();
 
-    // Avoid destroying active Create Studio inputs or video playback on background refresh
+    updateAdminUiVisibility();
     updateBadges();
     renderRightRail();
-    if (state.nav !== 'create' && state.nav !== 'explore') {
-      renderMainStage();
-    } else if (state.nav === 'explore' && !document.activeElement?.matches('#exploreSearchInput')) {
+    if (forceRender || !shouldDeferDomRefresh()) {
       renderMainStage();
     }
   } catch (err) {
@@ -867,7 +995,12 @@ function triggerAlert(text) {
 }
 
 function updateBadges() {
-  const unreadNotifs = state.notifications.filter((n) => n.isUnread).length;
+  const cfg = state.monetizationConfig || DEFAULT_MONETIZATION_CONFIG;
+  const hasUnreadAnnouncement = Boolean(
+    (cfg.announcementTitle || cfg.announcementBody || cfg.releaseNotes) &&
+    state.dismissedAnnouncementId !== (cfg.announcementId || 'latest')
+  ) ? 1 : 0;
+  const unreadNotifs = state.notifications.filter((n) => n.isUnread).length + hasUnreadAnnouncement;
   const unreadMsgs = state.threads.filter((t) => t.unreadUid === state.user?.uid && (t.unreadCount || 0) > 0).length;
   const liveCount = state.liveStreams.length;
 
@@ -904,7 +1037,15 @@ function navigateTo(target, opts = {}) {
   renderMainStage();
 }
 
+function updateAdminUiVisibility() {
+  const show = isOwnerAdmin();
+  ['navAdminBtn', 'drawerAdminBtn', 'mobileAdminBtn'].forEach((id) => {
+    document.getElementById(id)?.classList.toggle('hidden', !show);
+  });
+}
+
 function renderAll() {
+  updateAdminUiVisibility();
   updateBadges();
   renderRightRail();
   renderMainStage();
@@ -928,16 +1069,20 @@ function renderRightRail() {
       </div>
       <button type="button" class="btn-outline btn-sm" id="railProfileBtn">Profile</button>
     </div>
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;padding-top:10px;border-top:1px solid var(--border);">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;padding-top:10px;border-top:1px solid var(--border);gap:8px;flex-wrap:wrap;">
       <div>
         <div style="font-weight:700;font-size:0.9rem;">${formatCount(balance)} Credits</div>
         <div class="muted small">${escapeHtml(tier)}</div>
       </div>
-      <button type="button" class="btn-primary btn-sm" id="railWalletBtn">Wallet</button>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        ${isOwnerAdmin() ? '<button type="button" class="owner-pill-btn" id="railAdminBtn">&#9881; Owner</button>' : ''}
+        <button type="button" class="btn-primary btn-sm" id="railWalletBtn">Wallet</button>
+      </div>
     </div>
   `;
   document.getElementById('railProfileBtn').onclick = () => navigateTo('profile');
   document.getElementById('railWalletBtn').onclick = () => navigateTo('wallet');
+  document.getElementById('railAdminBtn')?.addEventListener('click', () => navigateTo('admin'));
 
   if (rightAndroidCard) {
     rightAndroidCard.innerHTML = `
@@ -1027,11 +1172,13 @@ function renderMainStage() {
     case 'clips': renderClips(); break;
     case 'create': renderCreateStudio(); break;
     case 'live': renderLiveLobby(); break;
+    case 'communities': renderCommunities(); break;
     case 'marketplace': renderMarketplace(); break;
     case 'messages': renderMessages(); break;
     case 'notifications': renderNotifications(); break;
     case 'wallet': renderWallet(); break;
     case 'profile': renderProfile(); break;
+    case 'admin': renderAdminConsole(); break;
     default: renderHome();
   }
 }
@@ -1047,7 +1194,7 @@ function getFilteredHomePosts() {
 }
 
 function isOwnerAdmin() {
-  return String(state.user?.email || '').toLowerCase() === ADMIN_OWNER_EMAIL.toLowerCase() && Boolean(state.user?.emailVerified);
+  return isOwnerEmail(state.user?.email);
 }
 
 function syncMonetagWebIntegration(cfg) {
@@ -1189,6 +1336,7 @@ function renderPostCardHtml(post) {
           </div>
         </button>
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
+          ${post.communityName ? `<button type="button" class="community-pill" data-open-community="${escapeHtml(post.pageId || post.groupId || '')}" data-community-type="${post.pageId ? 'PAGE' : 'GROUP'}" data-community-name="${escapeHtml(post.communityName)}">&#9670; ${escapeHtml(post.communityName)}</button>` : ''}
           ${boostBadge ? `<span class="boost-pill ${isRecommended ? 'recommended' : ''}">&#9733; ${escapeHtml(boostBadge)}</span>` : ''}
           ${isOwnerAdmin() && !post.id.startsWith('showcase_') ? `<button type="button" class="btn-outline btn-sm" data-admin-recommend="${escapeHtml(post.id)}">${isRecommended ? 'Unfeature' : 'Recommend'}</button>` : ''}
           ${isMine && !post.id.startsWith('showcase_') ? `<button type="button" class="btn-outline btn-sm" data-boost-post="${escapeHtml(post.id)}">Boost</button>` : ''}
@@ -1246,6 +1394,13 @@ function renderPostCardHtml(post) {
 
 function renderHome() {
   const posts = getFilteredHomePosts();
+  const cfg = state.monetizationConfig || DEFAULT_MONETIZATION_CONFIG;
+  const annId = cfg.announcementId || 'latest';
+  const showAnnouncement = Boolean(
+    (cfg.announcementTitle || cfg.announcementBody || cfg.releaseNotes) &&
+    state.dismissedAnnouncementId !== annId
+  );
+
   mainStage.innerHTML = `
     <div class="stage-column">
       <div class="section-header">
@@ -1254,8 +1409,25 @@ function renderHome() {
           ${['For You', 'Following', 'Saved'].map((f) => `
             <button type="button" class="chip ${state.homeFilter === f ? 'active' : ''}" data-home-filter="${f}">${f}</button>
           `).join('')}
+          <button type="button" class="chip" id="homeOpenCommunitiesChip">&#9670; Pages &amp; Groups</button>
+          <button type="button" class="chip" id="homeOpenAiChip">&#10022; Momi AI</button>
+          ${isOwnerAdmin() ? '<button type="button" class="owner-pill-btn" id="homeOpenAdminBtn">&#9881; Owner Console</button>' : ''}
         </div>
       </div>
+
+      ${showAnnouncement ? `
+        <div class="announcement-banner" role="region" aria-label="In-app announcement">
+          <div style="flex:1;min-width:200px;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <span class="badge-pill">Momi v${escapeHtml(cfg.latestVersionName || '2.1')}</span>
+              <strong>${escapeHtml(cfg.announcementTitle || 'Momi Update Notice')}</strong>
+            </div>
+            ${cfg.announcementBody ? `<div class="small" style="margin-top:6px;line-height:1.45;">${escapeHtml(cfg.announcementBody)}</div>` : ''}
+            ${cfg.releaseNotes ? `<div class="muted small" style="margin-top:4px;">What's new: ${escapeHtml(cfg.releaseNotes)}</div>` : ''}
+          </div>
+          <button type="button" class="btn-ghost btn-sm" id="dismissAnnouncementBtn" data-ann-id="${escapeHtml(annId)}">Dismiss</button>
+        </div>
+      ` : ''}
 
       ${state.syncError ? `
         <div class="sync-error-banner" role="alert">
@@ -1302,13 +1474,24 @@ function renderHome() {
     </div>
   `;
 
+  document.getElementById('homeOpenCommunitiesChip').onclick = () => navigateTo('communities');
+  document.getElementById('homeOpenAiChip').onclick = () => openAiAssistantModal();
+  document.getElementById('homeOpenAdminBtn')?.addEventListener('click', () => navigateTo('admin'));
+  document.getElementById('dismissAnnouncementBtn')?.addEventListener('click', (e) => {
+    const id = e.currentTarget.dataset.annId || 'latest';
+    state.dismissedAnnouncementId = id;
+    localStorage.setItem('momi_dismissed_ann', id);
+    updateBadges();
+    renderHome();
+  });
+
   const retryBtn = document.getElementById('retrySyncBtn');
   if (retryBtn && state.user) {
     retryBtn.onclick = () => {
       state.syncError = null;
       state.isLoadingFeed = true;
       renderHome();
-      refreshAllFromSupabase({ showErrors: true });
+      refreshAllFromSupabase({ showErrors: true, forceRender: true });
     };
   }
   mainStage.querySelectorAll('[data-home-filter]').forEach((b) => {
@@ -1348,7 +1531,7 @@ function renderExplore() {
       <div class="section-header">
         <h2>Explore &amp; Discover</h2>
         <div class="chip-row">
-          <button type="button" class="chip ${state.exploreLayout === 'rednote' ? 'active' : ''}" id="layoutRedNoteBtn">Discover Notes</button>
+          <button type="button" class="chip ${state.exploreLayout === 'notes' ? 'active' : ''}" id="layoutNotesBtn">Discover Notes</button>
           <button type="button" class="chip ${state.exploreLayout === 'grid' ? 'active' : ''}" id="layoutGridBtn">3-Col Grid</button>
         </div>
       </div>
@@ -1374,21 +1557,21 @@ function renderExplore() {
       ${renderSponsoredPartnerBannerHtml('explore')}
 
       ${
-        state.exploreLayout === 'rednote'
-          ? `<div class="rednote-grid">
+        state.exploreLayout === 'notes'
+          ? `<div class="discovery-grid">
               ${filteredPosts.map((p) => {
                 const badge = boostBadgeLabelForPost(p);
                 const isVid = p.mediaType === 'VIDEO' || Boolean(p.videoUrl);
                 return `
-                  <article class="rednote-card" data-open-post="${escapeHtml(p.id)}">
+                  <article class="discovery-card" data-open-post="${escapeHtml(p.id)}">
                     <div style="position:relative;">
-                      <img class="rednote-thumb" src="${resolveImageSrc(p)}" alt="${escapeHtml(p.caption || '')}" style="filter:${filterCssForTag(p.filterTag)};" loading="lazy" />
+                      <img class="discovery-thumb" src="${resolveImageSrc(p)}" alt="${escapeHtml(p.caption || '')}" style="filter:${filterCssForTag(p.filterTag)};" loading="lazy" />
                       ${isVid ? '<span class="media-badge">&#9654; Video</span>' : ''}
                     </div>
-                    <div class="rednote-meta">
+                    <div class="discovery-meta">
                       ${badge ? `<span class="boost-pill ${p.boostTier === 'OWNER_RECOMMENDED' ? 'recommended' : ''}">${escapeHtml(badge)}</span>` : ''}
-                      <div class="rednote-title">${escapeHtml(p.caption || 'Visual Note')}</div>
-                      <div class="rednote-footer">
+                      <div class="discovery-title">${escapeHtml(p.caption || 'Visual Note')}</div>
+                      <div class="discovery-footer">
                         <span>@${escapeHtml(p.authorUsername)}</span>
                         <span>&#9829; ${formatCount(p.likesCount)}</span>
                       </div>
@@ -1397,9 +1580,9 @@ function renderExplore() {
                 `;
               }).join('')}
             </div>`
-          : `<div class="ig-grid-3">
+          : `<div class="profile-grid-3">
               ${filteredPosts.map((p) => `
-                <button type="button" class="ig-tile" data-open-post="${escapeHtml(p.id)}">
+                <button type="button" class="profile-tile" data-open-post="${escapeHtml(p.id)}">
                   <img src="${resolveImageSrc(p)}" alt="${escapeHtml(p.caption || '')}" style="filter:${filterCssForTag(p.filterTag)};" loading="lazy" />
                 </button>
               `).join('')}
@@ -1408,7 +1591,7 @@ function renderExplore() {
     </div>
   `;
 
-  document.getElementById('layoutRedNoteBtn').onclick = () => { state.exploreLayout = 'rednote'; renderExplore(); };
+  document.getElementById('layoutNotesBtn').onclick = () => { state.exploreLayout = 'notes'; renderExplore(); };
   document.getElementById('layoutGridBtn').onclick = () => { state.exploreLayout = 'grid'; renderExplore(); };
   const input = document.getElementById('exploreSearchInput');
   input.oninput = (e) => { state.exploreQuery = e.target.value; renderExplore(); document.getElementById('exploreSearchInput')?.focus(); };
@@ -1594,6 +1777,21 @@ function renderCreateStudio() {
               </div>
             ` : ''}
 
+            ${(state.pages.length > 0 || state.groups.length > 0) ? `
+              <div>
+                <label class="small muted" for="studioCommunitySelect">Post to Page or Group (Optional)</label>
+                <select id="studioCommunitySelect" class="select" style="margin-top:6px;">
+                  <option value="">Personal Momi Feed</option>
+                  ${state.pages.map((pg) => `
+                    <option value="PAGE:${escapeHtml(pg.id)}" ${s.pageId === pg.id ? 'selected' : ''}>Page: ${escapeHtml(pg.name)}</option>
+                  `).join('')}
+                  ${state.groups.map((gr) => `
+                    <option value="GROUP:${escapeHtml(gr.id)}" ${s.groupId === gr.id ? 'selected' : ''}>Group: ${escapeHtml(gr.name)}</option>
+                  `).join('')}
+                </select>
+              </div>
+            ` : ''}
+
             <label class="consent-row" style="cursor:pointer;">
               <span>Feature in Momi Clips</span>
               <input id="studioIsReel" type="checkbox" ${s.isReel || isClipMode ? 'checked' : ''} />
@@ -1694,6 +1892,27 @@ function renderCreateStudio() {
   document.getElementById('studioCaption').oninput = (e) => { s.caption = e.target.value; };
   document.getElementById('studioLocation')?.addEventListener('input', (e) => { s.location = e.target.value; });
   document.getElementById('studioCategory')?.addEventListener('change', (e) => { s.category = e.target.value; });
+  document.getElementById('studioCommunitySelect')?.addEventListener('change', (e) => {
+    const raw = e.target.value;
+    if (!raw) {
+      s.pageId = null;
+      s.groupId = null;
+      s.communityName = '';
+      return;
+    }
+    const [kind, id] = raw.split(':');
+    if (kind === 'PAGE') {
+      const pg = state.pages.find((x) => x.id === id);
+      s.pageId = id;
+      s.groupId = null;
+      s.communityName = pg?.name || 'Page';
+    } else if (kind === 'GROUP') {
+      const gr = state.groups.find((x) => x.id === id);
+      s.groupId = id;
+      s.pageId = null;
+      s.communityName = gr?.name || 'Group';
+    }
+  });
   document.getElementById('studioIsReel')?.addEventListener('change', (e) => { s.isReel = e.target.checked; });
 
   document.getElementById('addCustomTagBtn')?.addEventListener('click', () => {
@@ -1791,34 +2010,41 @@ function renderCreateStudio() {
         const finalHashtags = extractHashtags(s.caption, s.hashtags);
         const finalTags = extractMentions(s.caption, s.taggedUsernames);
         const isVideo = Boolean(videoUrl);
+        const postRow = {
+          id: itemId,
+          user_id: state.user.uid,
+          author_username: state.profile.username,
+          author_display_name: state.profile.displayName,
+          author_avatar_key: state.profile.avatarKey || 'avatar_aria',
+          author_verified: Boolean(state.profile.isVerified),
+          location: s.location.trim().slice(0, 120),
+          image_key: s.imageKey,
+          image_url: imageUrl,
+          image_data: imageData,
+          media_type: isVideo ? 'VIDEO' : 'IMAGE',
+          video_url: videoUrl,
+          video_duration_ms: s.videoDurationMs || 0,
+          filter_tag: s.filterTag,
+          aspect_ratio: s.aspectRatio,
+          tagged_usernames: finalTags,
+          hashtags: finalHashtags,
+          caption: s.caption.trim().slice(0, 1000),
+          likes_count: 0,
+          views_count: 0,
+          comments_count: 0,
+          category: s.category || 'Travel',
+          is_reel: Boolean(s.isReel || isVideo),
+          page_id: s.pageId || null,
+          group_id: s.groupId || null,
+          community_name: (s.communityName || '').slice(0, 80)
+        };
+        const mappedCreated = mapSupabasePostToWeb(postRow);
+        state.pendingMutations.createdPosts.set(itemId, { post: mappedCreated, expiresAt: Date.now() + 12000 });
+        state.posts = sortFeedWithBoostPriority([mappedCreated, ...state.posts.filter((p) => p.id !== itemId)]);
         await upsertSupabaseTable(
           SUPABASE_WEB_CONFIG,
           'posts',
-          [{
-            id: itemId,
-            user_id: state.user.uid,
-            author_username: state.profile.username,
-            author_display_name: state.profile.displayName,
-            author_avatar_key: state.profile.avatarKey || 'avatar_aria',
-            author_verified: Boolean(state.profile.isVerified),
-            location: s.location.trim().slice(0, 120),
-            image_key: s.imageKey,
-            image_url: imageUrl,
-            image_data: imageData,
-            media_type: isVideo ? 'VIDEO' : 'IMAGE',
-            video_url: videoUrl,
-            video_duration_ms: s.videoDurationMs || 0,
-            filter_tag: s.filterTag,
-            aspect_ratio: s.aspectRatio,
-            tagged_usernames: finalTags,
-            hashtags: finalHashtags,
-            caption: s.caption.trim().slice(0, 1000),
-            likes_count: 0,
-            views_count: 0,
-            comments_count: 0,
-            category: s.category || 'Travel',
-            is_reel: Boolean(s.isReel || isVideo)
-          }],
+          [postRow],
           '',
           globalThis.fetch,
           'id'
@@ -1846,6 +2072,9 @@ function renderCreateStudio() {
         caption: '',
         location: '',
         category: 'Travel',
+        pageId: null,
+        groupId: null,
+        communityName: '',
         isReel: false,
         hashtags: [],
         taggedUsernames: [],
@@ -1878,7 +2107,7 @@ function renderLiveLobby() {
               <p class="muted" style="margin:0 0 18px;">Start your own live studio room from Web or Android — your audience can chat, send hearts, and send gifts immediately.</p>
               <button type="button" class="btn-primary" id="lobbyEmptyLiveBtn">Go Live Now</button>
             </div>`
-          : `<div class="rednote-grid">
+          : `<div class="discovery-grid">
               ${state.liveStreams.map((s) => `
                 <article class="card-panel" style="gap:12px;">
                   <div style="display:flex;align-items:center;gap:10px;">
@@ -1932,20 +2161,20 @@ function renderMarketplace() {
 
       ${renderSponsoredPartnerBannerHtml('marketplace')}
 
-      <div class="rednote-grid">
+      <div class="discovery-grid">
         ${
           filtered.length === 0
             ? '<div class="card-panel"><p class="muted" style="margin:0;">No marketplace listings in this category yet. Tap "+ Sell Item" to publish one!</p></div>'
             : filtered.map((prod) => `
-              <article class="rednote-card" data-open-product="${escapeHtml(prod.id)}">
+              <article class="discovery-card" data-open-product="${escapeHtml(prod.id)}">
                 <div style="position:relative;">
-                  <img class="rednote-thumb" src="${resolveImageSrc({ imageUrl: prod.imageUrl, imageData: prod.imageData, imageKey: prod.imageKey })}" alt="${escapeHtml(prod.title)}" loading="lazy" />
+                  <img class="discovery-thumb" src="${resolveImageSrc({ imageUrl: prod.imageUrl, imageData: prod.imageData, imageKey: prod.imageKey })}" alt="${escapeHtml(prod.title)}" loading="lazy" />
                   ${prod.isFeatured ? '<span class="media-badge" style="background:var(--primary);">Featured</span>' : ''}
                 </div>
-                <div class="rednote-meta">
+                <div class="discovery-meta">
                   <div style="font-weight:700;">${escapeHtml(prod.title)}</div>
                   <div class="muted small">${escapeHtml(prod.storeName)} &middot; ${prod.freeShipping ? 'Free shipping' : 'Standard'}</div>
-                  <div class="rednote-footer">
+                  <div class="discovery-footer">
                     <strong style="color:var(--primary);font-size:1rem;">$${Number(prod.priceUsd || 0).toFixed(2)}</strong>
                     <span class="btn-outline btn-sm">${prod.sellerUid === state.user?.uid ? 'Manage' : 'View'}</span>
                   </div>
@@ -2142,10 +2371,14 @@ async function sendChatMessage(thread, { msgId = makeClientId('msg'), text, mess
 
 function renderNotifications() {
   const desktopPerm = 'Notification' in window ? Notification.permission : 'unsupported';
+  const cfg = state.monetizationConfig || DEFAULT_MONETIZATION_CONFIG;
+  const annId = cfg.announcementId || 'latest';
+  const hasAnnouncement = Boolean(cfg.announcementTitle || cfg.announcementBody || cfg.releaseNotes);
+
   mainStage.innerHTML = `
     <div class="stage-column">
       <div class="section-header">
-        <h2>Activity &amp; Alerts</h2>
+        <h2>Activity &amp; In-App Notices</h2>
         <div class="chip-row">
           <button type="button" class="btn-outline btn-sm" id="testChimeBtn">Test Sound</button>
           ${desktopPerm === 'default' ? '<button type="button" class="btn-primary btn-sm" id="enableDesktopNotifsBtn">Enable Desktop Popups</button>' : ''}
@@ -2153,9 +2386,22 @@ function renderNotifications() {
         </div>
       </div>
 
+      ${hasAnnouncement ? `
+        <div class="announcement-banner" role="region" aria-label="Pinned Momi update announcement">
+          <div style="flex:1;min-width:200px;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <span class="badge-pill">In-App Update &middot; v${escapeHtml(cfg.latestVersionName || '2.1')}</span>
+              <strong>${escapeHtml(cfg.announcementTitle || 'Momi Update Notice')}</strong>
+            </div>
+            ${cfg.announcementBody ? `<div class="small" style="margin-top:6px;line-height:1.45;">${escapeHtml(cfg.announcementBody)}</div>` : ''}
+            ${cfg.releaseNotes ? `<div class="muted small" style="margin-top:4px;">Release notes: ${escapeHtml(cfg.releaseNotes)}</div>` : ''}
+          </div>
+        </div>
+      ` : ''}
+
       ${
         state.notifications.length === 0
-          ? '<div class="card-panel"><p class="muted" style="margin:0;">No notifications yet. Likes, comments, follows, and gift alerts appear here.</p></div>'
+          ? '<div class="card-panel"><p class="muted" style="margin:0;">No activity notifications yet. Likes, comments, follows, and gift alerts appear here.</p></div>'
           : state.notifications.map((n) => `
             <div class="card-panel" style="flex-direction:row;align-items:center;justify-content:space-between;${n.isUnread ? 'border-color:var(--primary);' : ''}">
               <div style="display:flex;align-items:center;gap:12px;">
@@ -2185,6 +2431,10 @@ function renderNotifications() {
     };
   }
   document.getElementById('markAllReadBtn').onclick = async () => {
+    if (hasAnnouncement) {
+      state.dismissedAnnouncementId = annId;
+      localStorage.setItem('momi_dismissed_ann', annId);
+    }
     await patchSupabaseRows(
       SUPABASE_WEB_CONFIG,
       'notifications',
@@ -2459,173 +2709,13 @@ function renderProfile() {
       ` : ''}
 
       ${isOwn && ownerAdmin ? `
-        <div class="card-panel">
-          <div class="section-header">
-            <div>
-              <strong>Owner Studio Console (${escapeHtml(ADMIN_OWNER_EMAIL)})</strong>
-              <div class="muted small">Live-manage AdMob, Start.io, Monetag, Grants, Post Recommendations &amp; Supabase Cloud.</div>
-            </div>
-            <div class="chip-row">
-              <button type="button" class="chip ${state.ownerConsoleTab === 'monetizers' ? 'active' : ''}" data-owner-tab="monetizers">Monetizers Setup</button>
-              <button type="button" class="chip ${state.ownerConsoleTab === 'grants' ? 'active' : ''}" data-owner-tab="grants">Grants (${consentingCreators.length})</button>
-              <button type="button" class="chip ${state.ownerConsoleTab === 'recommend' ? 'active' : ''}" data-owner-tab="recommend">Recommend Posts</button>
-              <button type="button" class="chip ${state.ownerConsoleTab === 'supabase' ? 'active' : ''}" data-owner-tab="supabase">Supabase Status</button>
-            </div>
-          </div>
-
-          ${state.ownerConsoleTab === 'monetizers' ? `
-            <form id="ownerMonetizationForm" style="display:grid;gap:12px;">
-              <div class="owner-form-grid">
-                <label class="consent-row"><span>Enable AdMob (Android)</span><input id="cfgAdmobEnabled" type="checkbox" ${cfg.admobEnabled ? 'checked' : ''} /></label>
-                <label class="consent-row"><span>Enable Start.io (Android)</span><input id="cfgStartIoEnabled" type="checkbox" ${cfg.startIoEnabled ? 'checked' : ''} /></label>
-                <label class="consent-row"><span>Enable Monetag (Android + Web)</span><input id="cfgMonetagEnabled" type="checkbox" ${cfg.monetagEnabled ? 'checked' : ''} /></label>
-                <label class="consent-row"><span>Enable Gamezop Arcade (Android + Web)</span><input id="cfgGamezopEnabled" type="checkbox" ${cfg.gamezopEnabled ? 'checked' : ''} /></label>
-              </div>
-              <div class="owner-form-grid">
-                <div>
-                  <label class="small muted">AdMob Banner Unit ID</label>
-                  <input id="cfgAdmobBanner" class="input" placeholder="ca-app-pub-.../..." value="${escapeHtml(cfg.admobBannerUnitId || '')}" />
-                </div>
-                <div>
-                  <label class="small muted">AdMob MREC Unit ID</label>
-                  <input id="cfgAdmobMrec" class="input" placeholder="ca-app-pub-.../..." value="${escapeHtml(cfg.admobMrecUnitId || '')}" />
-                </div>
-                <div>
-                  <label class="small muted">AdMob Interstitial Unit ID</label>
-                  <input id="cfgAdmobInterstitial" class="input" placeholder="ca-app-pub-.../..." value="${escapeHtml(cfg.admobInterstitialUnitId || '')}" />
-                </div>
-              </div>
-              <div class="owner-form-grid">
-                <div>
-                  <label class="small muted">Monetag Direct SmartLink URL (https://)</label>
-                  <input id="cfgMonetagDirectUrl" class="input" placeholder="https://otieu.com/4/..." value="${escapeHtml(cfg.monetagDirectLinkUrl || '')}" />
-                </div>
-                <div>
-                  <label class="small muted">Monetag Web Zone ID</label>
-                  <input id="cfgMonetagZoneId" class="input" placeholder="e.g. 9012345" value="${escapeHtml(cfg.monetagWebZoneId || '')}" />
-                </div>
-                <div>
-                  <label class="small muted">Monetag Meta Verification Content</label>
-                  <input id="cfgMonetagMeta" class="input" placeholder="content value" value="${escapeHtml(cfg.monetagWebMetaTag || '')}" />
-                </div>
-              </div>
-              <div class="owner-form-grid">
-                <div>
-                  <label class="small muted">Gamezop Publisher ID</label>
-                  <input id="cfgGamezopPubId" class="input" placeholder="e.g. 9012" value="${escapeHtml(cfg.gamezopPublisherId || '')}" />
-                </div>
-                <div>
-                  <label class="small muted">Gamezop Portal URL (optional https://)</label>
-                  <input id="cfgGamezopPortalUrl" class="input" placeholder="https://www.gamezop.com/?id=..." value="${escapeHtml(cfg.gamezopPortalUrl || '')}" />
-                </div>
-                <div>
-                  <label class="small muted">Gamezop Card Title</label>
-                  <input id="cfgGamezopTitle" class="input" value="${escapeHtml(cfg.gamezopBannerTitle || '')}" />
-                </div>
-              </div>
-              <div class="owner-form-grid">
-                <div>
-                  <label class="small muted">Sponsored Card Title</label>
-                  <input id="cfgPromoTitle" class="input" value="${escapeHtml(cfg.partnerPromoTitle || '')}" />
-                </div>
-                <div>
-                  <label class="small muted">Sponsored Card CTA</label>
-                  <input id="cfgPromoCta" class="input" value="${escapeHtml(cfg.partnerPromoCta || '')}" />
-                </div>
-              </div>
-              <div>
-                <label class="small muted">Sponsored Card Subtitle</label>
-                <input id="cfgPromoSubtitle" class="input" value="${escapeHtml(cfg.partnerPromoSubtitle || '')}" />
-              </div>
-              <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
-                <button type="submit" class="btn-primary" ${state.adminBusy ? 'disabled' : ''}>Save Live Monetization Config</button>
-                <a class="btn-outline btn-sm" href="https://business.gamezop.com" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Gamezop &#8599;</a>
-                <a class="btn-outline btn-sm" href="https://publishers.monetag.com" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Monetag &#8599;</a>
-              </div>
-            </form>
-          ` : ''}
-
-          ${state.ownerConsoleTab === 'grants' ? `
-            <div style="display:grid;gap:10px;">
-              ${
-                consentingCreators.length === 0
-                  ? '<p class="muted small" style="margin:0;">No consenting creators opted in yet. Creators can opt in from Wallet or Profile.</p>'
-                  : consentingCreators.map((c) => `
-                    <div class="creator-grant-row">
-                      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-                        <div>
-                          <strong>@${escapeHtml(c.username)}</strong> ${c.isVerified ? '<span class="verified-dot">&#10003;</span>' : ''}
-                          <div class="muted small">${escapeHtml(c.displayName)} &middot; Opted In</div>
-                        </div>
-                        <button type="button" class="btn-outline btn-sm" data-grant-open="${escapeHtml(c.userId)}">Grant Credits / Perk</button>
-                      </div>
-                    </div>
-                  `).join('')
-              }
-            </div>
-          ` : ''}
-
-          ${state.ownerConsoleTab === 'recommend' ? `
-            <div style="display:grid;gap:10px;">
-              ${
-                recommendCandidates.length === 0
-                  ? '<p class="muted small" style="margin:0;">No creator posts synced yet.</p>'
-                  : recommendCandidates.map((p) => {
-                    const isRec = p.boostTier === 'OWNER_RECOMMENDED' || Boolean(p.recommendedLabel);
-                    return `
-                      <div class="consent-row">
-                        <div style="min-width:0;flex:1;">
-                          <strong>@${escapeHtml(p.authorUsername)}</strong>
-                          <div class="muted small" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(p.caption || p.category || 'Post')}</div>
-                        </div>
-                        <button type="button" class="btn-sm ${isRec ? 'btn-outline' : 'btn-primary'}" data-admin-recommend="${escapeHtml(p.id)}">
-                          ${isRec ? 'Remove Rec' : 'Recommend'}
-                        </button>
-                      </div>
-                    `;
-                  }).join('')
-              }
-            </div>
-          ` : ''}
-
-          ${state.ownerConsoleTab === 'supabase' ? `
-            <div style="display:grid;gap:12px;">
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-                <div>
-                  <strong>Supabase PostgreSQL &amp; Storage (Primary Backend)</strong>
-                  <div class="muted small">${escapeHtml(state.supabaseStatus)}</div>
-                </div>
-                <span class="pill">${isSupabaseClientReady(SUPABASE_WEB_CONFIG) ? 'Configured ✓' : 'Pending'}</span>
-              </div>
-              <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
-                <button type="button" class="btn-outline btn-sm" id="testSupabaseWebBtn" ${state.supabaseBusy ? 'disabled' : ''}>
-                  ${state.supabaseBusy ? 'Testing...' : 'Test Connection'}
-                </button>
-                <button type="button" class="btn-primary btn-sm" id="syncSupabaseWebBtn" ${state.supabaseBusy ? 'disabled' : ''}>
-                  ${state.supabaseBusy ? 'Syncing...' : 'Sync Snapshot'}
-                </button>
-                <button type="button" class="btn-outline btn-sm" id="downloadSupabaseJsonBtn">
-                  Export JSON
-                </button>
-                <a class="btn-outline btn-sm" href="https://supabase.com/dashboard/project/qotuvugkapaspowhbsbf/sql/new" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">
-                  SQL Editor &#8599;
-                </a>
-              </div>
-            </div>
-          ` : ''}
-        </div>
-
-        <div class="card-panel">
+        <div class="card-panel" style="border-color:color-mix(in srgb, var(--primary) 45%, var(--border));">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
             <div>
-              <strong>Owner Starter Showcase Accounts (${showcasePostCount} posts &middot; ${showcaseStoryCount} stories)</strong>
-              <div class="muted small">Publish realistic starter creator posts, stories, likes &amp; comments or remove them in 1 click.</div>
+              <strong>Owner Admin Account (${escapeHtml(ADMIN_OWNER_EMAIL)})</strong>
+              <div class="muted small">Authorize Showcase Starters, publish posts/videos as starters, add likes/views, send In-App Announcements, and manage Monetization.</div>
             </div>
-            <div class="chip-row">
-              <button type="button" class="btn-primary btn-sm" id="showcaseBurstBtn" ${state.showcaseBusy ? 'disabled' : ''}>Publish 4 Starter Posts</button>
-              <button type="button" class="btn-outline btn-sm" id="showcaseEngageBtn" ${state.showcaseBusy ? 'disabled' : ''}>Engage Recent Posts</button>
-              <button type="button" class="btn-danger btn-sm" id="showcaseRemoveBtn" ${state.showcaseBusy ? 'disabled' : ''}>Remove All Starter</button>
-            </div>
+            <button type="button" class="owner-pill-btn" id="openFullOwnerConsoleBtn">&#9881; Open Owner Console</button>
           </div>
         </div>
       ` : ''}
@@ -2637,9 +2727,9 @@ function renderProfile() {
         </div>
       ` : ''}
 
-      <div class="ig-grid-3">
+      <div class="profile-grid-3">
         ${displayed.map((p) => `
-          <button type="button" class="ig-tile" data-open-post="${escapeHtml(p.id)}">
+          <button type="button" class="profile-tile" data-open-post="${escapeHtml(p.id)}">
             <img src="${resolveImageSrc(p)}" alt="${escapeHtml(p.caption || '')}" style="filter:${filterCssForTag(p.filterTag)};" loading="lazy" />
           </button>
         `).join('')}
@@ -2649,28 +2739,7 @@ function renderProfile() {
 
   document.getElementById('shareProfileBtn').onclick = () => shareProfileExternally(profile);
   document.getElementById('profileConsentToggle')?.addEventListener('change', (e) => updatePartnerConsent(e.target.checked));
-  mainStage.querySelectorAll('[data-owner-tab]').forEach((b) => {
-    b.onclick = () => { state.ownerConsoleTab = b.dataset.ownerTab; renderProfile(); };
-  });
-  const monForm = document.getElementById('ownerMonetizationForm');
-  if (monForm) {
-    monForm.onsubmit = async (e) => {
-      e.preventDefault();
-      await saveAdMonetizationConfigFromForm();
-    };
-  }
-  mainStage.querySelectorAll('[data-grant-open]').forEach((b) => {
-    b.onclick = () => {
-      const target = state.creators.find((c) => c.userId === b.dataset.grantOpen);
-      if (target) openOwnerGrantModal(target);
-    };
-  });
-  document.getElementById('showcaseBurstBtn')?.addEventListener('click', () => publishShowcaseBurst(state.user.uid));
-  document.getElementById('showcaseEngageBtn')?.addEventListener('click', () => engagePostsWithShowcase(state.user.uid));
-  document.getElementById('showcaseRemoveBtn')?.addEventListener('click', () => removeAllShowcaseContent());
-  document.getElementById('testSupabaseWebBtn')?.addEventListener('click', () => runSupabaseWebHealthCheck());
-  document.getElementById('syncSupabaseWebBtn')?.addEventListener('click', () => syncSupabaseDataFromWeb());
-  document.getElementById('downloadSupabaseJsonBtn')?.addEventListener('click', () => downloadSupabaseMigrationSnapshot());
+  document.getElementById('openFullOwnerConsoleBtn')?.addEventListener('click', () => navigateTo('admin'));
   document.getElementById('editProfileBtn')?.addEventListener('click', () => openEditProfileModal());
   document.getElementById('profileCreateBtn')?.addEventListener('click', () => navigateTo('create'));
   document.getElementById('messageCreatorBtn')?.addEventListener('click', () => openOrCreateDirectThread(profile));
@@ -2682,16 +2751,28 @@ function renderProfile() {
 async function publishShowcaseBurst(uid, { silent = false } = {}) {
   if (!uid || state.showcaseBusy) return;
   state.showcaseBusy = true;
-  if (!silent && state.nav === 'profile') renderProfile();
+  if (!silent && (state.nav === 'profile' || state.nav === 'admin')) renderMainStage();
   try {
     const stamp = Date.now();
-    const batchPersonas = [...SHOWCASE_PERSONAS].sort(() => Math.random() - 0.5).slice(0, 4);
+    const authAccounts = state.showcaseAccounts.filter((a) => a.isAuthorized);
+    const pool = (authAccounts.length > 0 ? authAccounts : SHOWCASE_PERSONAS).map((acct) => {
+      const base = SHOWCASE_PERSONAS.find((p) => p.username === acct.username) || SHOWCASE_PERSONAS[0];
+      return {
+        ...base,
+        username: acct.username,
+        displayName: acct.displayName || base.displayName,
+        avatarKey: acct.avatarKey || base.avatarKey,
+        category: acct.category || base.category,
+        location: acct.location || base.location
+      };
+    });
+    const batchPersonas = [...pool].sort(() => Math.random() - 0.5).slice(0, 4);
     const postRows = [];
     const commentRows = [];
     const storyRows = [];
     batchPersonas.forEach((persona, idx) => {
       const postId = `showcase_${persona.username.replace(/[^a-z0-9]/gi, '_')}_${stamp}_${idx}`;
-      const commenter = SHOWCASE_PERSONAS[(idx + 2) % SHOWCASE_PERSONAS.length];
+      const commenter = pool[(idx + 2) % pool.length];
       const commentText = SHOWCASE_COMMENTS[(idx + Math.floor(stamp / 1000)) % SHOWCASE_COMMENTS.length];
       postRows.push({
         id: postId,
@@ -2741,19 +2822,19 @@ async function publishShowcaseBurst(uid, { silent = false } = {}) {
       await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'stories', storyRows, '', globalThis.fetch, 'id');
     }
     await refreshAllFromSupabase({ showErrors: false });
-    if (!silent) showToast('Published 4 starter showcase posts & stories!');
+    if (!silent) showToast(`Published ${postRows.length} starter showcase posts & stories!`);
   } catch (err) {
     if (!silent) showToast(err?.message || 'Could not publish showcase burst');
   } finally {
     state.showcaseBusy = false;
-    if (!silent && state.nav === 'profile') renderProfile();
+    if (!silent && (state.nav === 'profile' || state.nav === 'admin')) renderMainStage();
   }
 }
 
 async function engagePostsWithShowcase(uid) {
   if (!uid || state.showcaseBusy) return;
   state.showcaseBusy = true;
-  if (state.nav === 'profile') renderProfile();
+  if (state.nav === 'profile' || state.nav === 'admin') renderMainStage();
   try {
     const targets = state.posts.slice(0, 4);
     if (targets.length === 0) {
@@ -2775,19 +2856,25 @@ async function engagePostsWithShowcase(uid) {
       };
     });
     await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'comments', commentRows, '', globalThis.fetch, 'id');
-    await Promise.all(targets.map((p) => patchSupabaseRows(
-      SUPABASE_WEB_CONFIG,
-      'posts',
-      `id=eq.${encodeURIComponent(p.id)}`,
-      { likes_count: (p.likesCount || 0) + 1, comments_count: (p.commentsCount || 0) + 1 }
-    )));
+    await Promise.all(targets.map((p) => {
+      const nextLikes = (p.likesCount || 0) + 1;
+      const nextViews = (p.viewsCount || 0) + 12;
+      state.pendingMutations.minLikes.set(p.id, { value: nextLikes, expiresAt: Date.now() + 12000 });
+      state.pendingMutations.minViews.set(p.id, { value: nextViews, expiresAt: Date.now() + 12000 });
+      return patchSupabaseRows(
+        SUPABASE_WEB_CONFIG,
+        'posts',
+        `id=eq.${encodeURIComponent(p.id)}`,
+        { likes_count: nextLikes, views_count: nextViews, comments_count: (p.commentsCount || 0) + 1 }
+      );
+    }));
     await refreshAllFromSupabase({ showErrors: false });
-    showToast(`Added starter likes & comments to ${targets.length} posts!`);
+    showToast(`Added starter likes, views & comments to ${targets.length} posts!`);
   } catch (err) {
     showToast(err?.message || 'Could not add showcase engagement');
   } finally {
     state.showcaseBusy = false;
-    if (state.nav === 'profile') renderProfile();
+    if (state.nav === 'profile' || state.nav === 'admin') renderMainStage();
   }
 }
 
@@ -2795,7 +2882,7 @@ async function removeAllShowcaseContent() {
   if (!state.user || state.showcaseBusy) return;
   if (!window.confirm('Remove all starter showcase posts and stories from Momi?')) return;
   state.showcaseBusy = true;
-  if (state.nav === 'profile') renderProfile();
+  if (state.nav === 'profile' || state.nav === 'admin') renderMainStage();
   try {
     await deleteSupabaseRows(SUPABASE_WEB_CONFIG, 'posts', 'id=like.showcase_%25');
     await deleteSupabaseRows(SUPABASE_WEB_CONFIG, 'stories', 'id=like.showcase_%25');
@@ -2805,7 +2892,7 @@ async function removeAllShowcaseContent() {
     showToast(err?.message || 'Failed removing starter showcase content');
   } finally {
     state.showcaseBusy = false;
-    if (state.nav === 'profile') renderProfile();
+    if (state.nav === 'profile' || state.nav === 'admin') renderMainStage();
   }
 }
 
@@ -2873,15 +2960,28 @@ function bindFeedInteractions(container) {
       if (post) adminToggleRecommendPost(post);
     };
   });
+  container.querySelectorAll('[data-open-community]').forEach((el) => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      const id = el.dataset.openCommunity;
+      const type = el.dataset.communityType || 'PAGE';
+      if (id) {
+        state.activeCommunityFilter = { id, type, name: el.dataset.communityName || 'Community' };
+        state.communitiesTab = type === 'GROUP' ? 'groups' : 'pages';
+        navigateTo('communities');
+      }
+    };
+  });
   container.querySelectorAll('[data-delete-post]').forEach((b) => {
     b.onclick = async (e) => {
       e.stopPropagation();
       if (!window.confirm('Delete this post permanently?')) return;
       const pid = b.dataset.deletePost;
-      await deleteSupabaseRows(SUPABASE_WEB_CONFIG, 'posts', `id=eq.${encodeURIComponent(pid)}`);
-      mirrorFirestoreBestEffort(() => deleteDoc(doc(db, 'posts', pid)));
+      state.pendingMutations.deletedPostIds.set(pid, Date.now() + 12000);
       state.posts = state.posts.filter((p) => p.id !== pid);
       renderMainStage();
+      await deleteSupabaseRows(SUPABASE_WEB_CONFIG, 'posts', `id=eq.${encodeURIComponent(pid)}`);
+      mirrorFirestoreBestEffort(() => deleteDoc(doc(db, 'posts', pid)));
       showToast('Post deleted');
     };
   });
@@ -2938,6 +3038,8 @@ async function togglePostLike(postId) {
   post.likesCount = nextLikes;
   if (already) state.likedIds.delete(postId);
   else state.likedIds.add(postId);
+  state.pendingMutations.likes.set(postId, { value: !already, expiresAt: Date.now() + 12000 });
+  state.pendingMutations.minLikes.set(postId, { value: nextLikes, expiresAt: Date.now() + 12000 });
   renderMainStage();
 
   if (already) {
@@ -2978,6 +3080,7 @@ async function togglePostLike(postId) {
 async function toggleBookmark(postId) {
   const uid = state.user.uid;
   const already = state.bookmarkIds.has(postId);
+  state.pendingMutations.bookmarks.set(postId, { value: !already, expiresAt: Date.now() + 12000 });
   if (already) {
     state.bookmarkIds.delete(postId);
     renderMainStage();
@@ -3007,6 +3110,7 @@ async function toggleFollow(targetUid, targetUsername) {
   if (!state.profile || !targetUid || targetUid === uid) return;
   const followId = `${uid}_${targetUid}`;
   const isFollowing = state.followingUids.has(targetUid);
+  state.pendingMutations.follows.set(targetUid, { value: !isFollowing, expiresAt: Date.now() + 12000 });
   if (isFollowing) {
     state.followingUids.delete(targetUid);
     renderAll();
@@ -3133,11 +3237,13 @@ async function openPostDetailModal(postId) {
   if (!window.location.search.includes(`post=${encodeURIComponent(postId)}`)) {
     window.history.replaceState({}, '', `${window.location.pathname}?post=${encodeURIComponent(postId)}`);
   }
+  post.viewsCount = (post.viewsCount || 0) + 1;
+  state.pendingMutations.minViews.set(postId, { value: post.viewsCount, expiresAt: Date.now() + 12000 });
   patchSupabaseRows(
     SUPABASE_WEB_CONFIG,
     'posts',
     `id=eq.${encodeURIComponent(postId)}`,
-    { views_count: (post.viewsCount || 0) + 1 }
+    { views_count: post.viewsCount }
   ).catch(() => undefined);
 
   const videoUrl = await resolveVideoForPost(post).catch(() => null);
@@ -3172,7 +3278,7 @@ async function openPostDetailModal(postId) {
       </div>
       <div style="display:flex;flex-direction:column;gap:12px;">
         <div class="post-caption">${renderRichCaptionHtml(post.caption || '')}</div>
-        <div class="muted small">${formatCount(post.likesCount)} likes &middot; ${formatCount(post.commentsCount)} comments &middot; ${formatCount((post.viewsCount || 0) + 1)} views</div>
+        <div class="muted small">${formatCount(post.likesCount)} likes &middot; ${formatCount(post.commentsCount)} comments &middot; ${formatCount(post.viewsCount)} views</div>
         <div style="flex:1;max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--border);padding-top:10px;">
           ${
             comments.length === 0
@@ -3189,11 +3295,11 @@ async function openPostDetailModal(postId) {
     ${morePosts.length ? `
       <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:14px;">
         <div style="font-weight:700;margin-bottom:10px;">More to Explore</div>
-        <div class="rednote-grid">
+        <div class="discovery-grid">
           ${morePosts.map((mp) => `
-            <article class="rednote-card" data-open-post="${escapeHtml(mp.id)}">
-              <img class="rednote-thumb" src="${resolveImageSrc(mp)}" alt="${escapeHtml(mp.caption || '')}" />
-              <div class="rednote-meta"><div class="rednote-title">${escapeHtml(mp.caption || '@' + mp.authorUsername)}</div></div>
+            <article class="discovery-card" data-open-post="${escapeHtml(mp.id)}">
+              <img class="discovery-thumb" src="${resolveImageSrc(mp)}" alt="${escapeHtml(mp.caption || '')}" />
+              <div class="discovery-meta"><div class="discovery-title">${escapeHtml(mp.caption || '@' + mp.authorUsername)}</div></div>
             </article>
           `).join('')}
         </div>
@@ -3325,6 +3431,18 @@ function openEditProfileModal() {
       avatar_url: avatarUrl,
       avatar_data: avatarData
     };
+    const optimistic = {
+      displayName: patch.display_name || p.displayName,
+      username: patch.username || p.username,
+      category: patch.category,
+      bio: patch.bio,
+      website: patch.website,
+      avatarUrl: patch.avatar_url,
+      avatarData: patch.avatar_data
+    };
+    state.pendingMutations.profile = { data: optimistic, expiresAt: Date.now() + 12000 };
+    state.profile = { ...state.profile, ...optimistic };
+    state.creators = state.creators.map((c) => (c.userId === state.user.uid ? { ...c, ...optimistic } : c));
     await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'profiles', `user_id=eq.${encodeURIComponent(state.user.uid)}`, patch);
     await refreshAllFromSupabase({ showErrors: false });
     closeModal();
@@ -3616,6 +3734,7 @@ function openGoLiveModal() {
 function openWatchLiveModal(streamId) {
   const stream = state.liveStreams.find((s) => s.userId === streamId || s.id === streamId);
   if (!stream) return;
+  const startedAtMs = Date.now();
 
   patchSupabaseRows(
     SUPABASE_WEB_CONFIG,
@@ -3636,9 +3755,22 @@ function openWatchLiveModal(streamId) {
     <div class="post-detail-split">
       <div>
         <div class="live-stage-box">
-          <img id="liveRemoteFrameImg" src="${resolveImageSrc({ imageKey: 'img_post_coastal' })}" alt="Live stream" style="width:100%;height:340px;object-fit:cover;" />
-          <div class="live-stage-overlay">
-            <span class="badge-pill live">LIVE STAGE</span>
+          <div id="liveAnimatedBackdrop" class="live-stage-backdrop">
+            <div class="live-host-ring">${avatarHtml(stream, 78)}</div>
+            <div style="text-align:center;">
+              <div style="font-weight:800;font-size:1.15rem;color:#fff;">@${escapeHtml(stream.username)}</div>
+              <div style="color:rgba(255,255,255,0.82);font-size:0.9rem;margin-top:2px;">${escapeHtml(stream.title || 'Momi Live Studio')}</div>
+            </div>
+            <div class="eq-bars" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center;">
+              <span class="pill" id="viewerLiveHardwarePill" style="background:rgba(255,255,255,0.14);color:#fff;">Audio &amp; Stage Live</span>
+              <span class="pill" id="viewerLiveElapsed" style="background:rgba(255,255,255,0.14);color:#fff;">00:00</span>
+            </div>
+          </div>
+          <img id="liveRemoteFrameImg" class="hidden" alt="Live stream video feed" style="width:100%;height:340px;object-fit:cover;position:relative;z-index:1;" />
+          <div id="liveHeartsLayer" style="position:absolute;inset:0;pointer-events:none;z-index:2;overflow:hidden;"></div>
+          <div class="live-stage-overlay" style="z-index:3;">
+            <span class="badge-pill live">LIVE STUDIO</span>
             <span class="pill" id="viewerLiveStatsPill" style="background:rgba(0,0,0,0.65);color:#fff;">
               ${formatCount(Math.max(1, stream.viewerCount || 1))} watching &middot; ${formatCount(stream.likesCount || 0)} &#9829;
             </span>
@@ -3664,6 +3796,26 @@ function openWatchLiveModal(streamId) {
     </div>
   `);
 
+  const spawnFloatingHeart = () => {
+    const layer = document.getElementById('liveHeartsLayer');
+    if (!layer) return;
+    const heart = document.createElement('span');
+    heart.className = 'floating-heart';
+    heart.textContent = '♥';
+    heart.style.left = `${15 + Math.round(Math.random() * 70)}%`;
+    layer.appendChild(heart);
+    setTimeout(() => heart.remove(), 1700);
+  };
+
+  state.liveTimer = setInterval(() => {
+    const el = document.getElementById('viewerLiveElapsed');
+    if (!el) return;
+    const secs = Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
+    const mm = String(Math.floor(secs / 60)).padStart(2, '0');
+    const ss = String(secs % 60).padStart(2, '0');
+    el.textContent = `${mm}:${ss}`;
+  }, 1000);
+
   const pollRoom = async () => {
     const [streams, frames, comments] = await Promise.all([
       selectSupabaseTable(SUPABASE_WEB_CONFIG, 'live_streams', `select=*&id=eq.${encodeURIComponent(streamId)}&limit=1`),
@@ -3675,9 +3827,22 @@ function openWatchLiveModal(streamId) {
     if (st && statsPill) {
       statsPill.textContent = `${formatCount(Math.max(1, st.viewer_count || 1))} watching · ${formatCount(st.likes_count || 0)} ♥`;
     }
+    const frame = frames[0];
+    const hwPill = document.getElementById('viewerLiveHardwarePill');
+    if (frame && hwPill) {
+      const camLabel = frame.camera_enabled ? 'Cam Live' : 'Stage Mode';
+      const micLabel = frame.mic_muted ? 'Mic Muted' : 'Audio Live';
+      hwPill.textContent = `${camLabel} · ${micLabel}`;
+    }
     const img = document.getElementById('liveRemoteFrameImg');
-    if (frames[0]?.frame_data && img) {
-      img.src = `data:image/jpeg;base64,${frames[0].frame_data}`;
+    const backdrop = document.getElementById('liveAnimatedBackdrop');
+    if (frame?.frame_data && frame.camera_enabled && img) {
+      img.src = `data:image/jpeg;base64,${frame.frame_data}`;
+      img.classList.remove('hidden');
+      backdrop?.classList.add('hidden');
+    } else {
+      img?.classList.add('hidden');
+      backdrop?.classList.remove('hidden');
     }
     const box = document.getElementById('liveChatBox');
     if (box && comments.length > 0) {
@@ -3699,6 +3864,7 @@ function openWatchLiveModal(streamId) {
   };
 
   document.getElementById('liveHeartBtn').onclick = async () => {
+    spawnFloatingHeart();
     stream.likesCount = (stream.likesCount || 0) + 1;
     await patchSupabaseRows(
       SUPABASE_WEB_CONFIG,
@@ -4112,8 +4278,9 @@ async function saveAdMonetizationConfigFromForm() {
     return;
   }
   state.adminBusy = true;
-  renderProfile();
+  renderMainStage();
   try {
+    const existingCfg = state.monetizationConfig || DEFAULT_MONETIZATION_CONFIG;
     const row = {
       id: 'monetization',
       admob_enabled: Boolean(document.getElementById('cfgAdmobEnabled').checked),
@@ -4132,6 +4299,11 @@ async function saveAdMonetizationConfigFromForm() {
       gamezop_portal_url: normalizedGamezop,
       gamezop_publisher_id: sanitizeGamezopPublisherId(document.getElementById('cfgGamezopPubId').value),
       gamezop_banner_title: (document.getElementById('cfgGamezopTitle').value.trim() || DEFAULT_MONETIZATION_CONFIG.gamezopBannerTitle).slice(0, 80),
+      announcement_id: existingCfg.announcementId || '',
+      announcement_title: existingCfg.announcementTitle || '',
+      announcement_body: existingCfg.announcementBody || '',
+      latest_version_name: existingCfg.latestVersionName || '2.1',
+      release_notes: existingCfg.releaseNotes || '',
       updated_by_email: ADMIN_OWNER_EMAIL
     };
     await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'app_config', [row], '', globalThis.fetch, 'id');
@@ -4141,7 +4313,7 @@ async function saveAdMonetizationConfigFromForm() {
     showToast(err?.message || 'Failed saving monetization config');
   } finally {
     state.adminBusy = false;
-    renderProfile();
+    renderMainStage();
   }
 }
 
@@ -4244,14 +4416,14 @@ function openOwnerGrantModal(creator) {
 async function runSupabaseWebHealthCheck() {
   if (!isOwnerAdmin() || state.supabaseBusy) return;
   state.supabaseBusy = true;
-  if (state.nav === 'profile') renderProfile();
+  if (state.nav === 'profile' || state.nav === 'admin') renderMainStage();
   try {
     const res = await checkSupabaseHealth(SUPABASE_WEB_CONFIG);
     state.supabaseStatus = res.message;
     showToast(res.message);
   } finally {
     state.supabaseBusy = false;
-    if (state.nav === 'profile') renderProfile();
+    if (state.nav === 'profile' || state.nav === 'admin') renderMainStage();
   }
 }
 
@@ -4259,7 +4431,7 @@ async function syncSupabaseDataFromWeb() {
   if (!isOwnerAdmin() || state.supabaseBusy) return;
   state.supabaseBusy = true;
   state.supabaseStatus = 'Syncing Momi data to Supabase...';
-  if (state.nav === 'profile') renderProfile();
+  if (state.nav === 'profile' || state.nav === 'admin') renderMainStage();
   try {
     const bundle = mapFirestoreSnapshotToSupabaseBundle({
       profile: state.profile,
@@ -4279,7 +4451,7 @@ async function syncSupabaseDataFromWeb() {
     showToast(state.supabaseStatus);
   } finally {
     state.supabaseBusy = false;
-    if (state.nav === 'profile') renderProfile();
+    if (state.nav === 'profile' || state.nav === 'admin') renderMainStage();
   }
 }
 
@@ -4305,4 +4477,977 @@ function downloadSupabaseMigrationSnapshot() {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   showToast('Downloaded Supabase migration JSON snapshot!');
+}
+
+// ---------------------------------------------------------------------------
+// Pages & Groups (Momi Communities)
+// ---------------------------------------------------------------------------
+
+function renderCommunities() {
+  if (state.activeCommunityFilter) {
+    const f = state.activeCommunityFilter;
+    const communityPosts = state.posts.filter((p) =>
+      f.type === 'PAGE' ? p.pageId === f.id : p.groupId === f.id
+    );
+    mainStage.innerHTML = `
+      <div class="stage-column">
+        <div class="section-header">
+          <div>
+            <button type="button" class="btn-ghost btn-sm" id="backToCommunitiesBtn">&larr; All Pages &amp; Groups</button>
+            <h2 style="margin:6px 0 0;">${escapeHtml(f.name)}</h2>
+            <div class="muted small">${f.type === 'PAGE' ? 'Creator Page' : 'Community Group'} &middot; ${communityPosts.length} posts</div>
+          </div>
+          <button type="button" class="btn-primary btn-sm" id="postInCommunityBtn">+ Post Here</button>
+        </div>
+        ${
+          communityPosts.length === 0
+            ? '<div class="card-panel"><p class="muted" style="margin:0;">No posts in this community yet. Tap "+ Post Here" to start the conversation!</p></div>'
+            : communityPosts.map(renderPostCardHtml).join('')
+        }
+      </div>
+    `;
+    document.getElementById('backToCommunitiesBtn').onclick = () => {
+      state.activeCommunityFilter = null;
+      renderCommunities();
+    };
+    document.getElementById('postInCommunityBtn').onclick = () => {
+      state.studio.pageId = f.type === 'PAGE' ? f.id : null;
+      state.studio.groupId = f.type === 'GROUP' ? f.id : null;
+      state.studio.communityName = f.name;
+      navigateTo('create');
+    };
+    bindFeedInteractions(mainStage);
+    return;
+  }
+
+  mainStage.innerHTML = `
+    <div class="stage-wide">
+      <div class="section-header">
+        <div>
+          <h2>Pages &amp; Groups</h2>
+          <div class="muted small">Create creator pages, join interest groups, and publish directly to your communities</div>
+        </div>
+        <div class="chip-row">
+          <button type="button" class="chip ${state.communitiesTab === 'pages' ? 'active' : ''}" id="commTabPages">Pages (${state.pages.length})</button>
+          <button type="button" class="chip ${state.communitiesTab === 'groups' ? 'active' : ''}" id="commTabGroups">Groups (${state.groups.length})</button>
+          <button type="button" class="btn-primary btn-sm" id="commCreateBtn">+ ${state.communitiesTab === 'pages' ? 'Create Page' : 'Create Group'}</button>
+        </div>
+      </div>
+
+      ${
+        state.communitiesTab === 'pages'
+          ? `<div class="discovery-grid">
+              ${
+                state.pages.length === 0
+                  ? '<div class="card-panel"><p class="muted" style="margin:0;">No Creator Pages yet. Tap "+ Create Page" to launch yours!</p></div>'
+                  : state.pages.map((pg) => {
+                    const isFollowed = state.pageFollowedIds.has(pg.id);
+                    return `
+                      <article class="community-card">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                          ${avatarHtml({ userId: pg.ownerUid, username: pg.ownerUsername }, 42)}
+                          <div style="min-width:0;flex:1;">
+                            <div style="font-weight:800;font-size:0.98rem;">${escapeHtml(pg.name)} ${pg.isVerified ? '<span class="verified-dot">&#10003;</span>' : ''}</div>
+                            <div class="muted small">@${escapeHtml(pg.handle || pg.ownerUsername)} &middot; ${escapeHtml(pg.category)}</div>
+                          </div>
+                        </div>
+                        ${pg.bio ? `<div class="small muted" style="line-height:1.45;">${escapeHtml(pg.bio)}</div>` : ''}
+                        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:auto;">
+                          <span class="muted small">${formatCount(pg.followersCount)} followers</span>
+                          <div style="display:flex;gap:6px;">
+                            <button type="button" class="btn-outline btn-sm" data-view-comm="PAGE:${escapeHtml(pg.id)}" data-comm-name="${escapeHtml(pg.name)}">Open</button>
+                            <button type="button" class="btn-sm ${isFollowed ? 'btn-outline' : 'btn-primary'}" data-toggle-page="${escapeHtml(pg.id)}">${isFollowed ? 'Following' : 'Follow'}</button>
+                          </div>
+                        </div>
+                      </article>
+                    `;
+                  }).join('')
+              }
+            </div>`
+          : `<div class="discovery-grid">
+              ${
+                state.groups.length === 0
+                  ? '<div class="card-panel"><p class="muted" style="margin:0;">No Community Groups yet. Tap "+ Create Group" to start one!</p></div>'
+                  : state.groups.map((gr) => {
+                    const isMember = state.groupJoinedIds.has(gr.id);
+                    return `
+                      <article class="community-card">
+                        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                          <div>
+                            <div style="font-weight:800;font-size:0.98rem;">${escapeHtml(gr.name)}</div>
+                            <div class="muted small">${escapeHtml(gr.category)} &middot; ${escapeHtml(gr.privacy)} Group</div>
+                          </div>
+                          <span class="pill">${formatCount(gr.membersCount)} members</span>
+                        </div>
+                        ${gr.description ? `<div class="small muted" style="line-height:1.45;">${escapeHtml(gr.description)}</div>` : ''}
+                        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:auto;">
+                          <span class="muted small">Host @${escapeHtml(gr.ownerUsername)}</span>
+                          <div style="display:flex;gap:6px;">
+                            <button type="button" class="btn-outline btn-sm" data-view-comm="GROUP:${escapeHtml(gr.id)}" data-comm-name="${escapeHtml(gr.name)}">Open</button>
+                            <button type="button" class="btn-sm ${isMember ? 'btn-outline' : 'btn-primary'}" data-toggle-group="${escapeHtml(gr.id)}">${isMember ? 'Joined' : 'Join'}</button>
+                          </div>
+                        </div>
+                      </article>
+                    `;
+                  }).join('')
+              }
+            </div>`
+      }
+    </div>
+  `;
+
+  document.getElementById('commTabPages').onclick = () => { state.communitiesTab = 'pages'; renderCommunities(); };
+  document.getElementById('commTabGroups').onclick = () => { state.communitiesTab = 'groups'; renderCommunities(); };
+  document.getElementById('commCreateBtn').onclick = () => {
+    if (state.communitiesTab === 'pages') openCreatePageModal();
+    else openCreateGroupModal();
+  };
+  mainStage.querySelectorAll('[data-view-comm]').forEach((b) => {
+    b.onclick = () => {
+      const [type, id] = b.dataset.viewComm.split(':');
+      state.activeCommunityFilter = { id, type, name: b.dataset.commName || 'Community' };
+      renderCommunities();
+    };
+  });
+  mainStage.querySelectorAll('[data-toggle-page]').forEach((b) => {
+    b.onclick = () => toggleFollowPage(b.dataset.togglePage);
+  });
+  mainStage.querySelectorAll('[data-toggle-group]').forEach((b) => {
+    b.onclick = () => toggleJoinGroup(b.dataset.toggleGroup);
+  });
+}
+
+async function toggleFollowPage(pageId) {
+  if (!state.user) return;
+  const uid = state.user.uid;
+  const pg = state.pages.find((x) => x.id === pageId);
+  if (!pg) return;
+  const already = state.pageFollowedIds.has(pageId);
+  const nextCount = Math.max(0, (pg.followersCount || 0) + (already ? -1 : 1));
+  pg.followersCount = nextCount;
+  if (already) state.pageFollowedIds.delete(pageId);
+  else state.pageFollowedIds.add(pageId);
+  renderCommunities();
+  if (already) {
+    await deleteSupabaseRows(SUPABASE_WEB_CONFIG, 'page_follows', `page_id=eq.${encodeURIComponent(pageId)}&user_id=eq.${encodeURIComponent(uid)}`);
+  } else {
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'page_follows', [{ id: `${uid}_${pageId}`, page_id: pageId, user_id: uid }], '', globalThis.fetch, 'id');
+  }
+  await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'pages', `id=eq.${encodeURIComponent(pageId)}`, { followers_count: nextCount });
+}
+
+async function toggleJoinGroup(groupId) {
+  if (!state.user || !state.profile) return;
+  const uid = state.user.uid;
+  const gr = state.groups.find((x) => x.id === groupId);
+  if (!gr) return;
+  const already = state.groupJoinedIds.has(groupId);
+  const nextCount = Math.max(0, (gr.membersCount || 0) + (already ? -1 : 1));
+  gr.membersCount = nextCount;
+  if (already) state.groupJoinedIds.delete(groupId);
+  else state.groupJoinedIds.add(groupId);
+  renderCommunities();
+  if (already) {
+    await deleteSupabaseRows(SUPABASE_WEB_CONFIG, 'group_members', `group_id=eq.${encodeURIComponent(groupId)}&user_id=eq.${encodeURIComponent(uid)}`);
+  } else {
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'group_members', [{
+      id: `${uid}_${groupId}`,
+      group_id: groupId,
+      user_id: uid,
+      username: state.profile.username,
+      role: 'MEMBER'
+    }], '', globalThis.fetch, 'id');
+  }
+  await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'groups', `id=eq.${encodeURIComponent(groupId)}`, { members_count: nextCount });
+}
+
+function openCreatePageModal() {
+  if (!state.profile) return;
+  openModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <h3 style="margin:0;">Create Momi Page</h3>
+      <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+    </div>
+    <form id="createPageForm" style="display:grid;gap:12px;">
+      <div>
+        <label class="small muted">Page Name *</label>
+        <input id="pageNameInput" class="input" placeholder="e.g. Momi Street Photography" required />
+      </div>
+      <div class="field-grid-2">
+        <div>
+          <label class="small muted">Handle</label>
+          <input id="pageHandleInput" class="input" placeholder="street.photo" />
+        </div>
+        <div>
+          <label class="small muted">Category</label>
+          <select id="pageCategorySelect" class="select">
+            <option value="Creator">Creator</option>
+            <option value="Brand">Brand &amp; Studio</option>
+            <option value="Travel">Travel</option>
+            <option value="Art">Art &amp; Design</option>
+            <option value="Music">Music &amp; Audio</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label class="small muted">Bio</label>
+        <textarea id="pageBioInput" class="textarea" rows="3" placeholder="What is your Page about?"></textarea>
+      </div>
+      <button type="submit" class="btn-primary">Create Page</button>
+    </form>
+  `);
+  document.getElementById('closeModalBtn').onclick = closeModal;
+  document.getElementById('createPageForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const name = document.getElementById('pageNameInput').value.trim().slice(0, 80);
+    if (!name) return;
+    const handleRaw = document.getElementById('pageHandleInput').value.trim() || name;
+    const handle = handleRaw.toLowerCase().replace(/[^a-z0-9._]/g, '').slice(0, 40);
+    const id = makeClientId('page');
+    await ensureUserSeededInSupabase(state.user);
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'pages', [{
+      id,
+      owner_uid: state.user.uid,
+      owner_username: state.profile.username,
+      name,
+      handle,
+      category: document.getElementById('pageCategorySelect').value,
+      bio: document.getElementById('pageBioInput').value.trim().slice(0, 300),
+      cover_key: 'img_post_coastal',
+      is_verified: Boolean(state.profile.isVerified),
+      followers_count: 1
+    }], '', globalThis.fetch, 'id');
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'page_follows', [{ id: `${state.user.uid}_${id}`, page_id: id, user_id: state.user.uid }], '', globalThis.fetch, 'id');
+    closeModal();
+    await refreshAllFromSupabase({ showErrors: false });
+    showToast(`Page "${name}" created!`);
+  };
+}
+
+function openCreateGroupModal() {
+  if (!state.profile) return;
+  openModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <h3 style="margin:0;">Create Community Group</h3>
+      <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+    </div>
+    <form id="createGroupForm" style="display:grid;gap:12px;">
+      <div>
+        <label class="small muted">Group Name *</label>
+        <input id="groupNameInput" class="input" placeholder="e.g. Film Shooters Club" required />
+      </div>
+      <div class="field-grid-2">
+        <div>
+          <label class="small muted">Category</label>
+          <select id="groupCategorySelect" class="select">
+            <option value="Community">Community</option>
+            <option value="Travel">Travel</option>
+            <option value="Coffee">Food &amp; Coffee</option>
+            <option value="Art">Art &amp; Design</option>
+            <option value="City">City Life</option>
+          </select>
+        </div>
+        <div>
+          <label class="small muted">Privacy</label>
+          <select id="groupPrivacySelect" class="select">
+            <option value="PUBLIC">Public Group</option>
+            <option value="PRIVATE">Private Group</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label class="small muted">Description</label>
+        <textarea id="groupDescInput" class="textarea" rows="3" placeholder="Group rules and topics..."></textarea>
+      </div>
+      <button type="submit" class="btn-primary">Create Group</button>
+    </form>
+  `);
+  document.getElementById('closeModalBtn').onclick = closeModal;
+  document.getElementById('createGroupForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const name = document.getElementById('groupNameInput').value.trim().slice(0, 80);
+    if (!name) return;
+    const id = makeClientId('grp');
+    await ensureUserSeededInSupabase(state.user);
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'groups', [{
+      id,
+      owner_uid: state.user.uid,
+      owner_username: state.profile.username,
+      name,
+      category: document.getElementById('groupCategorySelect').value,
+      description: document.getElementById('groupDescInput').value.trim().slice(0, 300),
+      privacy: document.getElementById('groupPrivacySelect').value,
+      cover_key: 'img_post_architecture',
+      members_count: 1
+    }], '', globalThis.fetch, 'id');
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'group_members', [{
+      id: `${state.user.uid}_${id}`,
+      group_id: id,
+      user_id: state.user.uid,
+      username: state.profile.username,
+      role: 'ADMIN'
+    }], '', globalThis.fetch, 'id');
+    closeModal();
+    await refreshAllFromSupabase({ showErrors: false });
+    showToast(`Group "${name}" created!`);
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Dedicated Owner Admin Console & Showcase Starter Management
+// ---------------------------------------------------------------------------
+
+function renderAdminConsole() {
+  if (!isOwnerAdmin()) {
+    mainStage.innerHTML = `
+      <div class="stage-column">
+        <div class="card-panel" style="text-align:center;padding:36px;">
+          <h2 style="margin:0 0 8px;">Owner Console Restricted</h2>
+          <p class="muted" style="margin:0 0 16px;">Sign in with the owner account (${escapeHtml(ADMIN_OWNER_EMAIL)}) to manage Showcase Starters, In-App Announcements, and Monetization.</p>
+          <button type="button" class="btn-primary" id="adminBackHomeBtn">Return Home</button>
+        </div>
+      </div>
+    `;
+    document.getElementById('adminBackHomeBtn').onclick = () => navigateTo('home');
+    return;
+  }
+
+  const cfg = state.monetizationConfig || DEFAULT_MONETIZATION_CONFIG;
+  const consentingCreators = state.creators.filter((c) => Boolean(c.partnerConsent));
+  const recommendCandidates = state.posts.filter((p) => !p.id.startsWith('showcase_')).slice(0, 15);
+  const showcasePostCount = state.posts.filter((p) => p.id.startsWith('showcase_')).length;
+  const showcaseStoryCount = state.stories.filter((s) => s.id.startsWith('showcase_')).length;
+  const starters = state.showcaseAccounts.length > 0
+    ? state.showcaseAccounts
+    : SHOWCASE_PERSONAS.map((p) => ({
+      username: p.username,
+      displayName: p.displayName,
+      avatarKey: p.avatarKey,
+      bio: `${p.category} creator in ${p.location}`,
+      category: p.category,
+      location: p.location,
+      isAuthorized: false
+    }));
+
+  mainStage.innerHTML = `
+    <div class="stage-wide">
+      <div class="card-panel">
+        <div class="section-header">
+          <div>
+            <h2 style="margin:0;">Owner Admin Console</h2>
+            <div class="muted small">Signed in as <strong>${escapeHtml(state.user?.email || ADMIN_OWNER_EMAIL)}</strong> &middot; Web &amp; Android live sync</div>
+          </div>
+          <div class="chip-row">
+            <button type="button" class="chip ${state.ownerConsoleTab === 'starters' ? 'active' : ''}" data-admin-tab="starters">Showcase Starters (${starters.filter((s) => s.isAuthorized).length}/${starters.length})</button>
+            <button type="button" class="chip ${state.ownerConsoleTab === 'announcements' ? 'active' : ''}" data-admin-tab="announcements">In-App Updates</button>
+            <button type="button" class="chip ${state.ownerConsoleTab === 'monetizers' ? 'active' : ''}" data-admin-tab="monetizers">Monetizers</button>
+            <button type="button" class="chip ${state.ownerConsoleTab === 'grants' ? 'active' : ''}" data-admin-tab="grants">Grants (${consentingCreators.length})</button>
+            <button type="button" class="chip ${state.ownerConsoleTab === 'recommend' ? 'active' : ''}" data-admin-tab="recommend">Recommend Posts</button>
+            <button type="button" class="chip ${state.ownerConsoleTab === 'supabase' ? 'active' : ''}" data-admin-tab="supabase">Supabase</button>
+          </div>
+        </div>
+
+        ${state.ownerConsoleTab === 'starters' ? `
+          <div style="display:grid;gap:14px;">
+            <div class="consent-row" style="flex-wrap:wrap;gap:10px;">
+              <div>
+                <strong>Authorized Showcase Starters (${showcasePostCount} posts &middot; ${showcaseStoryCount} stories)</strong>
+                <div class="muted small">Authorize starter accounts, edit their profile bio/name, publish custom photo/video posts as any authorized starter, or boost posts with starter likes, views &amp; comments.</div>
+              </div>
+              <div class="chip-row">
+                <button type="button" class="btn-primary btn-sm" id="adminBoostPostBtn">Add Likes / Views</button>
+                <button type="button" class="btn-outline btn-sm" id="showcaseBurstBtn" ${state.showcaseBusy ? 'disabled' : ''}>Publish 4 Burst Posts</button>
+                <button type="button" class="btn-outline btn-sm" id="showcaseEngageBtn" ${state.showcaseBusy ? 'disabled' : ''}>Engage Recent</button>
+                <button type="button" class="btn-danger btn-sm" id="showcaseRemoveBtn" ${state.showcaseBusy ? 'disabled' : ''}>Clear Starter Posts</button>
+              </div>
+            </div>
+
+            <div class="discovery-grid">
+              ${starters.map((st) => `
+                <article class="card-panel" style="gap:10px;${st.isAuthorized ? 'border-color:var(--primary);' : ''}">
+                  <div style="display:flex;align-items:center;gap:10px;">
+                    ${avatarHtml({ userId: st.username, username: st.username }, 44)}
+                    <div style="min-width:0;flex:1;">
+                      <div style="font-weight:700;">@${escapeHtml(st.username)}</div>
+                      <div class="muted small">${escapeHtml(st.displayName)} &middot; ${escapeHtml(st.category)}</div>
+                    </div>
+                    <span class="pill" style="${st.isAuthorized ? 'background:color-mix(in srgb, var(--primary) 18%, transparent);color:var(--primary);' : ''}">
+                      ${st.isAuthorized ? 'Authorized' : 'Paused'}
+                    </span>
+                  </div>
+                  <div class="small muted">${escapeHtml(st.bio || `${st.category} in ${st.location}`)}</div>
+                  <div class="chip-row" style="margin-top:auto;">
+                    <button type="button" class="btn-sm ${st.isAuthorized ? 'btn-outline' : 'btn-primary'}" data-toggle-starter="${escapeHtml(st.username)}">
+                      ${st.isAuthorized ? 'Pause' : 'Authorize'}
+                    </button>
+                    <button type="button" class="btn-outline btn-sm" data-edit-starter="${escapeHtml(st.username)}">Edit Profile</button>
+                    <button type="button" class="btn-primary btn-sm" data-post-starter="${escapeHtml(st.username)}" ${!st.isAuthorized ? 'disabled title="Authorize starter first"' : ''}>Post / Video</button>
+                  </div>
+                </article>
+              `).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        ${state.ownerConsoleTab === 'announcements' ? `
+          <form id="ownerAnnouncementForm" style="display:grid;gap:12px;">
+            <p class="muted small" style="margin:0;">Publish an In-App Announcement &amp; Release Notes banner to all Android and Web users instantly — no APK redownload needed.</p>
+            <div class="owner-form-grid">
+              <div>
+                <label class="small muted">Latest Version Label</label>
+                <input id="annVersionInput" class="input" value="${escapeHtml(cfg.latestVersionName || '2.1')}" placeholder="2.1" />
+              </div>
+              <div>
+                <label class="small muted">Announcement Title *</label>
+                <input id="annTitleInput" class="input" value="${escapeHtml(cfg.announcementTitle || '')}" placeholder="e.g. Pages, Groups & Smooth Live Rooms are live!" required />
+              </div>
+            </div>
+            <div>
+              <label class="small muted">Announcement Body</label>
+              <textarea id="annBodyInput" class="textarea" rows="3" placeholder="Tell creators what changed...">${escapeHtml(cfg.announcementBody || '')}</textarea>
+            </div>
+            <div>
+              <label class="small muted">Release Notes Summary</label>
+              <input id="annNotesInput" class="input" value="${escapeHtml(cfg.releaseNotes || '')}" placeholder="e.g. Pages & Groups, 2-color metallic icon, smooth feed sync" />
+            </div>
+            <div class="chip-row">
+              <button type="submit" class="btn-primary" ${state.adminBusy ? 'disabled' : ''}>Publish In-App Announcement</button>
+              <button type="button" class="btn-outline btn-sm" id="clearAnnouncementBtn">Clear Active Banner</button>
+            </div>
+          </form>
+        ` : ''}
+
+        ${state.ownerConsoleTab === 'monetizers' ? `
+          <form id="ownerMonetizationForm" style="display:grid;gap:12px;">
+            <div class="owner-form-grid">
+              <label class="consent-row"><span>Enable AdMob (Android)</span><input id="cfgAdmobEnabled" type="checkbox" ${cfg.admobEnabled ? 'checked' : ''} /></label>
+              <label class="consent-row"><span>Enable Start.io (Android)</span><input id="cfgStartIoEnabled" type="checkbox" ${cfg.startIoEnabled ? 'checked' : ''} /></label>
+              <label class="consent-row"><span>Enable Monetag (Android + Web)</span><input id="cfgMonetagEnabled" type="checkbox" ${cfg.monetagEnabled ? 'checked' : ''} /></label>
+              <label class="consent-row"><span>Enable Gamezop Arcade (Android + Web)</span><input id="cfgGamezopEnabled" type="checkbox" ${cfg.gamezopEnabled ? 'checked' : ''} /></label>
+            </div>
+            <div class="owner-form-grid">
+              <div>
+                <label class="small muted">AdMob Banner Unit ID</label>
+                <input id="cfgAdmobBanner" class="input" placeholder="ca-app-pub-.../..." value="${escapeHtml(cfg.admobBannerUnitId || '')}" />
+              </div>
+              <div>
+                <label class="small muted">AdMob MREC Unit ID</label>
+                <input id="cfgAdmobMrec" class="input" placeholder="ca-app-pub-.../..." value="${escapeHtml(cfg.admobMrecUnitId || '')}" />
+              </div>
+              <div>
+                <label class="small muted">AdMob Interstitial Unit ID</label>
+                <input id="cfgAdmobInterstitial" class="input" placeholder="ca-app-pub-.../..." value="${escapeHtml(cfg.admobInterstitialUnitId || '')}" />
+              </div>
+            </div>
+            <div class="owner-form-grid">
+              <div>
+                <label class="small muted">Monetag Direct SmartLink URL (https://)</label>
+                <input id="cfgMonetagDirectUrl" class="input" placeholder="https://otieu.com/4/..." value="${escapeHtml(cfg.monetagDirectLinkUrl || '')}" />
+              </div>
+              <div>
+                <label class="small muted">Monetag Web Zone ID</label>
+                <input id="cfgMonetagZoneId" class="input" placeholder="e.g. 9012345" value="${escapeHtml(cfg.monetagWebZoneId || '')}" />
+              </div>
+              <div>
+                <label class="small muted">Monetag Meta Verification Content</label>
+                <input id="cfgMonetagMeta" class="input" placeholder="content value" value="${escapeHtml(cfg.monetagWebMetaTag || '')}" />
+              </div>
+            </div>
+            <div class="owner-form-grid">
+              <div>
+                <label class="small muted">Gamezop Publisher ID</label>
+                <input id="cfgGamezopPubId" class="input" placeholder="e.g. 9012" value="${escapeHtml(cfg.gamezopPublisherId || '')}" />
+              </div>
+              <div>
+                <label class="small muted">Gamezop Portal URL (optional https://)</label>
+                <input id="cfgGamezopPortalUrl" class="input" placeholder="https://www.gamezop.com/?id=..." value="${escapeHtml(cfg.gamezopPortalUrl || '')}" />
+              </div>
+              <div>
+                <label class="small muted">Gamezop Card Title</label>
+                <input id="cfgGamezopTitle" class="input" value="${escapeHtml(cfg.gamezopBannerTitle || '')}" />
+              </div>
+            </div>
+            <div class="owner-form-grid">
+              <div>
+                <label class="small muted">Sponsored Card Title</label>
+                <input id="cfgPromoTitle" class="input" value="${escapeHtml(cfg.partnerPromoTitle || '')}" />
+              </div>
+              <div>
+                <label class="small muted">Sponsored Card CTA</label>
+                <input id="cfgPromoCta" class="input" value="${escapeHtml(cfg.partnerPromoCta || '')}" />
+              </div>
+            </div>
+            <div>
+              <label class="small muted">Sponsored Card Subtitle</label>
+              <input id="cfgPromoSubtitle" class="input" value="${escapeHtml(cfg.partnerPromoSubtitle || '')}" />
+            </div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+              <button type="submit" class="btn-primary" ${state.adminBusy ? 'disabled' : ''}>Save Live Monetization Config</button>
+              <a class="btn-outline btn-sm" href="https://business.gamezop.com" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Gamezop &#8599;</a>
+              <a class="btn-outline btn-sm" href="https://publishers.monetag.com" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Monetag &#8599;</a>
+            </div>
+          </form>
+        ` : ''}
+
+        ${state.ownerConsoleTab === 'grants' ? `
+          <div style="display:grid;gap:10px;">
+            ${
+              consentingCreators.length === 0
+                ? '<p class="muted small" style="margin:0;">No consenting creators opted in yet. Creators can opt in from Wallet or Profile.</p>'
+                : consentingCreators.map((c) => `
+                  <div class="creator-grant-row">
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+                      <div>
+                        <strong>@${escapeHtml(c.username)}</strong> ${c.isVerified ? '<span class="verified-dot">&#10003;</span>' : ''}
+                        <div class="muted small">${escapeHtml(c.displayName)} &middot; Opted In</div>
+                      </div>
+                      <button type="button" class="btn-outline btn-sm" data-grant-open="${escapeHtml(c.userId)}">Grant Credits / Perk</button>
+                    </div>
+                  </div>
+                `).join('')
+            }
+          </div>
+        ` : ''}
+
+        ${state.ownerConsoleTab === 'recommend' ? `
+          <div style="display:grid;gap:10px;">
+            ${
+              recommendCandidates.length === 0
+                ? '<p class="muted small" style="margin:0;">No creator posts synced yet.</p>'
+                : recommendCandidates.map((p) => {
+                  const isRec = p.boostTier === 'OWNER_RECOMMENDED' || Boolean(p.recommendedLabel);
+                  return `
+                    <div class="consent-row">
+                      <div style="min-width:0;flex:1;">
+                        <strong>@${escapeHtml(p.authorUsername)}</strong>
+                        <div class="muted small" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(p.caption || p.category || 'Post')}</div>
+                      </div>
+                      <button type="button" class="btn-sm ${isRec ? 'btn-outline' : 'btn-primary'}" data-admin-recommend="${escapeHtml(p.id)}">
+                        ${isRec ? 'Remove Rec' : 'Recommend'}
+                      </button>
+                    </div>
+                  `;
+                }).join('')
+            }
+          </div>
+        ` : ''}
+
+        ${state.ownerConsoleTab === 'supabase' ? `
+          <div style="display:grid;gap:12px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+              <div>
+                <strong>Supabase PostgreSQL &amp; Storage (Primary Backend)</strong>
+                <div class="muted small">${escapeHtml(state.supabaseStatus)}</div>
+              </div>
+              <span class="pill">${isSupabaseClientReady(SUPABASE_WEB_CONFIG) ? 'Configured ✓' : 'Pending'}</span>
+            </div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+              <button type="button" class="btn-outline btn-sm" id="testSupabaseWebBtn" ${state.supabaseBusy ? 'disabled' : ''}>
+                ${state.supabaseBusy ? 'Testing...' : 'Test Connection'}
+              </button>
+              <button type="button" class="btn-primary btn-sm" id="syncSupabaseWebBtn" ${state.supabaseBusy ? 'disabled' : ''}>
+                ${state.supabaseBusy ? 'Syncing...' : 'Sync Snapshot'}
+              </button>
+              <button type="button" class="btn-outline btn-sm" id="downloadSupabaseJsonBtn">
+                Export JSON
+              </button>
+              <a class="btn-outline btn-sm" href="https://supabase.com/dashboard/project/qotuvugkapaspowhbsbf/sql/new" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">
+                SQL Editor &#8599;
+              </a>
+            </div>
+          </div>
+        ` : ''}
+      </div>
+    </div>
+  `;
+
+  mainStage.querySelectorAll('[data-admin-tab]').forEach((b) => {
+    b.onclick = () => { state.ownerConsoleTab = b.dataset.adminTab; renderAdminConsole(); };
+  });
+  mainStage.querySelectorAll('[data-toggle-starter]').forEach((b) => {
+    b.onclick = () => toggleShowcaseAuthorize(b.dataset.toggleStarter);
+  });
+  mainStage.querySelectorAll('[data-edit-starter]').forEach((b) => {
+    b.onclick = () => openEditStarterModal(b.dataset.editStarter);
+  });
+  mainStage.querySelectorAll('[data-post-starter]').forEach((b) => {
+    b.onclick = () => openPublishAsStarterModal(b.dataset.postStarter);
+  });
+  document.getElementById('adminBoostPostBtn')?.addEventListener('click', () => openBoostWithStarterModal());
+  document.getElementById('showcaseBurstBtn')?.addEventListener('click', () => publishShowcaseBurst(state.user.uid));
+  document.getElementById('showcaseEngageBtn')?.addEventListener('click', () => engagePostsWithShowcase(state.user.uid));
+  document.getElementById('showcaseRemoveBtn')?.addEventListener('click', () => removeAllShowcaseContent());
+  document.getElementById('ownerAnnouncementForm')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await saveInAppAnnouncementFromForm();
+  });
+  document.getElementById('clearAnnouncementBtn')?.addEventListener('click', async () => {
+    await saveInAppAnnouncementFromForm({ clear: true });
+  });
+  const monForm = document.getElementById('ownerMonetizationForm');
+  if (monForm) {
+    monForm.onsubmit = async (e) => {
+      e.preventDefault();
+      await saveAdMonetizationConfigFromForm();
+    };
+  }
+  mainStage.querySelectorAll('[data-grant-open]').forEach((b) => {
+    b.onclick = () => {
+      const target = state.creators.find((c) => c.userId === b.dataset.grantOpen);
+      if (target) openOwnerGrantModal(target);
+    };
+  });
+  document.getElementById('testSupabaseWebBtn')?.addEventListener('click', () => runSupabaseWebHealthCheck());
+  document.getElementById('syncSupabaseWebBtn')?.addEventListener('click', () => syncSupabaseDataFromWeb());
+  document.getElementById('downloadSupabaseJsonBtn')?.addEventListener('click', () => downloadSupabaseMigrationSnapshot());
+  bindFeedInteractions(mainStage);
+}
+
+async function toggleShowcaseAuthorize(username) {
+  if (!isOwnerAdmin()) return;
+  const acct = state.showcaseAccounts.find((a) => a.username === username);
+  if (!acct) return;
+  const nextVal = !acct.isAuthorized;
+  acct.isAuthorized = nextVal;
+  renderAdminConsole();
+  await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'showcase_accounts', [{
+    username: acct.username,
+    display_name: acct.displayName,
+    avatar_key: acct.avatarKey,
+    bio: acct.bio,
+    category: acct.category,
+    location: acct.location,
+    is_authorized: nextVal
+  }], '', globalThis.fetch, 'username');
+  showToast(nextVal ? `Authorized @${username}` : `Paused @${username}`);
+}
+
+function openEditStarterModal(username) {
+  if (!isOwnerAdmin()) return;
+  const acct = state.showcaseAccounts.find((a) => a.username === username);
+  if (!acct) return;
+  openModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <h3 style="margin:0;">Edit Starter @${escapeHtml(acct.username)}</h3>
+      <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+    </div>
+    <form id="editStarterForm" style="display:grid;gap:12px;">
+      <div>
+        <label class="small muted">Display Name</label>
+        <input id="stDisplayName" class="input" value="${escapeHtml(acct.displayName)}" required />
+      </div>
+      <div class="field-grid-2">
+        <div>
+          <label class="small muted">Category</label>
+          <input id="stCategory" class="input" value="${escapeHtml(acct.category)}" />
+        </div>
+        <div>
+          <label class="small muted">Location</label>
+          <input id="stLocation" class="input" value="${escapeHtml(acct.location)}" />
+        </div>
+      </div>
+      <div>
+        <label class="small muted">Bio</label>
+        <textarea id="stBio" class="textarea" rows="3">${escapeHtml(acct.bio)}</textarea>
+      </div>
+      <label class="consent-row">
+        <span>Authorized to Publish &amp; Engage</span>
+        <input id="stAuthorized" type="checkbox" ${acct.isAuthorized ? 'checked' : ''} />
+      </label>
+      <button type="submit" class="btn-primary">Save Starter Profile</button>
+    </form>
+  `);
+  document.getElementById('closeModalBtn').onclick = closeModal;
+  document.getElementById('editStarterForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const row = {
+      username: acct.username,
+      display_name: document.getElementById('stDisplayName').value.trim().slice(0, 80) || acct.displayName,
+      avatar_key: acct.avatarKey,
+      category: document.getElementById('stCategory').value.trim().slice(0, 60) || acct.category,
+      location: document.getElementById('stLocation').value.trim().slice(0, 120),
+      bio: document.getElementById('stBio').value.trim().slice(0, 300),
+      is_authorized: Boolean(document.getElementById('stAuthorized').checked)
+    };
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'showcase_accounts', [row], '', globalThis.fetch, 'username');
+    closeModal();
+    await refreshAllFromSupabase({ showErrors: false });
+    showToast(`Updated starter @${acct.username}`);
+  };
+}
+
+function openPublishAsStarterModal(username) {
+  if (!isOwnerAdmin()) return;
+  const acct = state.showcaseAccounts.find((a) => a.username === username);
+  if (!acct || !acct.isAuthorized) {
+    showToast('Authorize this starter account first.');
+    return;
+  }
+  openModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <h3 style="margin:0;">Publish Post/Video as @${escapeHtml(acct.username)}</h3>
+      <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+    </div>
+    <form id="publishStarterForm" style="display:grid;gap:12px;">
+      <div>
+        <label class="small muted">Caption *</label>
+        <textarea id="stPostCaption" class="textarea" rows="3" placeholder="Write caption with #hashtags..." required></textarea>
+      </div>
+      <div class="field-grid-2">
+        <div>
+          <label class="small muted">Photo Upload (optional)</label>
+          <input id="stPostPhoto" type="file" accept="image/*" class="input" />
+        </div>
+        <div>
+          <label class="small muted">Video Upload (.mp4, optional)</label>
+          <input id="stPostVideo" type="file" accept="video/*" class="input" />
+        </div>
+      </div>
+      <div class="field-grid-2">
+        <div>
+          <label class="small muted">Initial Likes</label>
+          <input id="stInitLikes" type="number" min="0" max="5000" value="24" class="input" />
+        </div>
+        <div>
+          <label class="small muted">Initial Views</label>
+          <input id="stInitViews" type="number" min="0" max="50000" value="180" class="input" />
+        </div>
+      </div>
+      <button type="submit" class="btn-primary" id="stPostSubmitBtn">Publish as @${escapeHtml(acct.username)}</button>
+    </form>
+  `);
+  document.getElementById('closeModalBtn').onclick = closeModal;
+  document.getElementById('publishStarterForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById('stPostSubmitBtn');
+    btn.disabled = true;
+    btn.textContent = 'Publishing...';
+    try {
+      const postId = `showcase_${acct.username.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}`;
+      const caption = document.getElementById('stPostCaption').value.trim().slice(0, 1000);
+      const photoFile = document.getElementById('stPostPhoto').files?.[0];
+      const videoFile = document.getElementById('stPostVideo').files?.[0];
+      let imageUrl = null;
+      let videoUrl = null;
+      if (photoFile) {
+        imageUrl = await uploadWebFileToStorage(SUPABASE_WEB_CONFIG, 'momi-media', `posts/${state.user.uid}/${postId}.jpg`, photoFile, photoFile.type || 'image/jpeg');
+      }
+      if (videoFile) {
+        const ext = (videoFile.name.split('.').pop() || 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp4';
+        videoUrl = await uploadWebFileToStorage(SUPABASE_WEB_CONFIG, 'momi-videos', `videos/${state.user.uid}/${postId}.${ext}`, videoFile, videoFile.type || 'video/mp4');
+      }
+      const postRow = {
+        id: postId,
+        user_id: state.user.uid,
+        author_username: acct.username,
+        author_display_name: acct.displayName,
+        author_avatar_key: acct.avatarKey || 'avatar_elena',
+        author_verified: true,
+        location: acct.location || '',
+        image_key: 'img_post_coastal',
+        image_url: imageUrl,
+        media_type: videoUrl ? 'VIDEO' : 'IMAGE',
+        video_url: videoUrl,
+        hashtags: extractHashtags(caption),
+        tagged_usernames: extractMentions(caption),
+        caption,
+        likes_count: Math.max(0, Number(document.getElementById('stInitLikes').value) || 0),
+        views_count: Math.max(0, Number(document.getElementById('stInitViews').value) || 0),
+        comments_count: 0,
+        category: acct.category || 'Travel',
+        is_reel: Boolean(videoUrl)
+      };
+      const mapped = mapSupabasePostToWeb(postRow);
+      state.pendingMutations.createdPosts.set(postId, { post: mapped, expiresAt: Date.now() + 12000 });
+      await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'posts', [postRow], '', globalThis.fetch, 'id');
+      closeModal();
+      await refreshAllFromSupabase({ showErrors: false });
+      showToast(`Published post as @${acct.username}!`);
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = `Publish as @${acct.username}`;
+      showToast(err?.message || 'Starter publish failed');
+    }
+  };
+}
+
+function openBoostWithStarterModal() {
+  if (!isOwnerAdmin()) return;
+  const authStarters = state.showcaseAccounts.filter((s) => s.isAuthorized);
+  const candidates = state.posts.slice(0, 15);
+  if (candidates.length === 0) {
+    showToast('No posts available to engage yet.');
+    return;
+  }
+  openModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <h3 style="margin:0;">Add Starter Likes, Views &amp; Comment</h3>
+      <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+    </div>
+    <form id="boostStarterForm" style="display:grid;gap:12px;">
+      <div>
+        <label class="small muted">Target Post</label>
+        <select id="boostTargetPost" class="select">
+          ${candidates.map((p) => `<option value="${escapeHtml(p.id)}">@${escapeHtml(p.authorUsername)}: ${escapeHtml((p.caption || 'Post').slice(0, 48))}</option>`).join('')}
+        </select>
+      </div>
+      <div>
+        <label class="small muted">Starter Account</label>
+        <select id="boostStarterAcct" class="select">
+          ${(authStarters.length > 0 ? authStarters : state.showcaseAccounts).map((s) => `<option value="${escapeHtml(s.username)}">@${escapeHtml(s.username)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field-grid-2">
+        <div>
+          <label class="small muted">Add Likes</label>
+          <input id="boostAddLikes" type="number" min="0" max="500" value="5" class="input" />
+        </div>
+        <div>
+          <label class="small muted">Add Views</label>
+          <input id="boostAddViews" type="number" min="0" max="5000" value="40" class="input" />
+        </div>
+      </div>
+      <div>
+        <label class="small muted">Optional Comment</label>
+        <input id="boostCommentText" class="input" placeholder="e.g. Incredible framing!" />
+      </div>
+      <button type="submit" class="btn-primary">Apply Starter Engagement</button>
+    </form>
+  `);
+  document.getElementById('closeModalBtn').onclick = closeModal;
+  document.getElementById('boostStarterForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const postId = document.getElementById('boostTargetPost').value;
+    const starterUser = document.getElementById('boostStarterAcct').value;
+    const addLikes = Math.max(0, Number(document.getElementById('boostAddLikes').value) || 0);
+    const addViews = Math.max(0, Number(document.getElementById('boostAddViews').value) || 0);
+    const commentText = document.getElementById('boostCommentText').value.trim().slice(0, 500);
+    const post = state.posts.find((p) => p.id === postId);
+    if (!post) return;
+
+    const nextLikes = (post.likesCount || 0) + addLikes;
+    const nextViews = (post.viewsCount || 0) + addViews;
+    const nextComments = (post.commentsCount || 0) + (commentText ? 1 : 0);
+    state.pendingMutations.minLikes.set(postId, { value: nextLikes, expiresAt: Date.now() + 12000 });
+    state.pendingMutations.minViews.set(postId, { value: nextViews, expiresAt: Date.now() + 12000 });
+
+    if (commentText) {
+      await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'comments', [{
+        id: `showcase_cmt_${Date.now()}`,
+        post_id: postId,
+        user_id: state.user.uid,
+        author_username: starterUser,
+        author_avatar_key: 'avatar_elena',
+        text: commentText,
+        likes_count: 1
+      }], '', globalThis.fetch, 'id');
+    }
+    await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'posts', `id=eq.${encodeURIComponent(postId)}`, {
+      likes_count: nextLikes,
+      views_count: nextViews,
+      comments_count: nextComments
+    });
+    closeModal();
+    await refreshAllFromSupabase({ showErrors: false });
+    showToast(`Added +${addLikes} likes and +${addViews} views!`);
+  };
+}
+
+async function saveInAppAnnouncementFromForm({ clear = false } = {}) {
+  if (!isOwnerAdmin() || state.adminBusy) return;
+  state.adminBusy = true;
+  renderAdminConsole();
+  try {
+    const cfg = state.monetizationConfig || DEFAULT_MONETIZATION_CONFIG;
+    const row = {
+      id: 'monetization',
+      admob_enabled: Boolean(cfg.admobEnabled),
+      admob_banner_unit_id: cfg.admobBannerUnitId || '',
+      admob_mrec_unit_id: cfg.admobMrecUnitId || '',
+      admob_interstitial_unit_id: cfg.admobInterstitialUnitId || '',
+      start_io_enabled: Boolean(cfg.startIoEnabled),
+      monetag_enabled: Boolean(cfg.monetagEnabled),
+      monetag_direct_link_url: cfg.monetagDirectLinkUrl || '',
+      monetag_web_zone_id: cfg.monetagWebZoneId || '',
+      monetag_web_meta_tag: cfg.monetagWebMetaTag || '',
+      partner_promo_title: cfg.partnerPromoTitle || DEFAULT_MONETIZATION_CONFIG.partnerPromoTitle,
+      partner_promo_subtitle: cfg.partnerPromoSubtitle || DEFAULT_MONETIZATION_CONFIG.partnerPromoSubtitle,
+      partner_promo_cta: cfg.partnerPromoCta || DEFAULT_MONETIZATION_CONFIG.partnerPromoCta,
+      gamezop_enabled: Boolean(cfg.gamezopEnabled),
+      gamezop_portal_url: cfg.gamezopPortalUrl || '',
+      gamezop_publisher_id: cfg.gamezopPublisherId || '',
+      gamezop_banner_title: cfg.gamezopBannerTitle || DEFAULT_MONETIZATION_CONFIG.gamezopBannerTitle,
+      announcement_id: clear ? '' : `ann_${Date.now()}`,
+      announcement_title: clear ? '' : document.getElementById('annTitleInput').value.trim().slice(0, 120),
+      announcement_body: clear ? '' : document.getElementById('annBodyInput').value.trim().slice(0, 500),
+      latest_version_name: document.getElementById('annVersionInput')?.value.trim().slice(0, 32) || '2.1',
+      release_notes: clear ? '' : document.getElementById('annNotesInput').value.trim().slice(0, 400),
+      updated_by_email: ADMIN_OWNER_EMAIL
+    };
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'app_config', [row], '', globalThis.fetch, 'id');
+    await refreshAllFromSupabase({ showErrors: false });
+    showToast(clear ? 'Cleared In-App Announcement banner' : 'Published In-App Announcement to Web & Android!');
+  } catch (err) {
+    showToast(err?.message || 'Could not save announcement');
+  } finally {
+    state.adminBusy = false;
+    renderAdminConsole();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Momi AI Assistant Modal (Honest Web Status + Android Gemini Integration)
+// ---------------------------------------------------------------------------
+
+function openAiAssistantModal() {
+  const templates = [
+    { label: 'Travel Photo', caption: 'Golden hour shadows and calm streets along the coast today. #travel #momi #goldenhour' },
+    { label: 'Video Clip Hook', caption: '3 quick frames from today’s studio session — wait for the final cut! #clips #studio #momi' },
+    { label: 'Community Poll', caption: 'Which color palette fits this weekend’s drop better? Tell me below! #community #design #momi' }
+  ];
+  openModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <h3 style="margin:0;">Momi AI Studio</h3>
+        <span class="badge-pill">Android Gemini 2.5 Flash</span>
+      </div>
+      <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+    </div>
+    <div class="card-panel" style="gap:10px;background:var(--surface-alt);">
+      <strong>Live AI Replies Run Securely on Momi Android</strong>
+      <div class="small muted" style="line-height:1.5;">
+        Momi does not expose or store secret Gemini API keys inside browser client code. Full conversational Momi AI runs in the Android app when <code>GEMINI_API_KEY</code> is configured in AI Studio Secrets.
+      </div>
+      <div class="chip-row">
+        <a class="btn-primary btn-sm" href="${ANDROID_APK_URL}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Get Momi Android APK</a>
+      </div>
+    </div>
+    <div style="margin-top:16px;">
+      <div style="font-weight:700;margin-bottom:8px;">Quick Studio Starter Templates</div>
+      <div style="display:grid;gap:8px;">
+        ${templates.map((t, idx) => `
+          <div class="consent-row">
+            <div style="min-width:0;flex:1;">
+              <strong>${escapeHtml(t.label)}</strong>
+              <div class="muted small">${escapeHtml(t.caption)}</div>
+            </div>
+            <button type="button" class="btn-outline btn-sm" data-use-ai-tpl="${idx}">Use in Studio</button>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `);
+  document.getElementById('closeModalBtn').onclick = closeModal;
+  modalContent.querySelectorAll('[data-use-ai-tpl]').forEach((b) => {
+    b.onclick = () => {
+      const tpl = templates[Number(b.dataset.useAiTpl)];
+      if (tpl) {
+        state.studio.caption = tpl.caption;
+        state.studio.hashtags = extractHashtags(tpl.caption);
+      }
+      closeModal();
+      navigateTo('create');
+      showToast('Template loaded into Create Studio');
+    };
+  });
 }

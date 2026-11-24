@@ -17,6 +17,7 @@ import {
   FIRESTORE_DATABASE_ID,
   formatCount,
   initialsForUsername,
+  isOwnerEmail,
   normalizeMonetagDirectUrl,
   normalizeUsername,
   parseDeepLinkFromLocation,
@@ -47,9 +48,12 @@ import {
   mapFirestoreSnapshotToSupabaseBundle,
   mapSupabaseAuthUserToWeb,
   mapSupabaseConfigToWeb,
+  mapSupabaseGroupToWeb,
+  mapSupabasePageToWeb,
   mapSupabasePostToWeb,
   mapSupabaseProductToWeb,
   mapSupabaseProfileToWeb,
+  mapSupabaseShowcaseAccountToWeb,
   mapSupabaseStoryToWeb,
   normalizeSupabaseUrl,
   parseSupabaseOAuthCallback,
@@ -86,11 +90,14 @@ test('Web shell assets, PWA manifest, and hosting files exist', () => {
     'web/assets/img_post_coastal.jpg',
     'web/assets/img_post_coffee.jpg',
     'web/assets/img_post_architecture.jpg',
-    'web/assets/img_post_neon_street.jpg'
+    'web/assets/img_post_neon_street.jpg',
+    'web/app-ads.txt'
   ];
   for (const rel of required) {
     assert.ok(fs.existsSync(path.join(REPO_ROOT, rel)), `Missing web asset: ${rel}`);
   }
+  const appAdsTxt = fs.readFileSync(path.join(REPO_ROOT, 'web', 'app-ads.txt'), 'utf8');
+  assert.ok(appAdsTxt.includes('start.io, 120122068, DIRECT'));
 });
 
 test('extractHashtags and extractMentions parse, deduplicate, and normalize tags', () => {
@@ -181,7 +188,7 @@ test('starter showcase personas and Firestore Web sync resilience are configured
   assert.ok(appJs.includes('saveSupabaseAuthSession'));
 
   const swJs = fs.readFileSync(path.join(REPO_ROOT, 'web', 'sw.js'), 'utf8');
-  assert.ok(swJs.includes('momi-web-v4'));
+  assert.ok(swJs.includes('momi-web-v5'));
 });
 
 test('monetization config defaults, URL sanitization, boost sorting, and web perks align with Firestore rules', () => {
@@ -364,4 +371,45 @@ test('Supabase Auth helpers build Google OAuth URLs, parse callbacks, and map us
   assert.equal(mappedUser.displayName, 'Syed Ali');
   assert.equal(mappedUser.photoURL, 'https://example.com/a.jpg');
   assert.equal(mappedUser.emailVerified, true);
+});
+
+test('Owner admin email helper, Pages & Groups, Showcase Starters, Announcements, and zero competitor mentions work correctly', () => {
+  assert.equal(isOwnerEmail('syali6511@gmail.com'), true);
+  assert.equal(isOwnerEmail('  SYALI6511@GMAIL.COM  '), true);
+  assert.equal(isOwnerEmail('other@example.com'), false);
+  assert.equal(isOwnerEmail(''), false);
+
+  const enableSyncSql = fs.readFileSync(path.join(REPO_ROOT, 'supabase', 'enable_sync.sql'), 'utf8');
+  for (const tbl of ['pages', 'page_follows', 'groups', 'group_members', 'showcase_accounts']) {
+    assert.ok(SUPABASE_SCHEMA_TABLES.includes(tbl), `Missing ${tbl} in SUPABASE_SCHEMA_TABLES`);
+    assert.ok(enableSyncSql.includes(`public.${tbl}`), `Missing public.${tbl} in enable_sync.sql`);
+  }
+
+  const page = mapSupabasePageToWeb({ id: 'pg1', owner_uid: 'u1', name: 'Momi Photos', followers_count: 42 });
+  assert.equal(page.name, 'Momi Photos');
+  assert.equal(page.followersCount, 42);
+
+  const group = mapSupabaseGroupToWeb({ id: 'gr1', owner_uid: 'u1', name: 'Street Club', members_count: 19 });
+  assert.equal(group.name, 'Street Club');
+  assert.equal(group.membersCount, 19);
+
+  const starter = mapSupabaseShowcaseAccountToWeb({ username: 'elena.maris', is_authorized: true });
+  assert.equal(starter.username, 'elena.maris');
+  assert.equal(starter.isAuthorized, true);
+
+  const cfg = mapSupabaseConfigToWeb({
+    announcement_id: 'ann_1',
+    announcement_title: 'In-App Update',
+    announcement_body: 'Live now!',
+    latest_version_name: '2.2',
+    release_notes: 'Pages & Groups added'
+  });
+  assert.equal(cfg.announcementId, 'ann_1');
+  assert.equal(cfg.latestVersionName, '2.2');
+
+  const webFiles = ['index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'firebase-config.js', 'supabase-client.js'];
+  for (const rel of webFiles) {
+    const content = fs.readFileSync(path.join(REPO_ROOT, 'web', rel), 'utf8');
+    assert.equal(/\b(instagram|facebook|rednote|tiktok)\b/i.test(content), false, `Competitor mention found in web/${rel}`);
+  }
 });

@@ -11,6 +11,10 @@ export const FIRESTORE_DATABASE_ID = 'ai-studio-android-momi-6f066cf0-37b6-444a-
 export const ADMIN_OWNER_EMAIL = 'syali6511@gmail.com';
 export const MAX_IMAGE_BASE64_CHARS = 650000;
 
+export function isOwnerEmail(email = '') {
+  return String(email || '').trim().toLowerCase() === ADMIN_OWNER_EMAIL.toLowerCase();
+}
+
 // Populate url & anonKey after running supabase/schema.sql (NEVER place service_role / sb_secret_ keys here)
 export const SUPABASE_WEB_CONFIG = {
   url: 'https://qotuvugkapaspowhbsbf.supabase.co',
@@ -343,6 +347,11 @@ export const DEFAULT_MONETIZATION_CONFIG = {
   gamezopPortalUrl: '',
   gamezopPublisherId: '',
   gamezopBannerTitle: 'Momi Arcade · Play Instant Games',
+  announcementId: '',
+  announcementTitle: '',
+  announcementBody: '',
+  latestVersionName: '2.1',
+  releaseNotes: '',
   updatedByEmail: ''
 };
 

@@ -27,6 +27,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Campaign
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sensors
@@ -40,6 +43,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
@@ -84,6 +88,7 @@ fun HomeScreen(
     unreadMessageCount: Int,
     onOpenSearch: () -> Unit = {},
     onOpenMarketplace: () -> Unit = {},
+    onOpenCommunities: () -> Unit = {},
     onOpenAiAssistant: () -> Unit = {},
     onOpenNotifications: () -> Unit,
     onOpenMessages: () -> Unit,
@@ -106,6 +111,8 @@ fun HomeScreen(
     onReportPost: (Post) -> Unit = {},
     isAdminViewActive: Boolean = false,
     monetizationConfig: AdMonetizationConfig = AdMonetizationConfig(),
+    dismissedAnnouncementId: String = "",
+    onDismissAnnouncement: (String) -> Unit = {},
     onBoostPost: (Post) -> Unit = {},
     onToggleRecommendedPost: (Post, Boolean) -> Unit = { _, _ -> },
     onAuthorClick: (userId: String, username: String, isShowcase: Boolean) -> Unit,
@@ -145,7 +152,7 @@ fun HomeScreen(
             .toSet()
     }
 
-    // Instagram/TikTok-style viewport-centered playback:
+    // Momi viewport-centered playback:
     // activates whichever video or music post sits closest to screen center.
     val activePlayablePostId by remember(playablePostIds) {
         derivedStateOf {
@@ -191,7 +198,7 @@ fun HomeScreen(
             .background(MaterialTheme.colorScheme.background)
             .statusBarsPadding()
     ) {
-        // Luma Top Bar (Instagram-exact layout)
+        // Momi Top Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -244,6 +251,20 @@ fun HomeScreen(
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onOpenCommunities,
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("home_communities_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Groups,
+                        contentDescription = "Open Pages and Groups",
+                        tint = MaterialTheme.colorScheme.onBackground,
+                        modifier = Modifier.size(25.dp)
+                    )
+                }
+
                 IconButton(
                     onClick = onOpenMarketplace,
                     modifier = Modifier
@@ -520,6 +541,91 @@ fun HomeScreen(
                 )
             }
 
+            val annTitle = monetizationConfig.announcementTitle.trim()
+            val annBody = monetizationConfig.announcementBody.trim()
+            val annId = monetizationConfig.announcementId.ifBlank { "ann_${annTitle.hashCode()}" }
+            if ((annTitle.isNotBlank() || annBody.isNotBlank()) && dismissedAnnouncementId != annId) {
+                item(key = "in_app_announcement_$annId") {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                            .testTag("home_announcement_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Campaign,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = annTitle.ifBlank { "Momi Update" },
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    if (monetizationConfig.latestVersionName.isNotBlank()) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = MaterialTheme.colorScheme.primary
+                                        ) {
+                                            Text(
+                                                text = "v${monetizationConfig.latestVersionName}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onPrimary,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                                if (annBody.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = annBody,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.88f)
+                                    )
+                                }
+                                if (monetizationConfig.releaseNotes.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = monetizationConfig.releaseNotes,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                            IconButton(
+                                onClick = { onDismissAnnouncement(annId) },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("dismiss_announcement_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Close,
+                                    contentDescription = "Dismiss announcement",
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             item(key = "gamezop_home_arcade") {
                 MomiGamezopArcadeCard(monetizationConfig = monetizationConfig)
             }
@@ -575,6 +681,7 @@ fun HomeScreen(
                         onToggleRecommended = { recommended -> onToggleRecommendedPost(post, recommended) },
                         onDeletePost = { onDeletePost(post) },
                         onReportPost = { onReportPost(post) },
+                        onCommunityClick = if (post.communityName.isNotBlank()) onOpenCommunities else null,
                         onAuthorClick = {
                             onAuthorClick(
                                 post.userId,

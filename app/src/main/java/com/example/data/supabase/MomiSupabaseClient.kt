@@ -14,8 +14,11 @@ import com.example.data.model.MarketOrder
 import com.example.data.model.MarketProduct
 import com.example.data.model.MerchantAccount
 import com.example.data.model.MessageThread
+import com.example.data.model.MomiGroup
+import com.example.data.model.MomiPage
 import com.example.data.model.NotificationItem
 import com.example.data.model.Post
+import com.example.data.model.ShowcaseAccount
 import com.example.data.model.Story
 import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
@@ -80,7 +83,12 @@ data class SupabaseFeedBundle(
     val reports: List<ContentReport> = emptyList(),
     val wallet: UserWallet? = null,
     val transactions: List<CreditTransaction> = emptyList(),
-    val monetizationConfig: AdMonetizationConfig? = null
+    val monetizationConfig: AdMonetizationConfig? = null,
+    val pages: List<MomiPage> = emptyList(),
+    val pageFollowedIds: Set<String> = emptySet(),
+    val groups: List<MomiGroup> = emptyList(),
+    val groupJoinedIds: Set<String> = emptySet(),
+    val showcaseAccounts: List<ShowcaseAccount> = emptyList()
 )
 
 object MomiSupabaseSchema {
@@ -103,7 +111,12 @@ object MomiSupabaseSchema {
         "content_reports",
         "wallets",
         "credit_transactions",
-        "app_config"
+        "app_config",
+        "pages",
+        "page_follows",
+        "groups",
+        "group_members",
+        "showcase_accounts"
     )
 
     val STORAGE_BUCKETS: Set<String> = setOf(
@@ -240,6 +253,9 @@ object MomiSupabaseSchema {
         "recommended_label" to post.recommendedLabel.take(40),
         "boosted_by_uid" to post.boostedByUid,
         "boosted_at" to post.boostedAt?.let { formatTimestampIso(it) },
+        "page_id" to post.pageId,
+        "group_id" to post.groupId,
+        "community_name" to post.communityName.take(80),
         "created_at" to formatTimestampIso(post.createdAt)
     )
 
@@ -510,7 +526,51 @@ object MomiSupabaseSchema {
         "gamezop_portal_url" to config.gamezopPortalUrl.take(300),
         "gamezop_publisher_id" to config.gamezopPublisherId.take(40),
         "gamezop_banner_title" to config.gamezopBannerTitle.take(80),
+        "announcement_id" to config.announcementId.take(80),
+        "announcement_title" to config.announcementTitle.take(120),
+        "announcement_body" to config.announcementBody.take(500),
+        "latest_version_name" to config.latestVersionName.take(24),
+        "release_notes" to config.releaseNotes.take(400),
         "updated_by_email" to config.updatedByEmail.take(120)
+    )
+
+    fun toPageRow(page: MomiPage): Map<String, Any?> = linkedMapOf(
+        "id" to page.id,
+        "owner_uid" to page.ownerUid,
+        "owner_username" to page.ownerUsername.ifBlank { "momi.creator" }.take(50),
+        "name" to page.name.take(80),
+        "handle" to page.handle.take(50),
+        "category" to page.category.ifBlank { "Creator" }.take(40),
+        "bio" to page.bio.take(300),
+        "cover_key" to page.coverKey.ifBlank { "img_post_coastal" }.take(64),
+        "avatar_url" to page.avatarUrl,
+        "is_verified" to page.isVerified,
+        "followers_count" to page.followersCount.coerceAtLeast(0L),
+        "created_at" to formatTimestampIso(page.createdAt)
+    )
+
+    fun toGroupRow(group: MomiGroup): Map<String, Any?> = linkedMapOf(
+        "id" to group.id,
+        "owner_uid" to group.ownerUid,
+        "owner_username" to group.ownerUsername.ifBlank { "momi.creator" }.take(50),
+        "name" to group.name.take(80),
+        "category" to group.category.ifBlank { "Community" }.take(40),
+        "description" to group.description.take(300),
+        "privacy" to if (group.privacy.equals("PRIVATE", ignoreCase = true)) "PRIVATE" else "PUBLIC",
+        "cover_key" to group.coverKey.ifBlank { "img_post_architecture" }.take(64),
+        "members_count" to group.membersCount.coerceAtLeast(1L),
+        "created_at" to formatTimestampIso(group.createdAt)
+    )
+
+    fun toShowcaseAccountRow(account: ShowcaseAccount): Map<String, Any?> = linkedMapOf(
+        "username" to account.username.take(50),
+        "display_name" to account.displayName.take(80),
+        "avatar_key" to account.avatarKey.ifBlank { "avatar_elena" }.take(64),
+        "bio" to account.bio.take(240),
+        "category" to account.category.ifBlank { "Creator" }.take(40),
+        "location" to account.location.take(120),
+        "is_authorized" to account.isAuthorized,
+        "updated_by_email" to account.updatedByEmail.take(120)
     )
 
     fun buildMigrationBundleMap(
@@ -1243,6 +1303,9 @@ class MomiSupabaseClient(
             val liveStreamsJson = fetchJsonArray("$baseUrl/rest/v1/live_streams?select=*&is_live=eq.true&order=updated_at.desc&limit=30")
             val followsJson = fetchJsonArray("$baseUrl/rest/v1/follows?select=*&limit=200")
             val configJson = fetchJsonArray("$baseUrl/rest/v1/app_config?select=*&id=eq.monetization&limit=1")
+            val pagesJson = fetchJsonArray("$baseUrl/rest/v1/pages?select=*&order=created_at.desc&limit=60")
+            val groupsJson = fetchJsonArray("$baseUrl/rest/v1/groups?select=*&order=created_at.desc&limit=60")
+            val showcaseJson = fetchJsonArray("$baseUrl/rest/v1/showcase_accounts?select=*&limit=30")
 
             var likedPosts = emptySet<String>()
             var bookmarkedPosts = emptySet<String>()
@@ -1254,6 +1317,8 @@ class MomiSupabaseClient(
             var reports = emptyList<ContentReport>()
             var wallet: UserWallet? = null
             var transactions = emptyList<CreditTransaction>()
+            var pageFollowedIds = emptySet<String>()
+            var groupJoinedIds = emptySet<String>()
 
             val uid = currentUserId.trim()
             if (uid.isNotEmpty()) {
@@ -1303,6 +1368,20 @@ class MomiSupabaseClient(
 
                 val reportsJson = fetchJsonArray("$baseUrl/rest/v1/content_reports?select=*&order=created_at.desc&limit=60")
                 reports = parseContentReports(reportsJson)
+
+                val pageFollowsJson = fetchJsonArray("$baseUrl/rest/v1/page_follows?select=page_id&user_id=eq.$encUid&limit=120")
+                pageFollowedIds = buildSet {
+                    for (i in 0 until pageFollowsJson.length()) {
+                        pageFollowsJson.optJSONObject(i)?.optString("page_id")?.takeIf { it.isNotBlank() }?.let(::add)
+                    }
+                }
+
+                val groupMembersJson = fetchJsonArray("$baseUrl/rest/v1/group_members?select=group_id&user_id=eq.$encUid&limit=120")
+                groupJoinedIds = buildSet {
+                    for (i in 0 until groupMembersJson.length()) {
+                        groupMembersJson.optJSONObject(i)?.optString("group_id")?.takeIf { it.isNotBlank() }?.let(::add)
+                    }
+                }
             }
 
             SupabaseFeedBundle(
@@ -1323,7 +1402,12 @@ class MomiSupabaseClient(
                 reports = reports,
                 wallet = wallet,
                 transactions = transactions,
-                monetizationConfig = parseAppConfig(configJson)
+                monetizationConfig = parseAppConfig(configJson),
+                pages = parsePages(pagesJson),
+                pageFollowedIds = pageFollowedIds,
+                groups = parseGroups(groupsJson),
+                groupJoinedIds = groupJoinedIds,
+                showcaseAccounts = parseShowcaseAccounts(showcaseJson)
             )
         }
     }
@@ -1488,6 +1572,9 @@ class MomiSupabaseClient(
                     isBoosted = o.optBoolean("is_boosted", false),
                     boostTier = o.optString("boost_tier"),
                     recommendedLabel = o.optString("recommended_label"),
+                    pageId = o.optCleanString("page_id"),
+                    groupId = o.optCleanString("group_id"),
+                    communityName = o.optString("community_name"),
                     createdAt = parseIsoTimestamp(o.optString("created_at"))
                 )
             )
@@ -1885,8 +1972,80 @@ class MomiSupabaseClient(
             gamezopEnabled = o.optBoolean("gamezop_enabled", false),
             gamezopPortalUrl = o.optString("gamezop_portal_url"),
             gamezopPublisherId = o.optString("gamezop_publisher_id"),
-            gamezopBannerTitle = o.optString("gamezop_banner_title")
+            gamezopBannerTitle = o.optString("gamezop_banner_title"),
+            announcementId = o.optString("announcement_id"),
+            announcementTitle = o.optString("announcement_title"),
+            announcementBody = o.optString("announcement_body"),
+            latestVersionName = o.optString("latest_version_name").ifBlank { "2.1" },
+            releaseNotes = o.optString("release_notes"),
+            updatedByEmail = o.optString("updated_by_email")
         )
+    }
+
+    private fun parsePages(arr: JSONArray): List<MomiPage> = buildList {
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val id = o.optString("id")
+            if (id.isBlank()) continue
+            add(
+                MomiPage(
+                    id = id,
+                    ownerUid = o.optString("owner_uid"),
+                    ownerUsername = o.optString("owner_username", "momi.creator"),
+                    name = o.optString("name", "Momi Page"),
+                    handle = o.optString("handle"),
+                    category = o.optString("category", "Creator"),
+                    bio = o.optString("bio"),
+                    coverKey = o.optString("cover_key", "img_post_coastal"),
+                    avatarUrl = o.optCleanString("avatar_url"),
+                    isVerified = o.optBoolean("is_verified", false),
+                    followersCount = o.optLong("followers_count", 0L),
+                    createdAt = parseIsoTimestamp(o.optString("created_at"))
+                )
+            )
+        }
+    }
+
+    private fun parseGroups(arr: JSONArray): List<MomiGroup> = buildList {
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val id = o.optString("id")
+            if (id.isBlank()) continue
+            add(
+                MomiGroup(
+                    id = id,
+                    ownerUid = o.optString("owner_uid"),
+                    ownerUsername = o.optString("owner_username", "momi.creator"),
+                    name = o.optString("name", "Momi Group"),
+                    category = o.optString("category", "Community"),
+                    description = o.optString("description"),
+                    privacy = o.optString("privacy", "PUBLIC"),
+                    coverKey = o.optString("cover_key", "img_post_architecture"),
+                    membersCount = o.optLong("members_count", 1L),
+                    createdAt = parseIsoTimestamp(o.optString("created_at"))
+                )
+            )
+        }
+    }
+
+    private fun parseShowcaseAccounts(arr: JSONArray): List<ShowcaseAccount> = buildList {
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val username = o.optString("username")
+            if (username.isBlank()) continue
+            add(
+                ShowcaseAccount(
+                    username = username,
+                    displayName = o.optString("display_name", username),
+                    avatarKey = o.optString("avatar_key", "avatar_elena"),
+                    bio = o.optString("bio"),
+                    category = o.optString("category", "Creator"),
+                    location = o.optString("location"),
+                    isAuthorized = o.optBoolean("is_authorized", false),
+                    updatedByEmail = o.optString("updated_by_email")
+                )
+            )
+        }
     }
 
     companion object {

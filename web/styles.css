@@ -898,14 +898,14 @@ body[data-theme="light"] .auth-error {
   color: var(--primary);
 }
 
-/* RedNote Discover Notes & Instagram Grid */
-.rednote-grid {
+/* Momi Discover Notes & Profile Grid */
+.discovery-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(225px, 1fr));
   gap: 16px;
 }
 
-.rednote-card {
+.discovery-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -916,11 +916,11 @@ body[data-theme="light"] .auth-error {
   transition: transform 0.15s ease;
 }
 
-.rednote-card:hover {
+.discovery-card:hover {
   transform: translateY(-2px);
 }
 
-.rednote-thumb {
+.discovery-thumb {
   width: 100%;
   aspect-ratio: 4 / 5;
   object-fit: cover;
@@ -928,14 +928,14 @@ body[data-theme="light"] .auth-error {
   display: block;
 }
 
-.rednote-meta {
+.discovery-meta {
   padding: 12px 14px 14px;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.rednote-title {
+.discovery-title {
   font-size: 0.88rem;
   font-weight: 600;
   line-height: 1.38;
@@ -945,7 +945,7 @@ body[data-theme="light"] .auth-error {
   overflow: hidden;
 }
 
-.rednote-footer {
+.discovery-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -954,13 +954,13 @@ body[data-theme="light"] .auth-error {
   gap: 8px;
 }
 
-.ig-grid-3 {
+.profile-grid-3 {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
 }
 
-.ig-tile {
+.profile-tile {
   position: relative;
   aspect-ratio: 1 / 1;
   background: #000;
@@ -970,7 +970,7 @@ body[data-theme="light"] .auth-error {
   border-radius: 10px;
 }
 
-.ig-tile img {
+.profile-tile img {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -1499,3 +1499,136 @@ body[data-theme="light"] .boost-pill.recommended {
   color: var(--primary);
   border: 1px solid rgba(59, 130, 246, 0.35);
 }
+
+/* Announcements, Communities, Owner Console & Animated Live Studio */
+.announcement-banner {
+  background: linear-gradient(135deg, rgba(224, 82, 121, 0.16), rgba(59, 130, 246, 0.14));
+  border: 1px solid rgba(224, 82, 121, 0.4);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.community-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.73rem;
+  font-weight: 700;
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--primary);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  cursor: pointer;
+}
+
+.community-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.owner-pill-btn {
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.16);
+  color: #fbbf24;
+  border-radius: 999px;
+  padding: 5px 11px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+body[data-theme="light"] .owner-pill-btn {
+  color: #b45309;
+}
+
+.owner-nav-item {
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.live-stage-backdrop {
+  position: relative;
+  width: 100%;
+  height: 340px;
+  background: radial-gradient(circle at 28% 25%, rgba(224, 82, 121, 0.36), rgba(14, 21, 37, 0.96) 65%, #070912 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 20px;
+  text-align: center;
+  overflow: hidden;
+}
+
+.live-host-ring {
+  position: relative;
+  padding: 5px;
+  border-radius: 999px;
+  background: var(--gradient);
+  box-shadow: 0 0 0 0 rgba(224, 82, 121, 0.65);
+  animation: momiLivePulse 2s infinite;
+}
+
+@keyframes momiLivePulse {
+  0% { box-shadow: 0 0 0 0 rgba(224, 82, 121, 0.55); }
+  70% { box-shadow: 0 0 0 18px rgba(224, 82, 121, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(224, 82, 121, 0); }
+}
+
+.eq-bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 22px;
+}
+
+.eq-bars span {
+  width: 4px;
+  border-radius: 3px;
+  background: #fb7185;
+  animation: momiEqWave 0.9s ease-in-out infinite alternate;
+}
+
+.eq-bars span:nth-child(2) { animation-delay: 0.15s; background: #60a5fa; }
+.eq-bars span:nth-child(3) { animation-delay: 0.3s; }
+.eq-bars span:nth-child(4) { animation-delay: 0.45s; background: #fbbf24; }
+.eq-bars span:nth-child(5) { animation-delay: 0.6s; }
+
+@keyframes momiEqWave {
+  0% { height: 5px; opacity: 0.55; }
+  100% { height: 22px; opacity: 1; }
+}
+
+.live-hearts-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.floating-heart {
+  position: absolute;
+  bottom: 16px;
+  font-size: 1.35rem;
+  color: #fb7185;
+  animation: momiFloatHeart 1.8s ease-out forwards;
+}
+
+@keyframes momiFloatHeart {
+  0% { transform: translateY(0) scale(0.75); opacity: 0.95; }
+  100% { transform: translateY(-220px) scale(1.25); opacity: 0; }
+}
+

@@ -133,6 +133,9 @@ data class Post(
     val recommendedLabel: String = "",
     val boostedByUid: String? = null,
     val boostedAt: Timestamp? = null,
+    val pageId: String? = null,
+    val groupId: String? = null,
+    val communityName: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
@@ -455,6 +458,11 @@ data class AdMonetizationConfig(
     val gamezopPortalUrl: String = "",
     val gamezopPublisherId: String = "",
     val gamezopBannerTitle: String = "Momi Arcade · Play Instant Games",
+    val announcementId: String = "",
+    val announcementTitle: String = "",
+    val announcementBody: String = "",
+    val latestVersionName: String = "2.1",
+    val releaseNotes: String = "",
     val updatedByEmail: String = "",
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -751,6 +759,50 @@ data class ContentReport(
     val resolutionNote: String? = null,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
+data class MomiPage(
+    val id: String = "",
+    val ownerUid: String = "",
+    val ownerUsername: String = "",
+    val name: String = "",
+    val handle: String = "",
+    val category: String = "Creator",
+    val bio: String = "",
+    val coverKey: String = "img_post_coastal",
+    val avatarUrl: String? = null,
+    val isVerified: Boolean = false,
+    val followersCount: Long = 0L,
+    val isFollowing: Boolean = false,
+    val createdAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
+data class MomiGroup(
+    val id: String = "",
+    val ownerUid: String = "",
+    val ownerUsername: String = "",
+    val name: String = "",
+    val category: String = "Community",
+    val description: String = "",
+    val privacy: String = "PUBLIC",
+    val coverKey: String = "img_post_architecture",
+    val membersCount: Long = 1L,
+    val isMember: Boolean = false,
+    val createdAt: Timestamp? = null
+)
+
+@IgnoreExtraProperties
+data class ShowcaseAccount(
+    val username: String = "",
+    val displayName: String = "",
+    val avatarKey: String = "avatar_elena",
+    val bio: String = "",
+    val category: String = "Creator",
+    val location: String = "",
+    val isAuthorized: Boolean = false,
+    val updatedByEmail: String = ""
 )
 
 fun sortFeedWithBoostPriority(posts: List<Post>): List<Post> {

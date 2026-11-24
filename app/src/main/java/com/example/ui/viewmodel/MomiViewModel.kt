@@ -24,10 +24,13 @@ import com.example.data.model.MerchantAccount
 import com.example.data.model.MessageThread
 import com.example.data.model.ModerationScopes
 import com.example.data.model.MomiCreditCatalog
+import com.example.data.model.MomiGroup
+import com.example.data.model.MomiPage
 import com.example.data.model.MomiRoles
 import com.example.data.model.NotificationItem
 import com.example.data.model.Post
 import com.example.data.model.PostBoostOption
+import com.example.data.model.ShowcaseAccount
 import com.example.data.model.Story
 import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
@@ -75,6 +78,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 sealed interface StreamUiState<out T> {
     data object Loading : StreamUiState<Nothing>
@@ -182,6 +186,13 @@ class MomiViewModel(
     private val supaChatMessagesByThread = MutableStateFlow<Map<String, List<ChatMessage>>>(emptyMap())
     private val supaLiveFrameByStream = MutableStateFlow<Map<String, LiveFrame>>(emptyMap())
     private val supaLiveCommentsByStream = MutableStateFlow<Map<String, List<LiveComment>>>(emptyMap())
+    private val supaPages = MutableStateFlow<List<MomiPage>>(emptyList())
+    private val supaPageFollowedIds = MutableStateFlow<Set<String>>(emptySet())
+    private val supaGroups = MutableStateFlow<List<MomiGroup>>(emptyList())
+    private val supaGroupJoinedIds = MutableStateFlow<Set<String>>(emptySet())
+    private val supaShowcaseAccounts = MutableStateFlow<List<ShowcaseAccount>>(emptyList())
+    private val _dismissedAnnouncementId = MutableStateFlow<String?>(null)
+    val dismissedAnnouncementId: StateFlow<String?> = _dismissedAnnouncementId.asStateFlow()
 
     private val _supabaseStatus = MutableStateFlow<String?>(
         if (supabaseClient.isConfigured()) {
@@ -202,12 +213,20 @@ class MomiViewModel(
     @Volatile private var quotaCooldownUntilMs = 0L
     @Volatile private var hasAutoCheckedUpdatesInSession = false
 
-    // Optimistic UI overlays so likes, bookmarks, follows, and comments respond in 0ms
+    // Optimistic UI overlays + 12s pending mutation protection so background polls NEVER revert recent edits
     private val optimisticPostLikes = MutableStateFlow<Map<String, Boolean>>(emptyMap())
     private val optimisticBookmarks = MutableStateFlow<Map<String, Boolean>>(emptyMap())
     private val optimisticFollows = MutableStateFlow<Map<String, Pair<Boolean, String>>>(emptyMap())
     private val optimisticCommentLikes = MutableStateFlow<Map<String, Boolean>>(emptyMap())
     private val optimisticCommentsByPost = MutableStateFlow<Map<String, List<Comment>>>(emptyMap())
+    private val pendingLikes = ConcurrentHashMap<String, Pair<Boolean, Long>>()
+    private val pendingBookmarks = ConcurrentHashMap<String, Pair<Boolean, Long>>()
+    private val pendingFollowStates = ConcurrentHashMap<String, Pair<FollowEdge?, Long>>()
+    private val pendingMinViews = ConcurrentHashMap<String, Pair<Long, Long>>()
+    private val pendingMinLikes = ConcurrentHashMap<String, Pair<Long, Long>>()
+    private val pendingCreatedPosts = ConcurrentHashMap<String, Pair<Post, Long>>()
+    private val pendingDeletedPostIds = ConcurrentHashMap<String, Long>()
+    @Volatile private var pendingProfileOverride: Pair<UserProfile, Long>? = null
     private val videoDownloadMutex = Mutex()
     private val inFlightVideoDownloads = mutableMapOf<String, Deferred<Uri?>>()
     private val recordedPostViewIds = mutableSetOf<String>()
@@ -646,14 +665,43 @@ class MomiViewModel(
         repository.observeNotifications(currentUserId)
             .resilientWithCache(cachedNotifications, "notifications")
             .preferSupabase(supaNotifications) { it.isNotEmpty() },
-        followingUids
-    ) { items, following ->
-        items.map { item ->
+        followingUids,
+        supaMonetizationConfig,
+        cachedMonetizationConfig
+    ) { items, following, supaCfg, cachedCfg ->
+        val baseItems = items.map { item ->
             if (item.isFollowAction && item.actorUid.isNotBlank()) {
                 item.copy(isFollowingBack = following.contains(item.actorUid))
             } else {
                 item
             }
+        }
+        val cfg = if (supabaseClient.isConfigured() && supaCfg != null) supaCfg else cachedCfg
+        val annTitle = cfg.announcementTitle.trim()
+        val annBody = cfg.announcementBody.trim()
+        val annId = cfg.announcementId.ifBlank { "ann_${annTitle.hashCode()}" }
+        if ((annTitle.isNotBlank() || annBody.isNotBlank()) && baseItems.none { it.id == annId }) {
+            val annItem = NotificationItem(
+                id = annId,
+                userId = currentUserId,
+                actorUid = "momi_official",
+                actorUsername = "momi",
+                actorAvatarKey = "avatar_aria",
+                message = buildString {
+                    if (annTitle.isNotBlank()) append(annTitle)
+                    if (annTitle.isNotBlank() && annBody.isNotBlank()) append(" — ")
+                    if (annBody.isNotBlank()) append(annBody)
+                    if (cfg.latestVersionName.isNotBlank()) append(" (v${cfg.latestVersionName})")
+                },
+                timeLabel = "Pinned",
+                section = "Updates & Announcements",
+                isFollowAction = false,
+                isUnread = _dismissedAnnouncementId.value != annId,
+                createdAt = Timestamp.now()
+            )
+            listOf(annItem) + baseItems
+        } else {
+            baseItems
         }
     }
         .catch { error ->
@@ -666,6 +714,53 @@ class MomiViewModel(
     val unreadNotificationCount: StateFlow<Int> = notifications
         .map { list -> list.count { it.isUnread } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), 0)
+
+    val pages: StateFlow<List<MomiPage>> = combine(
+        supaPages,
+        supaPageFollowedIds
+    ) { pageList, followed ->
+        pageList.map { it.copy(isFollowing = it.id in followed) }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
+
+    val groups: StateFlow<List<MomiGroup>> = combine(
+        supaGroups,
+        supaGroupJoinedIds
+    ) { groupList, joined ->
+        groupList.map { it.copy(isMember = it.id in joined) }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
+
+    val showcaseAccounts: StateFlow<List<ShowcaseAccount>> = supaShowcaseAccounts
+        .map { remote ->
+            val remoteByUsername = remote.associateBy { it.username.lowercase() }
+            MomiFirestoreRepository.SHOWCASE_PERSONAS.map { persona ->
+                val saved = remoteByUsername[persona.username.lowercase()]
+                ShowcaseAccount(
+                    username = persona.username,
+                    displayName = saved?.displayName?.takeIf { it.isNotBlank() } ?: persona.displayName,
+                    avatarKey = saved?.avatarKey?.takeIf { it.isNotBlank() } ?: persona.avatarKey,
+                    bio = saved?.bio?.takeIf { it.isNotBlank() } ?: "Featured Momi creator in ${persona.location}",
+                    category = saved?.category?.takeIf { it.isNotBlank() } ?: persona.category,
+                    location = saved?.location?.takeIf { it.isNotBlank() } ?: persona.location,
+                    isAuthorized = saved?.isAuthorized ?: false,
+                    updatedByEmail = saved?.updatedByEmail.orEmpty()
+                )
+            }
+        }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+            MomiFirestoreRepository.SHOWCASE_PERSONAS.map {
+                ShowcaseAccount(
+                    username = it.username,
+                    displayName = it.displayName,
+                    avatarKey = it.avatarKey,
+                    bio = "Featured Momi creator in ${it.location}",
+                    category = it.category,
+                    location = it.location,
+                    isAuthorized = false
+                )
+            }
+        )
 
     val messageThreads: StateFlow<List<MessageThread>> = repository.observeMessageThreads(currentUserId)
         .resilientWithCache(cachedThreads, "messageThreads")
@@ -1167,15 +1262,18 @@ class MomiViewModel(
     fun toggleLike(post: Post) {
         val currentProfile = fallbackProfile()
         val nextLiked = !post.isLiked
+        val targetCount = (post.likesCount + if (nextLiked) 1L else -1L).coerceAtLeast(0L)
+        val expiresAt = System.currentTimeMillis() + MUTATION_PROTECTION_MS
+        pendingLikes[post.id] = nextLiked to expiresAt
+        pendingMinLikes[post.id] = targetCount to expiresAt
         optimisticPostLikes.update { it + (post.id to nextLiked) }
         viewModelScope.launch {
             if (supabaseClient.isConfigured()) {
-                val targetCount = (post.likesCount + if (nextLiked) 1L else -1L).coerceAtLeast(0L)
+                supaLikedPostIds.update { if (nextLiked) it + post.id else it - post.id }
+                supaPosts.update { list -> list.map { if (it.id == post.id) it.copy(likesCount = targetCount) else it } }
                 val res = supabaseBackend.setInteraction(currentUserId, "LIKED_POST", post.id, nextLiked)
                     .mapCatching { supabaseBackend.updatePostCounts(post.id, likesCount = targetCount).getOrThrow() }
                 res.onSuccess {
-                    supaLikedPostIds.update { if (nextLiked) it + post.id else it - post.id }
-                    supaPosts.update { list -> list.map { if (it.id == post.id) it.copy(likesCount = targetCount) else it } }
                     if (nextLiked && post.userId != currentUserId && !post.id.startsWith("showcase_")) {
                         val notif = NotificationItem(
                             id = "like_${post.id}_$currentUserId",
@@ -1194,6 +1292,8 @@ class MomiViewModel(
                     }
                     optimisticPostLikes.update { it - post.id }
                 }.onFailure { err ->
+                    pendingLikes.remove(post.id)
+                    pendingMinLikes.remove(post.id)
                     optimisticPostLikes.update { it - post.id }
                     _errorMessage.value = unwrapErrorMessage(err, "Could not update like")
                 }
@@ -1206,6 +1306,8 @@ class MomiViewModel(
                     optimisticPostLikes.update { it - post.id }
                 }
                 .onFailure { error ->
+                    pendingLikes.remove(post.id)
+                    pendingMinLikes.remove(post.id)
                     optimisticPostLikes.update { it - post.id }
                     _errorMessage.value = unwrapErrorMessage(error, "Could not update like")
                 }
@@ -1215,17 +1317,22 @@ class MomiViewModel(
     fun doubleTapLike(post: Post) {
         if (post.isLiked) return
         val currentProfile = fallbackProfile()
+        val targetCount = post.likesCount + 1L
+        val expiresAt = System.currentTimeMillis() + MUTATION_PROTECTION_MS
+        pendingLikes[post.id] = true to expiresAt
+        pendingMinLikes[post.id] = targetCount to expiresAt
         optimisticPostLikes.update { it + (post.id to true) }
         viewModelScope.launch {
             if (supabaseClient.isConfigured()) {
-                val targetCount = post.likesCount + 1L
+                supaLikedPostIds.update { it + post.id }
+                supaPosts.update { list -> list.map { if (it.id == post.id) it.copy(likesCount = targetCount) else it } }
                 val res = supabaseBackend.setInteraction(currentUserId, "LIKED_POST", post.id, true)
                     .mapCatching { supabaseBackend.updatePostCounts(post.id, likesCount = targetCount).getOrThrow() }
                 res.onSuccess {
-                    supaLikedPostIds.update { it + post.id }
-                    supaPosts.update { list -> list.map { if (it.id == post.id) it.copy(likesCount = targetCount) else it } }
                     optimisticPostLikes.update { it - post.id }
                 }.onFailure { err ->
+                    pendingLikes.remove(post.id)
+                    pendingMinLikes.remove(post.id)
                     optimisticPostLikes.update { it - post.id }
                     _errorMessage.value = unwrapErrorMessage(err, "Could not like post")
                 }
@@ -1238,6 +1345,8 @@ class MomiViewModel(
                     optimisticPostLikes.update { it - post.id }
                 }
                 .onFailure { error ->
+                    pendingLikes.remove(post.id)
+                    pendingMinLikes.remove(post.id)
                     optimisticPostLikes.update { it - post.id }
                     _errorMessage.value = unwrapErrorMessage(error, "Could not like post")
                 }
@@ -1246,15 +1355,17 @@ class MomiViewModel(
 
     fun toggleBookmark(post: Post) {
         val nextBookmarked = !post.isBookmarked
+        pendingBookmarks[post.id] = nextBookmarked to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
         optimisticBookmarks.update { it + (post.id to nextBookmarked) }
         viewModelScope.launch {
             if (supabaseClient.isConfigured()) {
+                supaBookmarkedPostIds.update { if (nextBookmarked) it + post.id else it - post.id }
                 supabaseBackend.setInteraction(currentUserId, "BOOKMARK", post.id, nextBookmarked)
                     .onSuccess {
-                        supaBookmarkedPostIds.update { if (nextBookmarked) it + post.id else it - post.id }
                         optimisticBookmarks.update { it - post.id }
                     }
                     .onFailure { err ->
+                        pendingBookmarks.remove(post.id)
                         optimisticBookmarks.update { it - post.id }
                         _errorMessage.value = unwrapErrorMessage(err, "Could not update bookmark")
                     }
@@ -1267,6 +1378,7 @@ class MomiViewModel(
                     optimisticBookmarks.update { it - post.id }
                 }
                 .onFailure { error ->
+                    pendingBookmarks.remove(post.id)
                     optimisticBookmarks.update { it - post.id }
                     _errorMessage.value = unwrapErrorMessage(error, "Could not update bookmark")
                 }
@@ -1277,27 +1389,32 @@ class MomiViewModel(
         if (targetUid.isBlank() || targetUid == currentUserId) return
         val currentProfile = fallbackProfile()
         val nextFollowing = !currentlyFollowing
+        val edgeId = "${currentProfile.userId}_$targetUid"
+        val pendingEdge = if (nextFollowing) {
+            FollowEdge(
+                id = edgeId,
+                followerUid = currentUserId,
+                targetUid = targetUid,
+                followerUsername = currentProfile.username,
+                targetUsername = targetUsername,
+                createdAt = Timestamp.now()
+            )
+        } else {
+            null
+        }
+        pendingFollowStates[edgeId] = pendingEdge to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
         optimisticFollows.update { it + (targetUid to (nextFollowing to targetUsername)) }
         viewModelScope.launch {
             if (supabaseClient.isConfigured()) {
+                supaFollows.update { current ->
+                    if (currentlyFollowing) {
+                        current.filterNot { it.id == edgeId || (it.followerUid == currentUserId && it.targetUid == targetUid) }
+                    } else {
+                        current.filterNot { it.id == edgeId } + pendingEdge!!
+                    }
+                }
                 supabaseBackend.toggleFollow(currentProfile, targetUid, targetUsername, currentlyFollowing)
                     .onSuccess {
-                        val edgeId = "${currentProfile.userId}_$targetUid"
-                        supaFollows.update { current ->
-                            if (currentlyFollowing) {
-                                current.filterNot { it.id == edgeId || (it.followerUid == currentUserId && it.targetUid == targetUid) }
-                            } else {
-                                val edge = FollowEdge(
-                                    id = edgeId,
-                                    followerUid = currentUserId,
-                                    targetUid = targetUid,
-                                    followerUsername = currentProfile.username,
-                                    targetUsername = targetUsername,
-                                    createdAt = Timestamp.now()
-                                )
-                                current.filterNot { it.id == edgeId } + edge
-                            }
-                        }
                         if (!currentlyFollowing && !targetUid.startsWith("showcase_")) {
                             supabaseBackend.sendNotification(
                                 NotificationItem(
@@ -1318,6 +1435,7 @@ class MomiViewModel(
                         optimisticFollows.update { it - targetUid }
                     }
                     .onFailure { err ->
+                        pendingFollowStates.remove(edgeId)
                         optimisticFollows.update { it - targetUid }
                         _errorMessage.value = unwrapErrorMessage(err, "Could not update follow state")
                     }
@@ -1330,6 +1448,7 @@ class MomiViewModel(
                     optimisticFollows.update { it - targetUid }
                 }
                 .onFailure { error ->
+                    pendingFollowStates.remove(edgeId)
                     optimisticFollows.update { it - targetUid }
                     _errorMessage.value = unwrapErrorMessage(error, "Could not update follow state")
                 }
@@ -1530,6 +1649,9 @@ class MomiViewModel(
         location: String,
         category: String,
         isReel: Boolean,
+        pageId: String? = null,
+        groupId: String? = null,
+        communityName: String = "",
         onComplete: (Boolean) -> Unit
     ) {
         val currentProfile = fallbackProfile()
@@ -1587,14 +1709,20 @@ class MomiViewModel(
                     audioTitle = audioTitle.trim().take(80),
                     audioUrl = uploaded.audioUrl,
                     audioData = uploaded.audioDataFallback,
+                    pageId = pageId,
+                    groupId = groupId,
+                    communityName = communityName.trim().take(80),
                     createdAt = Timestamp.now()
                 )
+                pendingCreatedPosts[postId] = newPost to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
+                supaPosts.update { current -> listOf(newPost) + current.filterNot { it.id == newPost.id } }
                 supabaseBackend.createPost(currentProfile, newPost)
                     .onSuccess {
-                        supaPosts.update { current -> listOf(newPost) + current.filterNot { it.id == newPost.id } }
                         onComplete(true)
                     }
                     .onFailure { err ->
+                        pendingCreatedPosts.remove(postId)
+                        supaPosts.update { current -> current.filterNot { it.id == newPost.id } }
                         _errorMessage.value = unwrapErrorMessage(err, "Could not publish post")
                         onComplete(false)
                     }
@@ -1769,11 +1897,12 @@ class MomiViewModel(
     fun deletePost(postId: String) {
         viewModelScope.launch {
             if (supabaseClient.isConfigured()) {
+                pendingDeletedPostIds[postId] = System.currentTimeMillis() + MUTATION_PROTECTION_MS
+                pendingCreatedPosts.remove(postId)
+                supaPosts.update { list -> list.filterNot { it.id == postId } }
                 supabaseBackend.deletePost(postId)
-                    .onSuccess {
-                        supaPosts.update { list -> list.filterNot { it.id == postId } }
-                    }
                     .onFailure {
+                        pendingDeletedPostIds.remove(postId)
                         _errorMessage.value = unwrapErrorMessage(it, "Could not delete post")
                     }
                 launch { runCatching { repository.deletePost(postId) } }
@@ -1842,16 +1971,18 @@ class MomiViewModel(
                     avatarUrl = nextAvatarUrl,
                     avatarData = nextAvatarData
                 )
+                pendingProfileOverride = updated to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
+                supaProfiles.update { list ->
+                    if (list.any { it.userId == updated.userId }) list.map { if (it.userId == updated.userId) updated else it }
+                    else listOf(updated) + list
+                }
+                cachedProfile.value = updated
                 supabaseBackend.upsertProfile(updated)
                     .onSuccess {
-                        supaProfiles.update { list ->
-                            if (list.any { it.userId == updated.userId }) list.map { if (it.userId == updated.userId) updated else it }
-                            else listOf(updated) + list
-                        }
-                        cachedProfile.value = updated
                         _statusNotice.value = "Profile saved!"
                     }
                     .onFailure {
+                        pendingProfileOverride = null
                         _errorMessage.value = unwrapErrorMessage(it, "Could not update profile")
                     }
                 launch {
@@ -2797,21 +2928,21 @@ class MomiViewModel(
     }
 
     fun recordPostView(postId: String) {
-        if (postId.isBlank() || postId.startsWith("showcase_")) return
+        if (postId.isBlank()) return
         val post = allPosts.value.firstOrNull { it.id == postId }
-        if (post != null && post.userId == currentUserId) return
         val shouldRecord = synchronized(recordedPostViewIds) {
             recordedPostViewIds.add(postId)
         }
         if (!shouldRecord) return
+        val nextViews = (post?.viewsCount ?: 0L) + 1L
+        pendingMinViews[postId] = nextViews to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
         viewModelScope.launch {
             if (supabaseClient.isConfigured()) {
-                val nextViews = (post?.viewsCount ?: 0L) + 1L
+                supaPosts.update { list -> list.map { if (it.id == postId) it.copy(viewsCount = maxOf(it.viewsCount, nextViews)) else it } }
                 supabaseBackend.updatePostCounts(postId, viewsCount = nextViews)
-                supaPosts.update { list -> list.map { if (it.id == postId) it.copy(viewsCount = nextViews) else it } }
                 return@launch
             }
-            if (System.currentTimeMillis() < quotaCooldownUntilMs) return@launch
+            if (postId.startsWith("showcase_") || System.currentTimeMillis() < quotaCooldownUntilMs) return@launch
             repository.incrementPostView(postId).onFailure { error ->
                 if (isQuotaExceeded(error)) {
                     quotaCooldownUntilMs = System.currentTimeMillis() + QUOTA_RETRY_COOLDOWN_MS
@@ -3721,6 +3852,416 @@ class MomiViewModel(
             monetizationConfig = monetizationConfig.value
         )
 
+    fun dismissInAppAnnouncement(announcementId: String) {
+        _dismissedAnnouncementId.value = announcementId
+    }
+
+    fun publishInAppAnnouncement(
+        title: String,
+        body: String,
+        latestVersionName: String,
+        releaseNotes: String,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to publish announcements."
+            onComplete(false)
+            return
+        }
+        val cleanTitle = title.trim().take(120)
+        val cleanBody = body.trim().take(500)
+        if (cleanTitle.isBlank() && cleanBody.isBlank()) {
+            _errorMessage.value = "Enter an announcement title or message."
+            onComplete(false)
+            return
+        }
+        val annId = "ann_${System.currentTimeMillis()}"
+        val updatedCfg = monetizationConfig.value.copy(
+            announcementId = annId,
+            announcementTitle = cleanTitle,
+            announcementBody = cleanBody,
+            latestVersionName = latestVersionName.trim().ifBlank { "2.1" }.take(24),
+            releaseNotes = releaseNotes.trim().take(400),
+            updatedByEmail = initialEmail ?: "syali6511@gmail.com",
+            updatedAt = Timestamp.now()
+        )
+        saveAdMonetizationConfig(updatedCfg) { ok ->
+            if (ok) {
+                _statusNotice.value = "In-app announcement & release notice broadcast to Android + Web!"
+            }
+            onComplete(ok)
+        }
+    }
+
+    fun createPage(
+        name: String,
+        handle: String,
+        category: String,
+        bio: String,
+        coverKey: String = "img_post_coastal",
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        val cleanName = name.trim().take(80)
+        if (cleanName.isBlank()) {
+            _errorMessage.value = "Please enter a Page name."
+            onComplete(false)
+            return
+        }
+        val currentProfile = fallbackProfile()
+        val page = MomiPage(
+            id = "page_${UUID.randomUUID()}",
+            ownerUid = currentUserId,
+            ownerUsername = currentProfile.username,
+            name = cleanName,
+            handle = handle.trim().lowercase().replace(Regex("[^a-z0-9._]"), "").ifBlank { cleanName.lowercase().replace(Regex("[^a-z0-9]"), "") }.take(40),
+            category = category.trim().ifBlank { "Creator" }.take(40),
+            bio = bio.trim().take(300),
+            coverKey = coverKey,
+            isVerified = currentProfile.isVerified,
+            followersCount = 1L,
+            isFollowing = true,
+            createdAt = Timestamp.now()
+        )
+        viewModelScope.launch {
+            supaPages.update { listOf(page) + it }
+            supaPageFollowedIds.update { it + page.id }
+            supabaseBackend.upsertPage(page)
+                .onSuccess {
+                    _statusNotice.value = "Created Page \"${page.name}\"!"
+                    onComplete(true)
+                }
+                .onFailure { err ->
+                    supaPages.update { list -> list.filterNot { it.id == page.id } }
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not create Page")
+                    onComplete(false)
+                }
+        }
+    }
+
+    fun toggleFollowPage(page: MomiPage) {
+        val currentProfile = fallbackProfile()
+        val currentlyFollowing = page.id in supaPageFollowedIds.value || page.isFollowing
+        val optimisticCount = (page.followersCount + if (currentlyFollowing) -1L else 1L).coerceAtLeast(0L)
+        supaPageFollowedIds.update { if (currentlyFollowing) it - page.id else it + page.id }
+        supaPages.update { list -> list.map { if (it.id == page.id) it.copy(followersCount = optimisticCount) else it } }
+        viewModelScope.launch {
+            supabaseBackend.toggleFollowPage(page, currentUserId, currentProfile.username, currentlyFollowing)
+                .onSuccess { confirmedCount ->
+                    supaPages.update { list -> list.map { if (it.id == page.id) it.copy(followersCount = confirmedCount) else it } }
+                }
+                .onFailure { err ->
+                    supaPageFollowedIds.update { if (currentlyFollowing) it + page.id else it - page.id }
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not update Page follow")
+                }
+        }
+    }
+
+    fun createGroup(
+        name: String,
+        category: String,
+        description: String,
+        privacy: String = "PUBLIC",
+        coverKey: String = "img_post_architecture",
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        val cleanName = name.trim().take(80)
+        if (cleanName.isBlank()) {
+            _errorMessage.value = "Please enter a Group name."
+            onComplete(false)
+            return
+        }
+        val currentProfile = fallbackProfile()
+        val group = MomiGroup(
+            id = "grp_${UUID.randomUUID()}",
+            ownerUid = currentUserId,
+            ownerUsername = currentProfile.username,
+            name = cleanName,
+            category = category.trim().ifBlank { "Community" }.take(40),
+            description = description.trim().take(300),
+            privacy = if (privacy.equals("PRIVATE", ignoreCase = true)) "PRIVATE" else "PUBLIC",
+            coverKey = coverKey,
+            membersCount = 1L,
+            isMember = true,
+            createdAt = Timestamp.now()
+        )
+        viewModelScope.launch {
+            supaGroups.update { listOf(group) + it }
+            supaGroupJoinedIds.update { it + group.id }
+            supabaseBackend.upsertGroup(group, currentProfile.username)
+                .onSuccess {
+                    _statusNotice.value = "Created Group \"${group.name}\"!"
+                    onComplete(true)
+                }
+                .onFailure { err ->
+                    supaGroups.update { list -> list.filterNot { it.id == group.id } }
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not create Group")
+                    onComplete(false)
+                }
+        }
+    }
+
+    fun toggleJoinGroup(group: MomiGroup) {
+        val currentProfile = fallbackProfile()
+        val currentlyMember = group.id in supaGroupJoinedIds.value || group.isMember
+        val optimisticCount = (group.membersCount + if (currentlyMember) -1L else 1L).coerceAtLeast(0L)
+        supaGroupJoinedIds.update { if (currentlyMember) it - group.id else it + group.id }
+        supaGroups.update { list -> list.map { if (it.id == group.id) it.copy(membersCount = optimisticCount) else it } }
+        viewModelScope.launch {
+            supabaseBackend.toggleJoinGroup(group, currentUserId, currentProfile.username, currentlyMember)
+                .onSuccess { confirmedCount ->
+                    supaGroups.update { list -> list.map { if (it.id == group.id) it.copy(membersCount = confirmedCount) else it } }
+                }
+                .onFailure { err ->
+                    supaGroupJoinedIds.update { if (currentlyMember) it + group.id else it - group.id }
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not update Group membership")
+                }
+        }
+    }
+
+    fun authorizeShowcaseAccount(account: ShowcaseAccount, authorized: Boolean) {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to authorize showcase starters."
+            return
+        }
+        val updated = account.copy(
+            isAuthorized = authorized,
+            updatedByEmail = initialEmail ?: "syali6511@gmail.com"
+        )
+        supaShowcaseAccounts.update { list ->
+            list.filterNot { it.username == updated.username } + updated
+        }
+        viewModelScope.launch {
+            supabaseBackend.upsertShowcaseAccount(updated)
+                .onSuccess {
+                    _statusNotice.value = if (authorized) {
+                        "Authorized @${updated.username} for posting & engagement!"
+                    } else {
+                        "Paused authorization for @${updated.username}."
+                    }
+                }
+                .onFailure { err ->
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not update starter authorization")
+                }
+        }
+    }
+
+    fun updateShowcasePersonaProfile(
+        account: ShowcaseAccount,
+        displayName: String,
+        bio: String,
+        category: String,
+        location: String,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to edit showcase profiles."
+            onComplete(false)
+            return
+        }
+        val updated = account.copy(
+            displayName = displayName.trim().ifBlank { account.displayName }.take(80),
+            bio = bio.trim().take(240),
+            category = category.trim().ifBlank { account.category }.take(40),
+            location = location.trim().take(120),
+            updatedByEmail = initialEmail ?: "syali6511@gmail.com"
+        )
+        supaShowcaseAccounts.update { list ->
+            list.filterNot { it.username == updated.username } + updated
+        }
+        viewModelScope.launch {
+            val uid = "showcase_${updated.username}"
+            supabaseBackend.upsertShowcaseAccount(updated)
+                .mapCatching {
+                    supabaseBackend.upsertProfile(
+                        UserProfile(
+                            id = uid,
+                            userId = uid,
+                            username = updated.username,
+                            displayName = updated.displayName,
+                            category = updated.category,
+                            bio = updated.bio,
+                            avatarKey = updated.avatarKey,
+                            isVerified = true
+                        )
+                    ).getOrThrow()
+                }
+                .onSuccess {
+                    supaProfiles.update { list ->
+                        list.map {
+                            if (it.userId == uid) it.copy(
+                                displayName = updated.displayName,
+                                bio = updated.bio,
+                                category = updated.category
+                            ) else it
+                        }
+                    }
+                    _statusNotice.value = "Updated profile for @${updated.username}!"
+                    onComplete(true)
+                }
+                .onFailure { err ->
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not update showcase profile")
+                    onComplete(false)
+                }
+        }
+    }
+
+    fun publishCustomShowcasePost(
+        context: Context,
+        account: ShowcaseAccount,
+        caption: String,
+        mediaType: String,
+        imageKey: String,
+        localImagePath: String?,
+        localVideoPath: String?,
+        isReel: Boolean,
+        pageId: String? = null,
+        groupId: String? = null,
+        communityName: String = "",
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to post as a showcase starter."
+            onComplete(false)
+            return
+        }
+        if (!account.isAuthorized) {
+            _errorMessage.value = "Authorize @${account.username} first before posting."
+            onComplete(false)
+            return
+        }
+        viewModelScope.launch {
+            _isShowcaseActionBusy.value = true
+            val postId = "showcase_post_${UUID.randomUUID()}"
+            val uploaded = supabaseBackend.prepareAndUploadPostMedia(
+                context = context.applicationContext,
+                mediaId = postId,
+                localImagePath = localImagePath,
+                localExtraImagePaths = emptyList(),
+                mediaType = mediaType,
+                localVideoPath = localVideoPath,
+                localAudioPath = null
+            )
+            if (uploaded.failureReason != null || (mediaType == "VIDEO" && uploaded.videoUrl == null && uploaded.videoDataFallback == null)) {
+                _isShowcaseActionBusy.value = false
+                _errorMessage.value = uploaded.failureReason ?: "Could not upload starter video."
+                onComplete(false)
+                return@launch
+            }
+            val uid = "showcase_${account.username}"
+            val newPost = Post(
+                id = postId,
+                userId = uid,
+                authorUsername = account.username,
+                authorDisplayName = account.displayName,
+                authorAvatarKey = account.avatarKey,
+                authorVerified = true,
+                location = account.location,
+                imageKey = imageKey.ifBlank { "img_post_coastal" },
+                imageUrl = uploaded.imageUrl,
+                imageData = uploaded.imageDataFallback,
+                mediaType = mediaType,
+                videoUrl = uploaded.videoUrl,
+                videoData = uploaded.videoDataFallback,
+                caption = caption.trim().ifBlank { "New moment from @${account.username} on Momi" }.take(1000),
+                likesCount = 12L,
+                viewsCount = 85L,
+                commentsCount = 0L,
+                category = account.category.ifBlank { "For You" },
+                isReel = isReel || mediaType == "VIDEO",
+                pageId = pageId,
+                groupId = groupId,
+                communityName = communityName,
+                createdAt = Timestamp.now()
+            )
+            pendingCreatedPosts[postId] = newPost to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
+            supaPosts.update { listOf(newPost) + it }
+            supabaseBackend.publishCustomShowcasePost(account, newPost)
+                .onSuccess {
+                    _statusNotice.value = "Published ${if (mediaType == "VIDEO") "video" else "post"} as @${account.username}!"
+                    onComplete(true)
+                }
+                .onFailure { err ->
+                    pendingCreatedPosts.remove(postId)
+                    supaPosts.update { list -> list.filterNot { it.id == postId } }
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not publish starter post")
+                    onComplete(false)
+                }
+            _isShowcaseActionBusy.value = false
+        }
+    }
+
+    fun boostPostMetricsWithShowcase(
+        post: Post,
+        account: ShowcaseAccount,
+        extraLikes: Long,
+        extraViews: Long,
+        commentText: String = "",
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to manage starter engagement."
+            onComplete(false)
+            return
+        }
+        val nextLikes = (post.likesCount + extraLikes.coerceAtLeast(0L)).coerceAtLeast(0L)
+        val nextViews = (post.viewsCount + extraViews.coerceAtLeast(0L)).coerceAtLeast(0L)
+        val expiresAt = System.currentTimeMillis() + MUTATION_PROTECTION_MS
+        pendingMinLikes[post.id] = nextLikes to expiresAt
+        pendingMinViews[post.id] = nextViews to expiresAt
+        viewModelScope.launch {
+            _isShowcaseActionBusy.value = true
+            val cleanComment = commentText.trim().take(400)
+            val nextCommentsCount = post.commentsCount + if (cleanComment.isNotBlank()) 1L else 0L
+            supaPosts.update { list ->
+                list.map {
+                    if (it.id == post.id) it.copy(
+                        likesCount = nextLikes,
+                        viewsCount = nextViews,
+                        commentsCount = nextCommentsCount
+                    ) else it
+                }
+            }
+            val countRes = supabaseBackend.updatePostCounts(
+                postId = post.id,
+                likesCount = nextLikes,
+                commentsCount = nextCommentsCount,
+                viewsCount = nextViews
+            )
+            if (cleanComment.isNotBlank()) {
+                val cmt = Comment(
+                    id = "showcase_cmt_${UUID.randomUUID()}",
+                    userId = "showcase_${account.username}",
+                    authorUsername = account.username,
+                    authorAvatarKey = account.avatarKey,
+                    text = cleanComment,
+                    likesCount = 1L,
+                    createdAt = Timestamp.now()
+                )
+                supabaseBackend.addComment(
+                    post.id,
+                    UserProfile(
+                        id = cmt.userId,
+                        userId = cmt.userId,
+                        username = account.username,
+                        displayName = account.displayName,
+                        avatarKey = account.avatarKey,
+                        isVerified = true
+                    ),
+                    cmt,
+                    nextCommentsCount
+                )
+            }
+            countRes.onSuccess {
+                _statusNotice.value = "Updated +$extraLikes likes & +$extraViews views as @${account.username}!"
+                onComplete(true)
+            }.onFailure { err ->
+                _errorMessage.value = unwrapErrorMessage(err, "Could not boost post metrics")
+                onComplete(false)
+            }
+            _isShowcaseActionBusy.value = false
+        }
+    }
+
     private var isSupabaseSyncInFlight = false
 
     private suspend fun refreshFromSupabase(forceEnsureProfile: Boolean = false) {
@@ -3738,12 +4279,51 @@ class MomiViewModel(
                 )
             }
             supabaseClient.fetchFeedBundle(currentUserId).onSuccess { bundle ->
-                if (bundle.profiles.isNotEmpty()) {
-                    supaProfiles.value = bundle.profiles
-                    cachedProfiles.value = bundle.profiles
+                val nowMs = System.currentTimeMillis()
+                pendingLikes.entries.removeIf { it.value.second <= nowMs }
+                pendingBookmarks.entries.removeIf { it.value.second <= nowMs }
+                pendingFollowStates.entries.removeIf { it.value.second <= nowMs }
+                pendingMinViews.entries.removeIf { it.value.second <= nowMs }
+                pendingMinLikes.entries.removeIf { it.value.second <= nowMs }
+                pendingCreatedPosts.entries.removeIf { it.value.second <= nowMs }
+                pendingDeletedPostIds.entries.removeIf { it.value <= nowMs }
+                if ((pendingProfileOverride?.second ?: 0L) <= nowMs) {
+                    pendingProfileOverride = null
                 }
-                supaPosts.value = bundle.posts
-                cachedRawPosts.value = bundle.posts
+
+                if (bundle.profiles.isNotEmpty()) {
+                    val overrideProf = pendingProfileOverride?.first
+                    val mergedProfiles = if (overrideProf != null) {
+                        listOf(overrideProf) + bundle.profiles.filterNot { it.userId == overrideProf.userId }
+                    } else {
+                        bundle.profiles
+                    }
+                    supaProfiles.value = mergedProfiles
+                    cachedProfiles.value = mergedProfiles
+                }
+
+                val mergedPosts = buildList {
+                    val serverIds = bundle.posts.map { it.id }.toSet()
+                    pendingCreatedPosts.values.forEach { (pendingPost, _) ->
+                        if (pendingPost.id !in serverIds && !pendingDeletedPostIds.containsKey(pendingPost.id)) {
+                            add(pendingPost)
+                        }
+                    }
+                    bundle.posts.forEach { post ->
+                        if (!pendingDeletedPostIds.containsKey(post.id)) {
+                            val minV = pendingMinViews[post.id]?.first ?: 0L
+                            val minL = pendingMinLikes[post.id]?.first ?: 0L
+                            add(
+                                post.copy(
+                                    viewsCount = maxOf(post.viewsCount, minV),
+                                    likesCount = maxOf(post.likesCount, minL)
+                                )
+                            )
+                        }
+                    }
+                }
+                supaPosts.value = mergedPosts
+                cachedRawPosts.value = mergedPosts
                 supaStories.value = bundle.stories
                 cachedStories.value = bundle.stories
                 supaProducts.value = bundle.products
@@ -3752,10 +4332,30 @@ class MomiViewModel(
                 cachedMerchants.value = bundle.merchants
                 supaLiveStreams.value = bundle.liveStreams
                 cachedLiveStreams.value = bundle.liveStreams
-                supaFollows.value = bundle.follows
-                cachedFollows.value = bundle.follows
-                supaLikedPostIds.value = bundle.likedPostIds
-                supaBookmarkedPostIds.value = bundle.bookmarkedPostIds
+
+                val mergedFollows = bundle.follows.filterNot { edge ->
+                    pendingFollowStates.containsKey(edge.id) && pendingFollowStates[edge.id]?.first == null
+                }.toMutableList()
+                pendingFollowStates.values.forEach { (edge, _) ->
+                    if (edge != null && mergedFollows.none { it.id == edge.id }) {
+                        mergedFollows.add(edge)
+                    }
+                }
+                supaFollows.value = mergedFollows
+                cachedFollows.value = mergedFollows
+
+                val nextLikes = bundle.likedPostIds.toMutableSet()
+                pendingLikes.forEach { (postId, pair) ->
+                    if (pair.first) nextLikes.add(postId) else nextLikes.remove(postId)
+                }
+                supaLikedPostIds.value = nextLikes
+
+                val nextBookmarks = bundle.bookmarkedPostIds.toMutableSet()
+                pendingBookmarks.forEach { (postId, pair) ->
+                    if (pair.first) nextBookmarks.add(postId) else nextBookmarks.remove(postId)
+                }
+                supaBookmarkedPostIds.value = nextBookmarks
+
                 supaSeenStoryIds.value = bundle.seenStoryIds
                 supaLikedCommentIds.value = bundle.likedCommentIds
                 supaNotifications.value = bundle.notifications
@@ -3764,6 +4364,13 @@ class MomiViewModel(
                 cachedThreads.value = bundle.threads
                 supaOrders.value = bundle.orders
                 cachedOrders.value = bundle.orders
+                supaPages.value = bundle.pages
+                supaPageFollowedIds.value = bundle.pageFollowedIds
+                supaGroups.value = bundle.groups
+                supaGroupJoinedIds.value = bundle.groupJoinedIds
+                if (bundle.showcaseAccounts.isNotEmpty()) {
+                    supaShowcaseAccounts.value = bundle.showcaseAccounts
+                }
                 if (bundle.reports.isNotEmpty() || isOwnerAccount) {
                     supaContentReports.value = bundle.reports
                     cachedContentReports.value = bundle.reports
@@ -3876,6 +4483,7 @@ class MomiViewModel(
     private companion object {
         const val TAG = "MomiVM"
         const val STOP_TIMEOUT_MILLIS = 5000L
+        const val MUTATION_PROTECTION_MS = 12_000L
         const val QUOTA_RETRY_COOLDOWN_MS = 120_000L
         const val QUOTA_FRIENDLY_MESSAGE =
             "Daily Firebase Spark quota temporarily reached — cached posts remain visible. Quota resets daily or after upgrading to Blaze."

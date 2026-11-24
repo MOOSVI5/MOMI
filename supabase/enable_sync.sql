@@ -2,14 +2,90 @@
 -- Momi Full Supabase Sync & Storage Policies (PostgreSQL Valid Syntax)
 -- ============================================================================
 -- Run this once in Supabase Dashboard -> SQL Editor -> New Query -> Run.
--- Allows Android + Web clients authenticated via Firebase Google Sign-In to
--- read/write all Momi tables and upload photos/videos/audio to Storage buckets.
+-- Allows Android + Web clients to read/write all Momi tables, Pages, Groups,
+-- Showcase Starters, In-App Announcements, and upload media to Storage buckets.
 
--- Ensure extra media URL columns exist on upgraded schemas
+-- 1. Ensure extra media, community & announcement columns exist on upgraded schemas
 ALTER TABLE public.stories ADD COLUMN IF NOT EXISTS audio_url text;
 ALTER TABLE public.market_products ADD COLUMN IF NOT EXISTS extra_image_urls text[] NOT NULL DEFAULT ARRAY[]::text[];
 
--- Table RLS Policies for all 19 Momi tables
+ALTER TABLE public.posts ADD COLUMN IF NOT EXISTS page_id text;
+ALTER TABLE public.posts ADD COLUMN IF NOT EXISTS group_id text;
+ALTER TABLE public.posts ADD COLUMN IF NOT EXISTS community_name text NOT NULL DEFAULT '';
+
+ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS announcement_id text NOT NULL DEFAULT '';
+ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS announcement_title text NOT NULL DEFAULT '';
+ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS announcement_body text NOT NULL DEFAULT '';
+ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS latest_version_name text NOT NULL DEFAULT '2.1';
+ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS release_notes text NOT NULL DEFAULT '';
+
+-- 2. Pages, Page Follows, Groups, Group Members & Showcase Starters Tables
+CREATE TABLE IF NOT EXISTS public.pages (
+  id text PRIMARY KEY,
+  owner_uid text NOT NULL,
+  owner_username text NOT NULL DEFAULT 'momi.creator',
+  name text NOT NULL,
+  handle text NOT NULL DEFAULT '',
+  category text NOT NULL DEFAULT 'Creator',
+  bio text NOT NULL DEFAULT '',
+  cover_key text NOT NULL DEFAULT 'img_post_coastal',
+  avatar_url text,
+  is_verified boolean NOT NULL DEFAULT false,
+  followers_count bigint NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.page_follows (
+  id text PRIMARY KEY,
+  page_id text NOT NULL REFERENCES public.pages(id) ON DELETE CASCADE,
+  user_id text NOT NULL,
+  username text NOT NULL DEFAULT 'momi.user',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.groups (
+  id text PRIMARY KEY,
+  owner_uid text NOT NULL,
+  owner_username text NOT NULL DEFAULT 'momi.creator',
+  name text NOT NULL,
+  category text NOT NULL DEFAULT 'Community',
+  description text NOT NULL DEFAULT '',
+  privacy text NOT NULL DEFAULT 'PUBLIC',
+  cover_key text NOT NULL DEFAULT 'img_post_architecture',
+  members_count bigint NOT NULL DEFAULT 1,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.group_members (
+  id text PRIMARY KEY,
+  group_id text NOT NULL REFERENCES public.groups(id) ON DELETE CASCADE,
+  user_id text NOT NULL,
+  username text NOT NULL DEFAULT 'momi.user',
+  role text NOT NULL DEFAULT 'MEMBER',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.showcase_accounts (
+  username text PRIMARY KEY,
+  display_name text NOT NULL,
+  avatar_key text NOT NULL DEFAULT 'avatar_elena',
+  bio text NOT NULL DEFAULT '',
+  category text NOT NULL DEFAULT 'Creator',
+  location text NOT NULL DEFAULT '',
+  is_authorized boolean NOT NULL DEFAULT false,
+  updated_by_email text NOT NULL DEFAULT '',
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE public.pages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.page_follows ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.groups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.group_members ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.showcase_accounts ENABLE ROW LEVEL SECURITY;
+
+-- 3. Table RLS Policies for all Momi tables
 DROP POLICY IF EXISTS profiles_sync_write ON public.profiles;
 CREATE POLICY profiles_sync_write ON public.profiles
   FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
@@ -86,7 +162,27 @@ DROP POLICY IF EXISTS app_config_sync_write ON public.app_config;
 CREATE POLICY app_config_sync_write ON public.app_config
   FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
 
--- Ensure public Storage buckets exist for images, avatars, videos & audio
+DROP POLICY IF EXISTS pages_sync_write ON public.pages;
+CREATE POLICY pages_sync_write ON public.pages
+  FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS page_follows_sync_write ON public.page_follows;
+CREATE POLICY page_follows_sync_write ON public.page_follows
+  FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS groups_sync_write ON public.groups;
+CREATE POLICY groups_sync_write ON public.groups
+  FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS group_members_sync_write ON public.group_members;
+CREATE POLICY group_members_sync_write ON public.group_members
+  FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS showcase_accounts_sync_write ON public.showcase_accounts;
+CREATE POLICY showcase_accounts_sync_write ON public.showcase_accounts
+  FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+-- 4. Ensure public Storage buckets exist for images, avatars, videos & audio
 INSERT INTO storage.buckets (id, name, public)
 VALUES
   ('momi-media', 'momi-media', true),
@@ -94,7 +190,7 @@ VALUES
   ('momi-videos', 'momi-videos', true)
 ON CONFLICT (id) DO UPDATE SET public = true;
 
--- Storage Object Policies for Momi media buckets
+-- 5. Storage Object Policies for Momi media buckets
 DROP POLICY IF EXISTS momi_storage_select ON storage.objects;
 CREATE POLICY momi_storage_select ON storage.objects
   FOR SELECT TO anon, authenticated

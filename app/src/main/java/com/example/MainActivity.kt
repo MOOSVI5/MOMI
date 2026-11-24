@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddBox
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
@@ -37,6 +38,7 @@ import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material.icons.filled.Storefront
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.outlined.AddBox
+import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Search
@@ -105,6 +107,7 @@ import com.example.ui.components.MomiAiAssistantBottomSheet
 import com.example.ui.components.MomiInterstitialController
 import com.example.ui.components.MomiStartIoSession
 import com.example.ui.components.PostBoostBottomSheet
+import com.example.ui.screens.CommunitiesScreen
 import com.example.ui.screens.CreatePostScreen
 import com.example.ui.screens.ExploreScreen
 import com.example.ui.screens.GoLiveScreen
@@ -142,11 +145,12 @@ import kotlinx.coroutines.launch
 private object LumaRoutes {
     const val HOME = "home"
     const val EXPLORE = "explore"
-    const val CREATE = "create?story={story}"
+    const val CREATE = "create?story={story}&pageId={pageId}&groupId={groupId}&communityName={communityName}"
     const val CLIPS = "clips"
     const val PROFILE = "profile"
     const val WALLET = "wallet"
     const val MARKETPLACE = "marketplace"
+    const val COMMUNITIES = "communities"
     const val USER_PROFILE = "user/{userId}?username={username}&showcase={showcase}"
     const val NOTIFICATIONS = "notifications"
     const val MESSAGES = "messages?threadId={threadId}"
@@ -155,7 +159,13 @@ private object LumaRoutes {
     const val GO_LIVE = "go_live"
     const val LIVE_VIEWER = "live/{streamId}"
 
-    fun createRoute(isStory: Boolean = false) = "create?story=$isStory"
+    fun createRoute(
+        isStory: Boolean = false,
+        pageId: String? = null,
+        groupId: String? = null,
+        communityName: String = ""
+    ) = "create?story=$isStory&pageId=${Uri.encode(pageId.orEmpty())}&groupId=${Uri.encode(groupId.orEmpty())}&communityName=${Uri.encode(communityName)}"
+
     fun userProfileRoute(userId: String, username: String = "", isShowcase: Boolean = false): String {
         val safeUid = Uri.encode(userId.ifBlank { "creator" })
         val safeUsername = Uri.encode(username)
@@ -378,6 +388,10 @@ private fun LumaApp(
     val creditTransactions by viewModel.creditTransactions.collectAsStateWithLifecycle()
     val monetizationConfig by viewModel.monetizationConfig.collectAsStateWithLifecycle()
     val isProcessingWalletAction by viewModel.isProcessingWalletAction.collectAsStateWithLifecycle()
+    val pages by viewModel.pages.collectAsStateWithLifecycle()
+    val groups by viewModel.groups.collectAsStateWithLifecycle()
+    val showcaseAccounts by viewModel.showcaseAccounts.collectAsStateWithLifecycle()
+    val dismissedAnnouncementId by viewModel.dismissedAnnouncementId.collectAsStateWithLifecycle()
     var showAiAssistantSheet by remember { mutableStateOf(false) }
     var pendingReportTarget by remember { mutableStateOf<ReportDraftTarget?>(null) }
     var pendingBoostPost by remember { mutableStateOf<Post?>(null) }
@@ -728,6 +742,18 @@ private fun LumaApp(
                             )
                         }
                         NavigationRailItem(
+                            selected = currentRoute == LumaRoutes.COMMUNITIES,
+                            onClick = { navController.navigate(LumaRoutes.COMMUNITIES) },
+                            icon = {
+                                Icon(
+                                    imageVector = if (currentRoute == LumaRoutes.COMMUNITIES) Icons.Filled.Groups else Icons.Outlined.Groups,
+                                    contentDescription = "Pages & Groups"
+                                )
+                            },
+                            label = { Text("Pages") },
+                            modifier = Modifier.testTag("rail_communities")
+                        )
+                        NavigationRailItem(
                             selected = currentRoute == LumaRoutes.MARKETPLACE,
                             onClick = { navController.navigate(LumaRoutes.MARKETPLACE) },
                             icon = {
@@ -759,6 +785,7 @@ private fun LumaApp(
                                 unreadMessageCount = unreadMessages,
                                 onOpenSearch = { navigatePrimaryTab(LumaRoutes.EXPLORE) },
                                 onOpenMarketplace = { navController.navigate(LumaRoutes.MARKETPLACE) },
+                                onOpenCommunities = { navController.navigate(LumaRoutes.COMMUNITIES) },
                                 onOpenAiAssistant = { showAiAssistantSheet = true },
                                 onOpenNotifications = { navController.navigate(LumaRoutes.NOTIFICATIONS) },
                                 onOpenMessages = { navController.navigate(LumaRoutes.messagesRoute()) },
@@ -817,6 +844,8 @@ private fun LumaApp(
                                 },
                                 isAdminViewActive = isAdminViewActive,
                                 monetizationConfig = monetizationConfig,
+                                dismissedAnnouncementId = dismissedAnnouncementId.orEmpty(),
+                                onDismissAnnouncement = viewModel::dismissInAppAnnouncement,
                                 onBoostPost = { post -> pendingBoostPost = post },
                                 onToggleRecommendedPost = { post, recommended ->
                                     viewModel.adminSetPostRecommended(post, recommended)
@@ -866,16 +895,36 @@ private fun LumaApp(
                                 navArgument("story") {
                                     type = NavType.BoolType
                                     defaultValue = false
+                                },
+                                navArgument("pageId") {
+                                    type = NavType.StringType
+                                    defaultValue = ""
+                                },
+                                navArgument("groupId") {
+                                    type = NavType.StringType
+                                    defaultValue = ""
+                                },
+                                navArgument("communityName") {
+                                    type = NavType.StringType
+                                    defaultValue = ""
                                 }
                             )
                         ) { backStackEntry ->
                             val startAsStory = backStackEntry.arguments?.getBoolean("story") ?: false
+                            val initPageId = Uri.decode(backStackEntry.arguments?.getString("pageId").orEmpty()).takeIf { it.isNotBlank() }
+                            val initGroupId = Uri.decode(backStackEntry.arguments?.getString("groupId").orEmpty()).takeIf { it.isNotBlank() }
+                            val initCommunityName = Uri.decode(backStackEntry.arguments?.getString("communityName").orEmpty())
                             CreatePostScreen(
                                 initialModeStory = startAsStory,
                                 creators = allCreators,
+                                pages = pages,
+                                groups = groups,
+                                initialPageId = initPageId,
+                                initialGroupId = initGroupId,
+                                initialCommunityName = initCommunityName,
                                 currentUserId = viewModel.currentUserId,
                                 onClose = { navController.popBackStack() },
-                                onPublishPost = { imageKey, localPath, extraImagePaths, mediaType, localVideoPath, videoDurationMs, audioTitle, localAudioPath, filter, aspectRatio, taggedUsernames, hashtags, caption, location, category, isReel, onFinished ->
+                                onPublishPost = { imageKey, localPath, extraImagePaths, mediaType, localVideoPath, videoDurationMs, audioTitle, localAudioPath, filter, aspectRatio, taggedUsernames, hashtags, caption, location, category, isReel, pageId, groupId, communityName, onFinished ->
                                     viewModel.createPost(
                                         context = context,
                                         imageKey = imageKey,
@@ -893,7 +942,10 @@ private fun LumaApp(
                                         caption = caption,
                                         location = location,
                                         category = category,
-                                        isReel = isReel
+                                        isReel = isReel,
+                                        pageId = pageId,
+                                        groupId = groupId,
+                                        communityName = communityName
                                     ) { succeeded ->
                                         onFinished(succeeded)
                                         if (succeeded) {
@@ -1065,10 +1117,28 @@ private fun LumaApp(
                                 },
                                 showcasePostsCount = showcasePostsCount,
                                 showcaseStoriesCount = showcaseStoriesCount,
+                                showcaseAccounts = showcaseAccounts,
                                 isShowcaseBusy = isShowcaseBusy,
                                 onPublishShowcaseBurst = viewModel::publishShowcaseActivityBurst,
                                 onEngageWithShowcase = viewModel::engageRecentPostsWithShowcase,
                                 onRemoveAllShowcase = viewModel::removeAllShowcaseContent,
+                                onAuthorizeShowcaseAccount = viewModel::authorizeShowcaseAccount,
+                                onUpdateShowcasePersonaProfile = viewModel::updateShowcasePersonaProfile,
+                                onPublishCustomShowcasePost = { account, caption, mediaType, imageKey, localImagePath, localVideoPath, isReel, onDone ->
+                                    viewModel.publishCustomShowcasePost(
+                                        context = context,
+                                        account = account,
+                                        caption = caption,
+                                        mediaType = mediaType,
+                                        imageKey = imageKey,
+                                        localImagePath = localImagePath,
+                                        localVideoPath = localVideoPath,
+                                        isReel = isReel,
+                                        onComplete = onDone
+                                    )
+                                },
+                                onBoostPostWithShowcase = viewModel::boostPostMetricsWithShowcase,
+                                onPublishInAppAnnouncement = viewModel::publishInAppAnnouncement,
                                 monetizationConfig = monetizationConfig,
                                 isSavingMonetization = isProcessingWalletAction,
                                 onSaveMonetizationConfig = viewModel::saveAdMonetizationConfig,
@@ -1208,6 +1278,49 @@ private fun LumaApp(
                             )
                         }
 
+                        composable(LumaRoutes.COMMUNITIES) {
+                            CommunitiesScreen(
+                                pages = pages,
+                                groups = groups,
+                                allPosts = allPosts,
+                                currentUserId = viewModel.currentUserId,
+                                isAdminViewActive = isAdminViewActive,
+                                onBack = { navController.popBackStack() },
+                                onCreatePage = viewModel::createPage,
+                                onToggleFollowPage = viewModel::toggleFollowPage,
+                                onCreateGroup = viewModel::createGroup,
+                                onToggleJoinGroup = viewModel::toggleJoinGroup,
+                                onPostToCommunity = { pid, gid, commName ->
+                                    navController.navigate(
+                                        LumaRoutes.createRoute(
+                                            isStory = false,
+                                            pageId = pid,
+                                            groupId = gid,
+                                            communityName = commName
+                                        )
+                                    )
+                                },
+                                onPostClick = { post ->
+                                    navController.navigate(LumaRoutes.postDetailRoute(post.id))
+                                },
+                                onLikeToggle = { viewModel.toggleLike(it) },
+                                onDoubleTapLike = { viewModel.doubleTapLike(it) },
+                                onCommentClick = { viewModel.openComments(it.id) },
+                                onShareClick = { sharePostExternally(it) },
+                                onBookmarkToggle = { viewModel.toggleBookmark(it) },
+                                onFollowAuthorToggle = {
+                                    viewModel.toggleFollow(
+                                        targetUid = it.userId,
+                                        targetUsername = it.authorUsername,
+                                        currentlyFollowing = it.isFollowingAuthor
+                                    )
+                                },
+                                onAuthorClick = { uid, uname, isShowcase ->
+                                    openUserProfile(uid, uname, isShowcase)
+                                }
+                            )
+                        }
+
                         composable(
                             route = LumaRoutes.USER_PROFILE,
                             arguments = listOf(
@@ -1281,7 +1394,9 @@ private fun LumaApp(
                                 onToggleFollowBack = viewModel::toggleNotificationFollow,
                                 onMarkAllRead = viewModel::markNotificationsRead,
                                 onUserClick = { userId, username ->
-                                    openUserProfile(userId, username, false)
+                                    if (userId != "momi_official") {
+                                        openUserProfile(userId, username, false)
+                                    }
                                 },
                                 onBack = { navController.popBackStack() }
                             )

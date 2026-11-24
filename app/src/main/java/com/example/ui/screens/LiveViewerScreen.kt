@@ -9,6 +9,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -64,6 +65,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -112,6 +116,7 @@ fun LiveViewerScreen(
     var joinedSuccessfully by remember(streamId) { mutableStateOf(false) }
     var activeGiftBannerText by remember { mutableStateOf<String?>(null) }
     var lastSeenGiftCommentId by remember(streamId) { mutableStateOf<String?>(null) }
+    var heartBurstTick by remember { mutableStateOf(0) }
     val listState = rememberLazyListState()
 
     val latestOnJoin by rememberUpdatedState(onJoin)
@@ -309,6 +314,8 @@ fun LiveViewerScreen(
                         )
                     }
                     Spacer(modifier = Modifier.height(10.dp))
+                    ViewerStudioEqualizerBars(isActive = liveFrame?.micMuted != true)
+                    Spacer(modifier = Modifier.height(10.dp))
                     Text(
                         text = stream.title.ifBlank { "@${stream.username} Live" },
                         color = Color.White,
@@ -349,7 +356,10 @@ fun LiveViewerScreen(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(18.dp))
                                 .background(Color(0xFFD92D4E).copy(alpha = 0.9f))
-                                .clickable(onClick = onSendHeart)
+                                .clickable {
+                                    heartBurstTick += 1
+                                    onSendHeart()
+                                }
                                 .padding(horizontal = 14.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -723,7 +733,10 @@ fun LiveViewerScreen(
                         modifier = Modifier
                             .clip(RoundedCornerShape(20.dp))
                             .background(Color(0xFFD92D4E).copy(alpha = 0.85f))
-                            .clickable(onClick = onSendHeart)
+                            .clickable {
+                                heartBurstTick += 1
+                                onSendHeart()
+                            }
                             .padding(horizontal = 11.dp, vertical = 10.dp)
                             .testTag("send_live_heart_button"),
                         verticalAlignment = Alignment.CenterVertically
@@ -744,6 +757,65 @@ fun LiveViewerScreen(
                     }
                 }
             }
+        }
+
+        AnimatedVisibility(
+            visible = heartBurstTick > 0,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 28.dp, bottom = 116.dp)
+        ) {
+            LaunchedEffect(heartBurstTick) {
+                delay(900L)
+                heartBurstTick = 0
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Icon(Icons.Filled.Favorite, contentDescription = null, tint = Color(0xFFFF4D6D), modifier = Modifier.size(28.dp))
+                Icon(Icons.Filled.Favorite, contentDescription = null, tint = Color(0xFFFF85A1), modifier = Modifier.size(20.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun ViewerStudioEqualizerBars(
+    isActive: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val transition = rememberInfiniteTransition(label = "viewerLiveEq")
+    val p1 by transition.animateFloat(
+        initialValue = 0.25f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(430), RepeatMode.Reverse),
+        label = "veq1"
+    )
+    val p2 by transition.animateFloat(
+        initialValue = 0.92f,
+        targetValue = 0.22f,
+        animationSpec = infiniteRepeatable(tween(510), RepeatMode.Reverse),
+        label = "veq2"
+    )
+    val p3 by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.96f,
+        animationSpec = infiniteRepeatable(tween(370), RepeatMode.Reverse),
+        label = "veq3"
+    )
+    val levels = if (isActive) listOf(p1, p2, p3, (p1 + p2) * 0.5f, p2) else listOf(0.18f, 0.18f, 0.18f, 0.18f, 0.18f)
+    Canvas(modifier = modifier.size(width = 76.dp, height = 28.dp)) {
+        val barWidth = size.width / 9f
+        val gap = barWidth
+        levels.forEachIndexed { idx, level ->
+            val barH = (size.height * level).coerceAtLeast(size.height * 0.18f)
+            val x = idx * (barWidth + gap)
+            drawRoundRect(
+                color = if (isActive) SilkBlueLight else Color.White.copy(alpha = 0.45f),
+                topLeft = Offset(x, (size.height - barH) / 2f),
+                size = Size(barWidth, barH),
+                cornerRadius = CornerRadius(barWidth / 2f, barWidth / 2f)
+            )
         }
     }
 }

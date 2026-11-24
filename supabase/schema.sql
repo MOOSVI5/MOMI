@@ -125,6 +125,9 @@ CREATE TABLE IF NOT EXISTS public.posts (
   recommended_label text NOT NULL DEFAULT '' CHECK (length(recommended_label) <= 40),
   boosted_by_uid text,
   boosted_at timestamptz,
+  page_id text,
+  group_id text,
+  community_name text NOT NULL DEFAULT '',
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -442,11 +445,76 @@ CREATE TABLE IF NOT EXISTS public.app_config (
   ),
   gamezop_publisher_id text NOT NULL DEFAULT '' CHECK (length(gamezop_publisher_id) <= 40),
   gamezop_banner_title text NOT NULL DEFAULT 'Momi Arcade · Play Instant Games',
+  announcement_id text NOT NULL DEFAULT '',
+  announcement_title text NOT NULL DEFAULT '',
+  announcement_body text NOT NULL DEFAULT '',
+  latest_version_name text NOT NULL DEFAULT '2.1',
+  release_notes text NOT NULL DEFAULT '',
   updated_by_email text NOT NULL DEFAULT '',
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 INSERT INTO public.app_config (id) VALUES ('monetization') ON CONFLICT (id) DO NOTHING;
+
+-- 2.15 Creator Pages, Community Groups & Authorized Showcase Accounts
+CREATE TABLE IF NOT EXISTS public.pages (
+  id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  owner_uid text NOT NULL,
+  owner_username text NOT NULL DEFAULT 'momi.creator',
+  name text NOT NULL CHECK (length(name) BETWEEN 1 AND 80),
+  handle text NOT NULL DEFAULT '' CHECK (length(handle) <= 50),
+  category text NOT NULL DEFAULT 'Creator' CHECK (length(category) <= 40),
+  bio text NOT NULL DEFAULT '' CHECK (length(bio) <= 300),
+  cover_key text NOT NULL DEFAULT 'img_post_coastal',
+  avatar_url text,
+  is_verified boolean NOT NULL DEFAULT false,
+  followers_count bigint NOT NULL DEFAULT 0 CHECK (followers_count >= 0),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.page_follows (
+  id text PRIMARY KEY,
+  page_id text NOT NULL REFERENCES public.pages(id) ON DELETE CASCADE,
+  user_id text NOT NULL,
+  username text NOT NULL DEFAULT 'momi.user',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.groups (
+  id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  owner_uid text NOT NULL,
+  owner_username text NOT NULL DEFAULT 'momi.creator',
+  name text NOT NULL CHECK (length(name) BETWEEN 1 AND 80),
+  category text NOT NULL DEFAULT 'Community' CHECK (length(category) <= 40),
+  description text NOT NULL DEFAULT '' CHECK (length(description) <= 300),
+  privacy text NOT NULL DEFAULT 'PUBLIC' CHECK (privacy IN ('PUBLIC', 'PRIVATE')),
+  cover_key text NOT NULL DEFAULT 'img_post_architecture',
+  members_count bigint NOT NULL DEFAULT 1 CHECK (members_count >= 0),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.group_members (
+  id text PRIMARY KEY,
+  group_id text NOT NULL REFERENCES public.groups(id) ON DELETE CASCADE,
+  user_id text NOT NULL,
+  username text NOT NULL DEFAULT 'momi.user',
+  role text NOT NULL DEFAULT 'MEMBER',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.showcase_accounts (
+  username text PRIMARY KEY,
+  display_name text NOT NULL,
+  avatar_key text NOT NULL DEFAULT 'avatar_elena',
+  bio text NOT NULL DEFAULT '',
+  category text NOT NULL DEFAULT 'Creator',
+  location text NOT NULL DEFAULT '',
+  is_authorized boolean NOT NULL DEFAULT false,
+  updated_by_email text NOT NULL DEFAULT '',
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
 
 -- Attach updated_at triggers
 DO $$
@@ -456,7 +524,8 @@ BEGIN
   FOREACH tbl IN ARRAY ARRAY[
     'profiles', 'posts', 'comments', 'stories', 'notifications',
     'threads', 'live_streams', 'merchants', 'market_products',
-    'market_orders', 'content_reports', 'wallets', 'credit_transactions', 'app_config'
+    'market_orders', 'content_reports', 'wallets', 'credit_transactions',
+    'app_config', 'pages', 'groups', 'showcase_accounts'
   ] LOOP
     EXECUTE format('DROP TRIGGER IF EXISTS trg_touch_%I ON public.%I;', tbl, tbl);
     EXECUTE format(
@@ -488,6 +557,11 @@ ALTER TABLE public.content_reports ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.wallets ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.credit_transactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.app_config ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.pages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.page_follows ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.groups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.group_members ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.showcase_accounts ENABLE ROW LEVEL SECURITY;
 
 -- Profiles
 DROP POLICY IF EXISTS profiles_select_auth ON public.profiles;

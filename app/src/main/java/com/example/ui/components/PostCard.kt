@@ -36,6 +36,7 @@ import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.OpenInFull
@@ -104,6 +105,7 @@ fun PostCard(
     onToggleRecommended: ((Boolean) -> Unit)? = null,
     onDeletePost: (() -> Unit)? = null,
     onReportPost: (() -> Unit)? = null,
+    onCommunityClick: (() -> Unit)? = null,
     onAuthorClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -197,6 +199,34 @@ fun PostCard(
                                 text = subtitleText,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    if (post.communityName.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f))
+                                .let { m -> if (onCommunityClick != null) m.clickable(onClick = onCommunityClick) else m }
+                                .padding(horizontal = 7.dp, vertical = 2.dp)
+                                .testTag("post_community_pill_${post.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Groups,
+                                contentDescription = post.communityName,
+                                tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                modifier = Modifier.size(11.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = post.communityName,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )

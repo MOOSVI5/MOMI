@@ -72,8 +72,8 @@ sealed interface AiAssistantUiState {
 
 private val QuickAssistantPrompts = listOf(
     "Write a catchy travel caption",
-    "How do I become a verified merchant?",
-    "Best ways to monetize my APK",
+    "Ideas to grow my Momi Page & Group",
+    "Best ways to monetize my app",
     "Why did my video fail to upload?"
 )
 

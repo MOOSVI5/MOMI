@@ -19,7 +19,12 @@ export const SUPABASE_SCHEMA_TABLES = [
   'content_reports',
   'wallets',
   'credit_transactions',
-  'app_config'
+  'app_config',
+  'pages',
+  'page_follows',
+  'groups',
+  'group_members',
+  'showcase_accounts'
 ];
 
 export const SUPABASE_STORAGE_BUCKETS = ['momi-media', 'momi-avatars', 'momi-videos'];
@@ -201,6 +206,9 @@ export function mapFirestoreSnapshotToSupabaseBundle({
     recommended_label: String(p.recommendedLabel || '').slice(0, 40),
     boosted_by_uid: p.boostedByUid || null,
     boosted_at: p.boostedAt ? toIsoTimestamp(p.boostedAt) : null,
+    page_id: p.pageId || null,
+    group_id: p.groupId || null,
+    community_name: String(p.communityName || '').slice(0, 80),
     created_at: toIsoTimestamp(p.createdAt)
   }));
 
@@ -283,6 +291,11 @@ export function mapFirestoreSnapshotToSupabaseBundle({
     gamezop_portal_url: String(cfg.gamezopPortalUrl || '').slice(0, 300),
     gamezop_publisher_id: String(cfg.gamezopPublisherId || '').slice(0, 40),
     gamezop_banner_title: String(cfg.gamezopBannerTitle || '').slice(0, 80),
+    announcement_id: String(cfg.announcementId || '').slice(0, 80),
+    announcement_title: String(cfg.announcementTitle || '').slice(0, 120),
+    announcement_body: String(cfg.announcementBody || '').slice(0, 500),
+    latest_version_name: String(cfg.latestVersionName || '2.1').slice(0, 32),
+    release_notes: String(cfg.releaseNotes || '').slice(0, 400),
     updated_by_email: String(cfg.updatedByEmail || '').slice(0, 120)
   }];
 
@@ -566,14 +579,28 @@ export async function fetchSupabaseFeed(cfg = SUPABASE_WEB_CONFIG, fetchImpl = g
     Accept: 'application/json'
   };
   try {
-    const [postsRes, storiesRes, profilesRes, productsRes, merchantsRes, liveRes, configRes] = await Promise.all([
+    const [
+      postsRes,
+      storiesRes,
+      profilesRes,
+      productsRes,
+      merchantsRes,
+      liveRes,
+      configRes,
+      pagesRes,
+      groupsRes,
+      showcaseRes
+    ] = await Promise.all([
       fetchImpl(`${baseUrl}/rest/v1/posts?select=*&order=created_at.desc&limit=120`, { headers }),
       fetchImpl(`${baseUrl}/rest/v1/stories?select=*&order=created_at.desc&limit=50`, { headers }),
       fetchImpl(`${baseUrl}/rest/v1/profiles?select=*&limit=100`, { headers }),
       fetchImpl(`${baseUrl}/rest/v1/market_products?select=*&order=created_at.desc&limit=80`, { headers }),
       fetchImpl(`${baseUrl}/rest/v1/merchants?select=*&limit=60`, { headers }),
       fetchImpl(`${baseUrl}/rest/v1/live_streams?select=*&is_live=eq.true&order=updated_at.desc&limit=30`, { headers }),
-      fetchImpl(`${baseUrl}/rest/v1/app_config?select=*&id=eq.monetization&limit=1`, { headers })
+      fetchImpl(`${baseUrl}/rest/v1/app_config?select=*&id=eq.monetization&limit=1`, { headers }),
+      fetchImpl(`${baseUrl}/rest/v1/pages?select=*&order=followers_count.desc&limit=60`, { headers }).catch(() => ({ ok: false })),
+      fetchImpl(`${baseUrl}/rest/v1/groups?select=*&order=members_count.desc&limit=60`, { headers }).catch(() => ({ ok: false })),
+      fetchImpl(`${baseUrl}/rest/v1/showcase_accounts?select=*&order=username.asc&limit=40`, { headers }).catch(() => ({ ok: false }))
     ]);
     if (!postsRes.ok && !profilesRes.ok) return null;
     const posts = postsRes.ok ? await postsRes.json() : [];
@@ -583,6 +610,9 @@ export async function fetchSupabaseFeed(cfg = SUPABASE_WEB_CONFIG, fetchImpl = g
     const merchants = merchantsRes.ok ? await merchantsRes.json() : [];
     const liveStreams = liveRes.ok ? await liveRes.json() : [];
     const configs = configRes.ok ? await configRes.json() : [];
+    const pages = pagesRes.ok ? await pagesRes.json() : [];
+    const groups = groupsRes.ok ? await groupsRes.json() : [];
+    const showcaseAccounts = showcaseRes.ok ? await showcaseRes.json() : [];
     return {
       posts,
       stories,
@@ -590,7 +620,10 @@ export async function fetchSupabaseFeed(cfg = SUPABASE_WEB_CONFIG, fetchImpl = g
       products,
       merchants,
       liveStreams,
-      appConfig: configs[0] || null
+      appConfig: configs[0] || null,
+      pages,
+      groups,
+      showcaseAccounts
     };
   } catch {
     return null;
@@ -607,7 +640,9 @@ export async function fetchUserSupabaseWorkspace(cfg = SUPABASE_WEB_CONFIG, uid 
     threads,
     wallets,
     transactions,
-    orders
+    orders,
+    pageFollows,
+    groupMembers
   ] = await Promise.all([
     selectSupabaseTable(cfg, 'follows', `select=*&follower_uid=eq.${eUid}`, fetchImpl),
     selectSupabaseTable(cfg, 'user_interactions', `select=*&user_id=eq.${eUid}`, fetchImpl),
@@ -615,7 +650,9 @@ export async function fetchUserSupabaseWorkspace(cfg = SUPABASE_WEB_CONFIG, uid 
     selectSupabaseTable(cfg, 'threads', `select=*&participant_uids=cs.{${eUid}}&order=updated_at.desc&limit=40`, fetchImpl),
     selectSupabaseTable(cfg, 'wallets', `select=*&user_id=eq.${eUid}&limit=1`, fetchImpl),
     selectSupabaseTable(cfg, 'credit_transactions', `select=*&or=(sender_uid.eq.${eUid},recipient_uid.eq.${eUid})&order=created_at.desc&limit=40`, fetchImpl),
-    selectSupabaseTable(cfg, 'market_orders', `select=*&or=(buyer_uid.eq.${eUid},seller_uid.eq.${eUid})&order=created_at.desc&limit=30`, fetchImpl)
+    selectSupabaseTable(cfg, 'market_orders', `select=*&or=(buyer_uid.eq.${eUid},seller_uid.eq.${eUid})&order=created_at.desc&limit=30`, fetchImpl),
+    selectSupabaseTable(cfg, 'page_follows', `select=*&user_id=eq.${eUid}`, fetchImpl),
+    selectSupabaseTable(cfg, 'group_members', `select=*&user_id=eq.${eUid}`, fetchImpl)
   ]);
   return {
     follows,
@@ -624,7 +661,9 @@ export async function fetchUserSupabaseWorkspace(cfg = SUPABASE_WEB_CONFIG, uid 
     threads,
     wallet: wallets[0] || null,
     transactions,
-    orders
+    orders,
+    pageFollows,
+    groupMembers
   };
 }
 
@@ -665,6 +704,9 @@ export function mapSupabasePostToWeb(row = {}) {
     isSponsored: Boolean(row.is_sponsored),
     sponsorLabel: String(row.sponsor_label || ''),
     directLinkUrl: String(row.direct_link_url || ''),
+    pageId: row.page_id || null,
+    groupId: row.group_id || null,
+    communityName: String(row.community_name || ''),
     createdAt: row.created_at ? { seconds: Math.floor(new Date(row.created_at).getTime() / 1000) } : null
   };
 }
@@ -751,7 +793,54 @@ export function mapSupabaseConfigToWeb(row = {}) {
     gamezopEnabled: Boolean(row.gamezop_enabled ?? false),
     gamezopPortalUrl: String(row.gamezop_portal_url || ''),
     gamezopPublisherId: String(row.gamezop_publisher_id || ''),
-    gamezopBannerTitle: String(row.gamezop_banner_title || DEFAULT_MONETIZATION_CONFIG.gamezopBannerTitle)
+    gamezopBannerTitle: String(row.gamezop_banner_title || DEFAULT_MONETIZATION_CONFIG.gamezopBannerTitle),
+    announcementId: String(row.announcement_id || ''),
+    announcementTitle: String(row.announcement_title || ''),
+    announcementBody: String(row.announcement_body || ''),
+    latestVersionName: String(row.latest_version_name || '2.1'),
+    releaseNotes: String(row.release_notes || '')
+  };
+}
+
+export function mapSupabasePageToWeb(row = {}) {
+  return {
+    id: String(row.id || ''),
+    ownerUid: String(row.owner_uid || ''),
+    ownerUsername: String(row.owner_username || 'momi.creator'),
+    name: String(row.name || 'Creator Page'),
+    handle: String(row.handle || ''),
+    category: String(row.category || 'Creator'),
+    bio: String(row.bio || ''),
+    coverKey: String(row.cover_key || 'img_post_coastal'),
+    avatarUrl: row.avatar_url || null,
+    isVerified: Boolean(row.is_verified),
+    followersCount: Number(row.followers_count || 0)
+  };
+}
+
+export function mapSupabaseGroupToWeb(row = {}) {
+  return {
+    id: String(row.id || ''),
+    ownerUid: String(row.owner_uid || ''),
+    ownerUsername: String(row.owner_username || 'momi.creator'),
+    name: String(row.name || 'Momi Group'),
+    category: String(row.category || 'Community'),
+    description: String(row.description || ''),
+    privacy: String(row.privacy || 'PUBLIC'),
+    coverKey: String(row.cover_key || 'img_post_architecture'),
+    membersCount: Number(row.members_count || 1)
+  };
+}
+
+export function mapSupabaseShowcaseAccountToWeb(row = {}) {
+  return {
+    username: String(row.username || ''),
+    displayName: String(row.display_name || row.username || 'Starter'),
+    avatarKey: String(row.avatar_key || 'avatar_elena'),
+    bio: String(row.bio || ''),
+    category: String(row.category || 'Creator'),
+    location: String(row.location || ''),
+    isAuthorized: Boolean(row.is_authorized)
   };
 }
 

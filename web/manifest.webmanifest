@@ -1,7 +1,7 @@
 {
   "name": "Momi",
   "short_name": "Momi",
-  "description": "Momi Desktop & Mobile Web — Visual storytelling, RedNote discovery, Live streams, Marketplace, and Real-time Sync.",
+  "description": "Momi Desktop & Mobile Web — Visual storytelling, Momi discovery, Pages & Groups, Live streams, Marketplace, and Real-time Sync.",
   "start_url": "./index.html",
   "display": "standalone",
   "orientation": "any",

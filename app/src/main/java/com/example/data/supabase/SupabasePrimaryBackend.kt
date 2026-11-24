@@ -18,9 +18,12 @@ import com.example.data.model.MarketProduct
 import com.example.data.model.MerchantAccount
 import com.example.data.model.MessageThread
 import com.example.data.model.MomiCreditCatalog
+import com.example.data.model.MomiGroup
+import com.example.data.model.MomiPage
 import com.example.data.model.NotificationItem
 import com.example.data.model.Post
 import com.example.data.model.PostBoostOption
+import com.example.data.model.ShowcaseAccount
 import com.example.data.model.Story
 import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
@@ -418,5 +421,114 @@ class SupabasePrimaryBackend(
         client.deleteRows("posts", "id=like.showcase_*")
         client.deleteRows("stories", "id=like.showcase_*")
         return Result.success(Unit)
+    }
+
+    suspend fun upsertPage(page: MomiPage): Result<Unit> {
+        client.ensureProfileExists(page.ownerUid, page.ownerUsername)
+        return client.upsertRows("pages", listOf(MomiSupabaseSchema.toPageRow(page)), onConflict = "id").map { Unit }
+    }
+
+    suspend fun toggleFollowPage(
+        page: MomiPage,
+        userId: String,
+        username: String,
+        currentlyFollowing: Boolean
+    ): Result<Long> {
+        val edgeId = "${userId}_${page.id}"
+        val nextCount = (page.followersCount + if (currentlyFollowing) -1L else 1L).coerceAtLeast(0L)
+        val res = if (currentlyFollowing) {
+            client.deleteRows("page_follows", "id=eq.${urlEncode(edgeId)}")
+        } else {
+            client.upsertRows(
+                "page_follows",
+                listOf(
+                    linkedMapOf(
+                        "id" to edgeId,
+                        "page_id" to page.id,
+                        "user_id" to userId,
+                        "username" to username.ifBlank { "momi.user" }.take(50)
+                    )
+                ),
+                onConflict = "id"
+            ).map { Unit }
+        }
+        if (res.isFailure) return Result.failure(res.exceptionOrNull() ?: IllegalStateException("Page follow update failed"))
+        client.patchRows("pages", "id=eq.${urlEncode(page.id)}", mapOf("followers_count" to nextCount))
+        return Result.success(nextCount)
+    }
+
+    suspend fun upsertGroup(group: MomiGroup, creatorUsername: String): Result<Unit> {
+        client.ensureProfileExists(group.ownerUid, creatorUsername)
+        val res = client.upsertRows("groups", listOf(MomiSupabaseSchema.toGroupRow(group)), onConflict = "id")
+        if (res.isFailure) return res.map { Unit }
+        client.upsertRows(
+            "group_members",
+            listOf(
+                linkedMapOf(
+                    "id" to "${group.ownerUid}_${group.id}",
+                    "group_id" to group.id,
+                    "user_id" to group.ownerUid,
+                    "username" to creatorUsername.ifBlank { "momi.creator" }.take(50),
+                    "role" to "ADMIN"
+                )
+            ),
+            onConflict = "id"
+        )
+        return Result.success(Unit)
+    }
+
+    suspend fun toggleJoinGroup(
+        group: MomiGroup,
+        userId: String,
+        username: String,
+        currentlyMember: Boolean
+    ): Result<Long> {
+        val edgeId = "${userId}_${group.id}"
+        val nextCount = (group.membersCount + if (currentlyMember) -1L else 1L).coerceAtLeast(0L)
+        val res = if (currentlyMember) {
+            client.deleteRows("group_members", "id=eq.${urlEncode(edgeId)}")
+        } else {
+            client.upsertRows(
+                "group_members",
+                listOf(
+                    linkedMapOf(
+                        "id" to edgeId,
+                        "group_id" to group.id,
+                        "user_id" to userId,
+                        "username" to username.ifBlank { "momi.user" }.take(50),
+                        "role" to "MEMBER"
+                    )
+                ),
+                onConflict = "id"
+            ).map { Unit }
+        }
+        if (res.isFailure) return Result.failure(res.exceptionOrNull() ?: IllegalStateException("Group membership update failed"))
+        client.patchRows("groups", "id=eq.${urlEncode(group.id)}", mapOf("members_count" to nextCount))
+        return Result.success(nextCount)
+    }
+
+    suspend fun upsertShowcaseAccount(account: ShowcaseAccount): Result<Unit> {
+        val uid = "showcase_${account.username}"
+        client.ensureProfileExists(uid, account.username, account.displayName, account.avatarKey)
+        return client.upsertRows(
+            "showcase_accounts",
+            listOf(MomiSupabaseSchema.toShowcaseAccountRow(account)),
+            onConflict = "username"
+        ).map { Unit }
+    }
+
+    suspend fun publishCustomShowcasePost(account: ShowcaseAccount, post: Post): Result<Unit> {
+        val showcaseProfile = UserProfile(
+            id = "showcase_${account.username}",
+            userId = "showcase_${account.username}",
+            username = account.username,
+            displayName = account.displayName,
+            category = account.category,
+            bio = account.bio,
+            avatarKey = account.avatarKey,
+            isVerified = true
+        )
+        upsertProfile(showcaseProfile)
+        return createPost(showcaseProfile, post)
     }
 }

@@ -135,6 +135,10 @@
             <span class="sidebar-label">Alerts</span>
             <span id="navNotifBadge" class="badge-pill hidden">0</span>
           </button>
+          <button type="button" class="nav-item" data-nav="communities">
+            <span class="nav-icon" aria-hidden="true">&#9670;</span>
+            <span class="sidebar-label">Pages &amp; Groups</span>
+          </button>
           <button type="button" class="nav-item" data-nav="wallet">
             <span class="nav-icon" aria-hidden="true">&#9733;</span>
             <span class="sidebar-label">Wallet &amp; Perks</span>
@@ -142,6 +146,14 @@
           <button type="button" class="nav-item" data-nav="profile">
             <span class="nav-icon" aria-hidden="true">&#9786;</span>
             <span class="sidebar-label">Profile</span>
+          </button>
+          <button type="button" class="nav-item hidden owner-nav-item" id="navAdminBtn" data-nav="admin">
+            <span class="nav-icon" aria-hidden="true">&#9881;</span>
+            <span class="sidebar-label">Owner Console</span>
+          </button>
+          <button type="button" class="nav-item" id="navAiBtn">
+            <span class="nav-icon" aria-hidden="true">&#10022;</span>
+            <span class="sidebar-label">Momi AI</span>
           </button>
         </nav>
 
@@ -179,6 +191,8 @@
           <span class="brand-script">Momi</span>
         </div>
         <div class="mobile-header-actions">
+          <button type="button" class="owner-pill-btn hidden" id="mobileAdminBtn" data-nav="admin" aria-label="Owner Console">&#9881; Owner</button>
+          <button type="button" class="icon-btn" data-nav="communities" aria-label="Pages and Groups" title="Pages & Groups">&#9670;</button>
           <button type="button" class="icon-btn" data-nav="live" aria-label="Live Rooms" title="Live">&#9673;</button>
           <button type="button" class="icon-btn" data-nav="notifications" aria-label="Notifications" title="Alerts">
             &#9825;<span id="mobileNotifDot" class="dot hidden"></span>
@@ -208,8 +222,11 @@
             <button type="button" class="nav-item" data-nav="marketplace">&#128717; <span>Marketplace</span></button>
             <button type="button" class="nav-item" data-nav="messages">&#9993; <span>Direct Messages</span></button>
             <button type="button" class="nav-item" data-nav="notifications">&#9825; <span>Activity Alerts</span></button>
+            <button type="button" class="nav-item" data-nav="communities">&#9670; <span>Pages &amp; Groups</span></button>
             <button type="button" class="nav-item" data-nav="wallet">&#9733; <span>Wallet &amp; Perks</span></button>
             <button type="button" class="nav-item" data-nav="profile">&#9786; <span>My Profile</span></button>
+            <button type="button" class="nav-item hidden owner-nav-item" id="drawerAdminBtn" data-nav="admin">&#9881; <span>Owner Console</span></button>
+            <button type="button" class="nav-item" id="drawerAiBtn">&#10022; <span>Momi AI Studio</span></button>
           </nav>
           <div class="mobile-drawer-footer">
             <div class="sidebar-controls-row">

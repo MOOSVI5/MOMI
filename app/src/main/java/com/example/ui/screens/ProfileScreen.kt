@@ -1,5 +1,8 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -37,6 +40,7 @@ import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Groups
@@ -78,6 +82,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -100,6 +105,7 @@ import com.example.data.model.ModerationScopes
 import com.example.data.model.MomiCreditCatalog
 import com.example.data.model.MomiRoles
 import com.example.data.model.Post
+import com.example.data.model.ShowcaseAccount
 import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
 import com.example.data.repository.MomiFirestoreRepository
@@ -111,6 +117,9 @@ import com.example.ui.components.PostMediaImage
 import com.example.ui.theme.AppColorScheme
 import com.example.ui.theme.ThemePreference
 import com.example.util.MediaAssets
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private data class ProfileHighlight(
     val title: String,
@@ -173,10 +182,16 @@ fun ProfileScreen(
     onCheckForUpdates: () -> Unit = {},
     showcasePostsCount: Int = 0,
     showcaseStoriesCount: Int = 0,
+    showcaseAccounts: List<ShowcaseAccount> = emptyList(),
     isShowcaseBusy: Boolean = false,
     onPublishShowcaseBurst: () -> Unit = {},
     onEngageWithShowcase: () -> Unit = {},
     onRemoveAllShowcase: () -> Unit = {},
+    onAuthorizeShowcaseAccount: (ShowcaseAccount, Boolean) -> Unit = { _, _ -> },
+    onUpdateShowcasePersonaProfile: (ShowcaseAccount, String, String, String, String, (Boolean) -> Unit) -> Unit = { _, _, _, _, _, cb -> cb(false) },
+    onPublishCustomShowcasePost: (ShowcaseAccount, String, String, String, String?, String?, Boolean, (Boolean) -> Unit) -> Unit = { _, _, _, _, _, _, _, cb -> cb(false) },
+    onBoostPostWithShowcase: (Post, ShowcaseAccount, Long, Long, String, (Boolean) -> Unit) -> Unit = { _, _, _, _, _, cb -> cb(false) },
+    onPublishInAppAnnouncement: (String, String, String, String, (Boolean) -> Unit) -> Unit = { _, _, _, _, cb -> cb(false) },
     monetizationConfig: AdMonetizationConfig = AdMonetizationConfig(),
     isSavingMonetization: Boolean = false,
     onSaveMonetizationConfig: (AdMonetizationConfig, (Boolean) -> Unit) -> Unit = { _, _ -> },
@@ -202,6 +217,7 @@ fun ProfileScreen(
     var showPlayReadinessSheet by remember { mutableStateOf(false) }
     var showOwnerGrantsSheet by remember { mutableStateOf(false) }
     var showShowcaseManagerSheet by remember { mutableStateOf(false) }
+    var showAnnouncementSheet by remember { mutableStateOf(false) }
     var followSheetTab by remember { mutableStateOf<Int?>(null) }
 
     val canAccessSafetyQueue = isAdminViewActive || (
@@ -766,6 +782,29 @@ fun ProfileScreen(
                             fontWeight = FontWeight.Bold
                         )
                     }
+                    OutlinedButton(
+                        onClick = {
+                            showSettingsSheet = false
+                            showAnnouncementSheet = true
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("admin_announcement_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Campaign,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "In-App Announcement & Update Notice",
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
 
                 if (canAccessSafetyQueue) {
@@ -935,11 +974,30 @@ fun ProfileScreen(
         ShowcaseAccountsManagerSheet(
             showcasePostsCount = showcasePostsCount,
             showcaseStoriesCount = showcaseStoriesCount,
+            showcaseAccounts = showcaseAccounts,
+            allPosts = allPosts,
             isBusy = isShowcaseBusy,
             onPublishBurst = onPublishShowcaseBurst,
             onEngageRecent = onEngageWithShowcase,
             onRemoveAll = onRemoveAllShowcase,
+            onAuthorizeAccount = onAuthorizeShowcaseAccount,
+            onUpdatePersonaProfile = onUpdateShowcasePersonaProfile,
+            onPublishCustomPost = onPublishCustomShowcasePost,
+            onBoostPostMetrics = onBoostPostWithShowcase,
             onDismiss = { showShowcaseManagerSheet = false }
+        )
+    }
+
+    if (showAnnouncementSheet && isOwnerAccount && isAdminViewActive) {
+        InAppAnnouncementSheet(
+            currentConfig = monetizationConfig,
+            isSaving = isSavingMonetization,
+            onPublish = { title, body, ver, notes ->
+                onPublishInAppAnnouncement(title, body, ver, notes) { ok ->
+                    if (ok) showAnnouncementSheet = false
+                }
+            },
+            onDismiss = { showAnnouncementSheet = false }
         )
     }
 
@@ -1573,6 +1631,39 @@ fun ProfileScreen(
                                         fontWeight = FontWeight.SemiBold
                                     )
                                 }
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .minimumInteractiveComponentSize()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(MaterialTheme.colorScheme.surface)
+                                        .clickable { showAnnouncementSheet = true }
+                                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                                        .testTag("profile_in_app_announcement_chip"),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Filled.Campaign,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(17.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "Broadcast In-App Update & Notice",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    Text(
+                                        text = "v${monetizationConfig.latestVersionName}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
                             }
                         }
                     } else if (isOwnerAccount && !isAdminViewActive) {
@@ -1891,13 +1982,325 @@ private fun ProfileStatColumn(
 private fun ShowcaseAccountsManagerSheet(
     showcasePostsCount: Int,
     showcaseStoriesCount: Int,
+    showcaseAccounts: List<ShowcaseAccount>,
+    allPosts: List<Post>,
     isBusy: Boolean,
     onPublishBurst: () -> Unit,
     onEngageRecent: () -> Unit,
     onRemoveAll: () -> Unit,
+    onAuthorizeAccount: (ShowcaseAccount, Boolean) -> Unit,
+    onUpdatePersonaProfile: (ShowcaseAccount, String, String, String, String, (Boolean) -> Unit) -> Unit,
+    onPublishCustomPost: (ShowcaseAccount, String, String, String, String?, String?, Boolean, (Boolean) -> Unit) -> Unit,
+    onBoostPostMetrics: (Post, ShowcaseAccount, Long, Long, String, (Boolean) -> Unit) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
     var confirmRemove by remember { mutableStateOf(false) }
+    var editingAccount by remember { mutableStateOf<ShowcaseAccount?>(null) }
+    var postingAsAccount by remember { mutableStateOf<ShowcaseAccount?>(null) }
+    var boostingAsAccount by remember { mutableStateOf<ShowcaseAccount?>(null) }
+
+    val personas = remember(showcaseAccounts) {
+        showcaseAccounts.ifEmpty {
+            MomiFirestoreRepository.SHOWCASE_PERSONAS.map { p ->
+                ShowcaseAccount(
+                    username = p.username,
+                    displayName = p.displayName,
+                    avatarKey = p.avatarKey,
+                    bio = "${p.category} creator in ${p.location}",
+                    category = p.category,
+                    location = p.location,
+                    isAuthorized = false
+                )
+            }
+        }
+    }
+
+    editingAccount?.let { target ->
+        var draftName by remember(target.username) { mutableStateOf(target.displayName) }
+        var draftBio by remember(target.username) { mutableStateOf(target.bio) }
+        var draftCategory by remember(target.username) { mutableStateOf(target.category) }
+        var draftLocation by remember(target.username) { mutableStateOf(target.location) }
+        var savingProfile by remember { mutableStateOf(false) }
+        ModalBottomSheet(
+            onDismissRequest = { editingAccount = null },
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "Edit @${target.username} Profile",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                OutlinedTextField(
+                    value = draftName,
+                    onValueChange = { draftName = it },
+                    label = { Text("Display Name") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = draftBio,
+                    onValueChange = { draftBio = it },
+                    label = { Text("Bio") },
+                    minLines = 2,
+                    maxLines = 3,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = draftCategory,
+                        onValueChange = { draftCategory = it },
+                        label = { Text("Category") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = draftLocation,
+                        onValueChange = { draftLocation = it },
+                        label = { Text("Location") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Button(
+                    enabled = !savingProfile,
+                    onClick = {
+                        savingProfile = true
+                        onUpdatePersonaProfile(target, draftName, draftBio, draftCategory, draftLocation) { ok ->
+                            savingProfile = false
+                            if (ok) editingAccount = null
+                        }
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                ) {
+                    Text(if (savingProfile) "Saving..." else "Save Starter Profile", fontWeight = FontWeight.Bold)
+                }
+                Spacer(modifier = Modifier.height(14.dp))
+            }
+        }
+    }
+
+    postingAsAccount?.let { author ->
+        var caption by remember(author.username) { mutableStateOf("") }
+        var mediaType by remember(author.username) { mutableStateOf("IMAGE") }
+        var pickedImagePath by remember(author.username) { mutableStateOf<String?>(null) }
+        var pickedVideoPath by remember(author.username) { mutableStateOf<String?>(null) }
+        var imageKey by remember(author.username) { mutableStateOf("img_post_coastal") }
+        var shareAsClip by remember(author.username) { mutableStateOf(false) }
+        var publishing by remember { mutableStateOf(false) }
+
+        val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+            if (uri != null) {
+                scope.launch {
+                    val saved = withContext(Dispatchers.IO) { MediaAssets.copyPickedImageToInternalStorage(context, uri) }
+                    if (saved != null) {
+                        pickedImagePath = saved
+                        pickedVideoPath = null
+                        mediaType = "IMAGE"
+                    }
+                }
+            }
+        }
+        val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+            if (uri != null) {
+                scope.launch {
+                    val extracted = withContext(Dispatchers.IO) { MediaAssets.copyPickedVideoToInternalStorage(context, uri) }
+                    if (extracted != null) {
+                        pickedVideoPath = extracted.localVideoPath
+                        pickedImagePath = extracted.thumbnailPath
+                        mediaType = "VIDEO"
+                        shareAsClip = true
+                    }
+                }
+            }
+        }
+
+        ModalBottomSheet(
+            onDismissRequest = { postingAsAccount = null },
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "Publish Post / Video as @${author.username}",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                    ) {
+                        Text(if (pickedImagePath != null && mediaType == "IMAGE") "Photo Ready" else "Pick Photo")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                    ) {
+                        Text(if (pickedVideoPath != null) "Video Ready" else "Pick Video")
+                    }
+                }
+                OutlinedTextField(
+                    value = caption,
+                    onValueChange = { caption = it },
+                    label = { Text("Caption (#hashtags supported)") },
+                    minLines = 2,
+                    maxLines = 4,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Publish as Momi Clip", style = MaterialTheme.typography.labelLarge)
+                    Switch(checked = shareAsClip, onCheckedChange = { shareAsClip = it })
+                }
+                Button(
+                    enabled = !publishing,
+                    onClick = {
+                        publishing = true
+                        onPublishCustomPost(
+                            author,
+                            caption,
+                            mediaType,
+                            imageKey,
+                            pickedImagePath,
+                            pickedVideoPath,
+                            shareAsClip
+                        ) { ok ->
+                            publishing = false
+                            if (ok) postingAsAccount = null
+                        }
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                ) {
+                    Text(if (publishing) "Publishing..." else "Publish as @${author.username}", fontWeight = FontWeight.Bold)
+                }
+                Spacer(modifier = Modifier.height(14.dp))
+            }
+        }
+    }
+
+    boostingAsAccount?.let { starter ->
+        val candidatePosts = remember(allPosts) { allPosts.take(15) }
+        var selectedPost by remember(candidatePosts) { mutableStateOf(candidatePosts.firstOrNull()) }
+        var addLikes by remember { mutableStateOf("10") }
+        var addViews by remember { mutableStateOf("120") }
+        var commentText by remember { mutableStateOf("") }
+        var savingBoost by remember { mutableStateOf(false) }
+
+        ModalBottomSheet(
+            onDismissRequest = { boostingAsAccount = null },
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "Engage Post as @${starter.username}",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                if (candidatePosts.isNotEmpty()) {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(candidatePosts, key = { "boost_pick_${it.id}" }) { post ->
+                            val active = selectedPost?.id == post.id
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                    .clickable { selectedPost = post }
+                                    .padding(horizontal = 10.dp, vertical = 7.dp)
+                            ) {
+                                Text(
+                                    text = "@${post.authorUsername}: ${post.caption.take(18)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = addLikes,
+                        onValueChange = { addLikes = it.filter(Char::isDigit).take(4) },
+                        label = { Text("+ Likes") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = addViews,
+                        onValueChange = { addViews = it.filter(Char::isDigit).take(5) },
+                        label = { Text("+ Views") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                OutlinedTextField(
+                    value = commentText,
+                    onValueChange = { commentText = it },
+                    label = { Text("Optional comment as @${starter.username}") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Button(
+                    enabled = !savingBoost && selectedPost != null,
+                    onClick = {
+                        val targetPost = selectedPost ?: return@Button
+                        savingBoost = true
+                        onBoostPostMetrics(
+                            targetPost,
+                            starter,
+                            addLikes.toLongOrNull() ?: 0L,
+                            addViews.toLongOrNull() ?: 0L,
+                            commentText
+                        ) { ok ->
+                            savingBoost = false
+                            if (ok) boostingAsAccount = null
+                        }
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                ) {
+                    Text(if (savingBoost) "Applying..." else "Apply Likes, Views & Comment", fontWeight = FontWeight.Bold)
+                }
+                Spacer(modifier = Modifier.height(14.dp))
+            }
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -1920,14 +2323,14 @@ private fun ShowcaseAccountsManagerSheet(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Starter Showcase Accounts",
+                        text = "Starter Showcase Authorization",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Publish realistic creator posts, stories, likes, and comments while growing your early community — then remove all starter content in 1 tap.",
+                    text = "Authorize starter personas below to post custom photos or videos, update their profiles, and add likes, views, & comments cleanly.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1957,9 +2360,7 @@ private fun ShowcaseAccountsManagerSheet(
                             Text(
                                 text = "$showcasePostsCount showcase posts · $showcaseStoriesCount active stories",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                         Spacer(modifier = Modifier.width(10.dp))
@@ -1968,7 +2369,7 @@ private fun ShowcaseAccountsManagerSheet(
                             color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
                         ) {
                             Text(
-                                text = "${MomiFirestoreRepository.SHOWCASE_PERSONAS.size} personas",
+                                text = "${personas.count { it.isAuthorized }}/${personas.size} authorized",
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.primary,
@@ -1987,49 +2388,28 @@ private fun ShowcaseAccountsManagerSheet(
                         onClick = onPublishBurst,
                         enabled = !isBusy,
                         shape = RoundedCornerShape(14.dp),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(min = 48.dp)
                             .testTag("showcase_burst_button")
                     ) {
-                        Icon(
-                            imageVector = Icons.Filled.AutoAwesome,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
+                        Icon(Icons.Filled.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = if (isBusy) "Working..." else "Publish 4 Starter Posts",
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Text(if (isBusy) "Working..." else "Publish 4 Starter Posts", fontWeight = FontWeight.Bold)
                     }
 
                     OutlinedButton(
                         onClick = onEngageRecent,
                         enabled = !isBusy,
                         shape = RoundedCornerShape(14.dp),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(min = 48.dp)
                             .testTag("showcase_engage_button")
                     ) {
-                        Icon(
-                            imageVector = Icons.Filled.Favorite,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp)
-                        )
+                        Icon(Icons.Filled.Favorite, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Engage Recent Posts",
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Text("Engage Recent Posts", fontWeight = FontWeight.Bold)
                     }
 
                     if (!confirmRemove) {
@@ -2037,27 +2417,15 @@ private fun ShowcaseAccountsManagerSheet(
                             onClick = { confirmRemove = true },
                             enabled = !isBusy,
                             shape = RoundedCornerShape(14.dp),
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                contentColor = MaterialTheme.colorScheme.error
-                            ),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .heightIn(min = 48.dp)
                                 .testTag("showcase_remove_button")
                         ) {
-                            Icon(
-                                imageVector = Icons.Filled.DeleteSweep,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
+                            Icon(Icons.Filled.DeleteSweep, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Remove All Starter",
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                            Text("Remove All Starter Content", fontWeight = FontWeight.Bold)
                         }
                     } else {
                         Button(
@@ -2067,7 +2435,6 @@ private fun ShowcaseAccountsManagerSheet(
                             },
                             enabled = !isBusy,
                             shape = RoundedCornerShape(14.dp),
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MaterialTheme.colorScheme.error,
                                 contentColor = MaterialTheme.colorScheme.onError
@@ -2077,18 +2444,9 @@ private fun ShowcaseAccountsManagerSheet(
                                 .heightIn(min = 48.dp)
                                 .testTag("showcase_confirm_remove_button")
                         ) {
-                            Icon(
-                                imageVector = Icons.Filled.DeleteSweep,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
+                            Icon(Icons.Filled.DeleteSweep, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Confirm Delete All",
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                            Text("Confirm Delete All", fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -2097,57 +2455,179 @@ private fun ShowcaseAccountsManagerSheet(
             item {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Included Starter Personas",
+                    text = "Manage Showcase Starters",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )
             }
 
-            items(MomiFirestoreRepository.SHOWCASE_PERSONAS, key = { it.username }) { persona ->
+            items(personas, key = { it.username }) { persona ->
                 Surface(
-                    shape = RoundedCornerShape(12.dp),
+                    shape = RoundedCornerShape(14.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        LumaAvatar(
-                            username = persona.username,
-                            avatarKey = persona.avatarKey,
-                            size = 40.dp,
-                            hasActiveStory = true
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            LumaAvatar(
+                                username = persona.username,
+                                avatarKey = persona.avatarKey,
+                                size = 42.dp,
+                                hasActiveStory = true
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = "@${persona.username}",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Icon(
+                                        imageVector = Icons.Filled.Verified,
+                                        contentDescription = "Verified persona",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
                                 Text(
-                                    text = "@${persona.username}",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Icon(
-                                    imageVector = Icons.Filled.Verified,
-                                    contentDescription = "Verified persona",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(14.dp)
+                                    text = "${persona.displayName} · ${persona.category} · ${persona.location}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
-                            Text(
-                                text = "${persona.displayName} · ${persona.category} · ${persona.location}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                            Switch(
+                                checked = persona.isAuthorized,
+                                onCheckedChange = { checked -> onAuthorizeAccount(persona, checked) },
+                                modifier = Modifier.testTag("authorize_starter_${persona.username}")
                             )
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = { editingAccount = persona },
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.weight(1f).heightIn(min = 40.dp)
+                            ) {
+                                Icon(Icons.Filled.Edit, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Profile", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            }
+                            Button(
+                                enabled = persona.isAuthorized && !isBusy,
+                                onClick = { postingAsAccount = persona },
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.weight(1f).heightIn(min = 40.dp)
+                            ) {
+                                Text("Post / Video", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            }
+                            OutlinedButton(
+                                enabled = persona.isAuthorized && !isBusy,
+                                onClick = { boostingAsAccount = persona },
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.weight(1f).heightIn(min = 40.dp)
+                            ) {
+                                Text("Likes/Views", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun InAppAnnouncementSheet(
+    currentConfig: AdMonetizationConfig,
+    isSaving: Boolean,
+    onPublish: (title: String, body: String, latestVersionName: String, releaseNotes: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var title by remember(currentConfig) { mutableStateOf(currentConfig.announcementTitle) }
+    var body by remember(currentConfig) { mutableStateOf(currentConfig.announcementBody) }
+    var latestVersion by remember(currentConfig) { mutableStateOf(currentConfig.latestVersionName.ifBlank { "2.1" }) }
+    var releaseNotes by remember(currentConfig) { mutableStateOf(currentConfig.releaseNotes) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.Campaign, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "In-App Announcement & Update Notice",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Text(
+                text = "Broadcast release notes and announcements inside Android & Web notifications + Home banner without asking members to redownload an APK.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            OutlinedTextField(
+                value = title,
+                onValueChange = { title = it },
+                label = { Text("Announcement Title") },
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth().testTag("announcement_title_input")
+            )
+            OutlinedTextField(
+                value = body,
+                onValueChange = { body = it },
+                label = { Text("Announcement Message") },
+                minLines = 2,
+                maxLines = 4,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth().testTag("announcement_body_input")
+            )
+            OutlinedTextField(
+                value = latestVersion,
+                onValueChange = { latestVersion = it },
+                label = { Text("Release Label (e.g. 2.1)") },
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = releaseNotes,
+                onValueChange = { releaseNotes = it },
+                label = { Text("What's New / Release Notes") },
+                minLines = 2,
+                maxLines = 3,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
+            Button(
+                enabled = !isSaving,
+                onClick = { onPublish(title, body, latestVersion, releaseNotes) },
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("publish_announcement_button")
+            ) {
+                Text(if (isSaving) "Publishing..." else "Broadcast Inside App", fontWeight = FontWeight.Bold)
+            }
+            Spacer(modifier = Modifier.height(14.dp))
         }
     }
 }

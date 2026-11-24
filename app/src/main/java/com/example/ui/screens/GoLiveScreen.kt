@@ -20,6 +20,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -80,6 +81,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -370,40 +374,60 @@ fun GoLiveScreen(
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
-                Column(
+                Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(32.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(Color(0xFF0E1525), Color(0xFF1D1226), Color(0xFF0A0D14))
+                            )
+                        )
                 ) {
-                    Box(
+                    Column(
                         modifier = Modifier
-                            .size(84.dp)
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.1f)),
-                        contentAlignment = Alignment.Center
+                            .align(Alignment.Center)
+                            .padding(32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
                     ) {
-                        Icon(
-                            imageVector = Icons.Filled.VideocamOff,
-                            contentDescription = "Camera paused",
-                            tint = Color.White,
-                            modifier = Modifier.size(38.dp)
+                        Box(
+                            modifier = Modifier
+                                .size(96.dp)
+                                .alpha(pulseAlpha)
+                                .clip(CircleShape)
+                                .border(2.5.dp, Color(0xFFD92D4E), CircleShape)
+                                .padding(5.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            LumaAvatar(
+                                username = profile?.username ?: "creator",
+                                avatarKey = profile?.avatarKey ?: "avatar_aria",
+                                avatarData = profile?.avatarData,
+                                avatarUrl = profile?.avatarUrl,
+                                size = 82.dp,
+                                hasActiveStory = isLive
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(14.dp))
+                        LiveStudioEqualizerBars(isActive = !isMicMuted)
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = if (isLive) "Live Studio Stage · Camera Paused" else "Camera Paused",
+                            color = Color.White,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = if (isMicMuted) {
+                                "Audio & camera paused · Live chat & gifts remain active."
+                            } else {
+                                "Audio & live studio stage streaming smoothly to viewers."
+                            },
+                            color = Color.White.copy(alpha = 0.78f),
+                            style = MaterialTheme.typography.bodySmall
                         )
                     }
-                    Spacer(modifier = Modifier.height(14.dp))
-                    Text(
-                        text = "Camera Paused",
-                        color = Color.White,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "Viewers see your paused status while live chat stays open.",
-                        color = Color.White.copy(alpha = 0.72f),
-                        style = MaterialTheme.typography.bodySmall
-                    )
                 }
             }
         } else {
@@ -876,6 +900,51 @@ fun GoLiveScreen(
                     Text("End Live Video", fontWeight = FontWeight.Bold)
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun LiveStudioEqualizerBars(
+    isActive: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val transition = rememberInfiniteTransition(label = "goLiveEq")
+    val phase1 by transition.animateFloat(
+        initialValue = 0.25f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(420), RepeatMode.Reverse),
+        label = "eq1"
+    )
+    val phase2 by transition.animateFloat(
+        initialValue = 0.9f,
+        targetValue = 0.2f,
+        animationSpec = infiniteRepeatable(tween(520), RepeatMode.Reverse),
+        label = "eq2"
+    )
+    val phase3 by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(tween(360), RepeatMode.Reverse),
+        label = "eq3"
+    )
+    val levels = if (isActive) {
+        listOf(phase1, phase2, phase3, (phase1 + phase2) * 0.5f, phase2)
+    } else {
+        listOf(0.18f, 0.18f, 0.18f, 0.18f, 0.18f)
+    }
+    Canvas(modifier = modifier.size(width = 72.dp, height = 28.dp)) {
+        val barWidth = size.width / 9f
+        val gap = barWidth
+        levels.forEachIndexed { idx, level ->
+            val barH = (size.height * level).coerceAtLeast(size.height * 0.18f)
+            val x = idx * (barWidth + gap)
+            drawRoundRect(
+                color = if (isActive) SilkBlueLight else Color.White.copy(alpha = 0.45f),
+                topLeft = Offset(x, (size.height - barH) / 2f),
+                size = Size(barWidth, barH),
+                cornerRadius = CornerRadius(barWidth / 2f, barWidth / 2f)
+            )
         }
     }
 }

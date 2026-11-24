@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.Crop
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Sensors
@@ -90,6 +91,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.MomiGroup
+import com.example.data.model.MomiPage
 import com.example.data.model.UserProfile
 import com.example.ui.components.LumaAvatar
 import com.example.ui.components.MomiMusicAudioPlayer
@@ -115,6 +118,11 @@ private val TrendingHashtagSuggestions = listOf(
 fun CreatePostScreen(
     initialModeStory: Boolean = false,
     creators: List<UserProfile> = emptyList(),
+    pages: List<MomiPage> = emptyList(),
+    groups: List<MomiGroup> = emptyList(),
+    initialPageId: String? = null,
+    initialGroupId: String? = null,
+    initialCommunityName: String = "",
     currentUserId: String = "",
     onClose: () -> Unit,
     onPublishPost: (
@@ -134,6 +142,9 @@ fun CreatePostScreen(
         location: String,
         category: String,
         isReel: Boolean,
+        pageId: String?,
+        groupId: String?,
+        communityName: String,
         onFinished: (Boolean) -> Unit
     ) -> Unit,
     onPublishStory: (
@@ -178,6 +189,9 @@ fun CreatePostScreen(
     var location by remember { mutableStateOf("") }
     var selectedCategory by remember { mutableStateOf("Travel") }
     var shareAsClip by remember { mutableStateOf(false) }
+    var selectedPageId by remember { mutableStateOf(initialPageId?.takeIf { it.isNotBlank() }) }
+    var selectedGroupId by remember { mutableStateOf(initialGroupId?.takeIf { it.isNotBlank() }) }
+    var selectedCommunityName by remember { mutableStateOf(initialCommunityName) }
     var isProcessingMedia by remember { mutableStateOf(false) }
     var isPublishing by remember { mutableStateOf(false) }
 
@@ -416,7 +430,10 @@ fun CreatePostScreen(
                                 finalCaption,
                                 location,
                                 selectedCategory,
-                                shareAsClip
+                                shareAsClip,
+                                selectedPageId,
+                                selectedGroupId,
+                                selectedCommunityName
                             ) { _ ->
                                 isPublishing = false
                             }
@@ -1507,6 +1524,99 @@ fun CreatePostScreen(
                                 fontWeight = FontWeight.SemiBold,
                                 color = if (selected) MaterialTheme.colorScheme.onTertiary else MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                        }
+                    }
+                }
+
+                if (pages.isNotEmpty() || groups.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Groups,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Post Destination",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        item(key = "dest_main_feed") {
+                            val isMain = selectedPageId == null && selectedGroupId == null
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (isMain) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                    .clickable {
+                                        selectedPageId = null
+                                        selectedGroupId = null
+                                        selectedCommunityName = ""
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                                    .testTag("dest_chip_main_feed")
+                            ) {
+                                Text(
+                                    text = "Main Feed",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (isMain) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        items(pages, key = { "dest_page_${it.id}" }) { page ->
+                            val selected = selectedPageId == page.id
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                    .clickable {
+                                        selectedPageId = page.id
+                                        selectedGroupId = null
+                                        selectedCommunityName = page.name
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                            ) {
+                                Text(
+                                    text = "Page · ${page.name}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        items(groups, key = { "dest_grp_${it.id}" }) { group ->
+                            val selected = selectedGroupId == group.id
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                    .clickable {
+                                        selectedPageId = null
+                                        selectedGroupId = group.id
+                                        selectedCommunityName = group.name
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                            ) {
+                                Text(
+                                    text = "Group · ${group.name}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
                 }
