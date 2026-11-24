@@ -57,6 +57,10 @@ object AppearancePrefs {
     private const val KEY_AUTO_SIGN_IN = "stay_signed_in_auto"
     private const val KEY_NOTIFICATION_SOUNDS = "notification_sounds_enabled"
     private const val KEY_NOTIF_PERM_PROMPTED = "notification_permission_prompted"
+    private const val KEY_SUPA_ACCESS_TOKEN = "supabase_access_token"
+    private const val KEY_SUPA_REFRESH_TOKEN = "supabase_refresh_token"
+    private const val KEY_SUPA_USER_ID = "supabase_user_id"
+    private const val KEY_SUPA_EMAIL = "supabase_email"
 
     fun loadThemePreference(context: Context): ThemePreference {
         val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -131,6 +135,41 @@ object AppearancePrefs {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_NOTIF_PERM_PROMPTED, true)
+            .apply()
+    }
+
+    fun saveSupabaseSession(
+        context: Context,
+        accessToken: String,
+        refreshToken: String,
+        userId: String,
+        email: String?
+    ) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_SUPA_ACCESS_TOKEN, accessToken)
+            .putString(KEY_SUPA_REFRESH_TOKEN, refreshToken)
+            .putString(KEY_SUPA_USER_ID, userId)
+            .putString(KEY_SUPA_EMAIL, email)
+            .apply()
+    }
+
+    fun loadSupabaseSessionRaw(context: Context): List<String?>? {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val access = prefs.getString(KEY_SUPA_ACCESS_TOKEN, null)?.takeIf { it.isNotBlank() } ?: return null
+        val userId = prefs.getString(KEY_SUPA_USER_ID, null)?.takeIf { it.isNotBlank() } ?: return null
+        val refresh = prefs.getString(KEY_SUPA_REFRESH_TOKEN, null).orEmpty()
+        val email = prefs.getString(KEY_SUPA_EMAIL, null)
+        return listOf(access, refresh, userId, email)
+    }
+
+    fun clearSupabaseSession(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_SUPA_ACCESS_TOKEN)
+            .remove(KEY_SUPA_REFRESH_TOKEN)
+            .remove(KEY_SUPA_USER_ID)
+            .remove(KEY_SUPA_EMAIL)
             .apply()
     }
 }

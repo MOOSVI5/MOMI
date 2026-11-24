@@ -954,17 +954,75 @@ object MediaAssets {
         }.getOrNull()
     }
 
+    suspend fun readUploadBytesUpToLimit(
+        localPath: String?,
+        maxBytes: Long = 22_000_000L
+    ): ByteArray? = withContext(Dispatchers.IO) {
+        if (localPath.isNullOrBlank()) return@withContext null
+        val file = File(localPath)
+        if (!file.exists() || file.length() <= 0L || file.length() > maxBytes) {
+            return@withContext null
+        }
+        runCatching { file.readBytes() }.getOrNull()
+    }
+
+    suspend fun readCompressedImageBytes(
+        localPath: String?,
+        maxDimPx: Int = 1280,
+        quality: Int = 82
+    ): ByteArray? = withContext(Dispatchers.IO) {
+        if (localPath.isNullOrBlank()) return@withContext null
+        val file = File(localPath)
+        if (!file.exists() || file.length() <= 0L) return@withContext null
+        runCatching {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(localPath, bounds)
+            val w = bounds.outWidth
+            val h = bounds.outHeight
+            if (w <= 0 || h <= 0) return@runCatching file.readBytes().takeIf { it.size <= 3_500_000 }
+            var sample = 1
+            while ((w / sample) > maxDimPx || (h / sample) > maxDimPx) sample *= 2
+            val decoded = BitmapFactory.decodeFile(
+                localPath,
+                BitmapFactory.Options().apply { inSampleSize = sample }
+            ) ?: return@runCatching file.readBytes().takeIf { it.size <= 3_500_000 }
+            val scale = minOf(1f, maxDimPx.toFloat() / maxOf(decoded.width, decoded.height).toFloat())
+            val finalBmp = if (scale < 0.99f) {
+                Bitmap.createScaledBitmap(
+                    decoded,
+                    (decoded.width * scale).toInt().coerceAtLeast(1),
+                    (decoded.height * scale).toInt().coerceAtLeast(1),
+                    true
+                )
+            } else {
+                decoded
+            }
+            val baos = ByteArrayOutputStream()
+            finalBmp.compress(Bitmap.CompressFormat.JPEG, quality, baos)
+            if (finalBmp !== decoded) finalBmp.recycle()
+            decoded.recycle()
+            baos.toByteArray()
+        }.getOrNull()
+    }
+
     fun resolvePlayableVideoUri(
         context: Context,
         mediaId: String,
         localVideoPath: String?,
-        videoData: String?
+        videoData: String?,
+        videoUrl: String? = null
     ): Uri? {
         if (!localVideoPath.isNullOrBlank()) {
             val localFile = File(localVideoPath)
             if (localFile.exists() && localFile.length() > 0L) {
                 return Uri.fromFile(localFile)
             }
+        }
+        val cleanRemoteUrl = videoUrl?.trim().orEmpty()
+        if (cleanRemoteUrl.startsWith("https://", ignoreCase = true) ||
+            cleanRemoteUrl.startsWith("http://", ignoreCase = true)
+        ) {
+            return Uri.parse(cleanRemoteUrl)
         }
         resolveCachedVideoUri(context, mediaId)?.let { return it }
         if (!videoData.isNullOrBlank()) {

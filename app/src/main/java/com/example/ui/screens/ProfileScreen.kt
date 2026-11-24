@@ -148,6 +148,7 @@ fun ProfileScreen(
     onColorSchemeChange: (AppColorScheme) -> Unit,
     onCreateClick: () -> Unit,
     onOpenWallet: () -> Unit = {},
+    onOpenAiAssistant: () -> Unit = {},
     onPostClick: (Post) -> Unit,
     onShareProfile: () -> Unit,
     onUpdateProfile: (
@@ -299,6 +300,7 @@ fun ProfileScreen(
                                     username = creator.username,
                                     avatarKey = creator.avatarKey,
                                     avatarData = creator.avatarData,
+                                    avatarUrl = creator.avatarUrl,
                                     size = 44.dp
                                 )
                                 Spacer(modifier = Modifier.width(12.dp))
@@ -1008,6 +1010,7 @@ fun ProfileScreen(
                                 username = creator.username,
                                 avatarKey = creator.avatarKey,
                                 avatarData = creator.avatarData,
+                                avatarUrl = creator.avatarUrl,
                                 size = 42.dp
                             )
                             Spacer(modifier = Modifier.width(12.dp))
@@ -1086,6 +1089,18 @@ fun ProfileScreen(
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(
+                    onClick = onOpenAiAssistant,
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("ai_assistant_fab")
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.AutoAwesome,
+                        contentDescription = "Ask Momi AI Assistant",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+                IconButton(
                     onClick = { showSettingsSheet = true },
                     modifier = Modifier.minimumInteractiveComponentSize()
                 ) {
@@ -1145,6 +1160,7 @@ fun ProfileScreen(
                                 username = profile?.username ?: "momi",
                                 avatarKey = profile?.avatarKey ?: "avatar_aria",
                                 avatarData = profile?.avatarData,
+                                avatarUrl = profile?.avatarUrl,
                                 size = 76.dp,
                                 hasActiveStory = true,
                                 onClick = { showEditDialog = true }
@@ -1427,75 +1443,101 @@ fun ProfileScreen(
                                         )
                                     }
                                 }
-                                Row(
+                                Column(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(38.dp)
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .background(MaterialTheme.colorScheme.surface)
-                                            .clickable { showTeamRolesSheet = true }
-                                            .testTag("profile_team_roles_chip"),
-                                        contentAlignment = Alignment.Center
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
-                                        Text(
-                                            text = "Team Roles",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold
-                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .heightIn(min = 44.dp)
+                                                .clip(RoundedCornerShape(10.dp))
+                                                .background(MaterialTheme.colorScheme.surface)
+                                                .clickable { showTeamRolesSheet = true }
+                                                .padding(horizontal = 10.dp, vertical = 10.dp)
+                                                .testTag("profile_team_roles_chip"),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = "Team Roles",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                softWrap = false,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .heightIn(min = 44.dp)
+                                                .clip(RoundedCornerShape(10.dp))
+                                                .background(MaterialTheme.colorScheme.surface)
+                                                .clickable { showModerationQueueSheet = true }
+                                                .padding(horizontal = 10.dp, vertical = 10.dp)
+                                                .testTag("profile_safety_queue_chip"),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = if (openReportsCount > 0) "Safety ($openReportsCount)" else "Safety Queue",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                softWrap = false,
+                                                overflow = TextOverflow.Ellipsis,
+                                                color = if (openReportsCount > 0) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface
+                                            )
+                                        }
                                     }
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1.1f)
-                                            .height(38.dp)
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .background(MaterialTheme.colorScheme.surface)
-                                            .clickable { showModerationQueueSheet = true }
-                                            .testTag("profile_safety_queue_chip"),
-                                        contentAlignment = Alignment.Center
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
-                                        Text(
-                                            text = if (openReportsCount > 0) "Safety ($openReportsCount)" else "Safety Queue",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (openReportsCount > 0) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface
-                                        )
-                                    }
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(0.9f)
-                                            .height(38.dp)
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .background(MaterialTheme.colorScheme.surface)
-                                            .clickable { showAdminVerifySheet = true }
-                                            .testTag("profile_verify_chip"),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = "Verify",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1.0f)
-                                            .height(38.dp)
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .background(MaterialTheme.colorScheme.surface)
-                                            .clickable { showPlayReadinessSheet = true }
-                                            .testTag("profile_play_ads_chip"),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = "Play & Ads",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .heightIn(min = 44.dp)
+                                                .clip(RoundedCornerShape(10.dp))
+                                                .background(MaterialTheme.colorScheme.surface)
+                                                .clickable { showAdminVerifySheet = true }
+                                                .padding(horizontal = 10.dp, vertical = 10.dp)
+                                                .testTag("profile_verify_chip"),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = "Verify Users",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                softWrap = false,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .heightIn(min = 44.dp)
+                                                .clip(RoundedCornerShape(10.dp))
+                                                .background(MaterialTheme.colorScheme.surface)
+                                                .clickable { showPlayReadinessSheet = true }
+                                                .padding(horizontal = 10.dp, vertical = 10.dp)
+                                                .testTag("profile_play_ads_chip"),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = "Play & Ads",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                softWrap = false,
+                                                overflow = TextOverflow.Ellipsis,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
                                     }
                                 }
                                 Row(
@@ -1745,6 +1787,7 @@ fun ProfileScreen(
                                     imageKey = post.imageKey,
                                     localImagePath = post.localImagePath,
                                     imageData = post.imageData,
+                                    imageUrl = post.imageUrl,
                                     filterTag = post.filterTag,
                                     contentDescription = "Post thumbnail",
                                     modifier = Modifier.fillMaxSize()
@@ -1903,24 +1946,37 @@ private fun ShowcaseAccountsManagerSheet(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = "Active Starter Feed Footprint",
                                 style = MaterialTheme.typography.labelLarge,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                             Text(
                                 text = "$showcasePostsCount showcase posts · $showcaseStoriesCount active stories",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
-                        Text(
-                            text = "${MomiFirestoreRepository.SHOWCASE_PERSONAS.size} personas",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                        ) {
+                            Text(
+                                text = "${MomiFirestoreRepository.SHOWCASE_PERSONAS.size} personas",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -1931,9 +1987,10 @@ private fun ShowcaseAccountsManagerSheet(
                         onClick = onPublishBurst,
                         enabled = !isBusy,
                         shape = RoundedCornerShape(14.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(48.dp)
+                            .heightIn(min = 48.dp)
                             .testTag("showcase_burst_button")
                     ) {
                         Icon(
@@ -1943,8 +2000,10 @@ private fun ShowcaseAccountsManagerSheet(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (isBusy) "Working..." else "Publish 4 Posts, Comments & Stories",
-                            fontWeight = FontWeight.Bold
+                            text = if (isBusy) "Working..." else "Publish 4 Starter Posts",
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
@@ -1952,9 +2011,10 @@ private fun ShowcaseAccountsManagerSheet(
                         onClick = onEngageRecent,
                         enabled = !isBusy,
                         shape = RoundedCornerShape(14.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(48.dp)
+                            .heightIn(min = 48.dp)
                             .testTag("showcase_engage_button")
                     ) {
                         Icon(
@@ -1965,8 +2025,10 @@ private fun ShowcaseAccountsManagerSheet(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Like & Comment Recent Posts",
-                            fontWeight = FontWeight.Bold
+                            text = "Engage Recent Posts",
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
@@ -1975,12 +2037,13 @@ private fun ShowcaseAccountsManagerSheet(
                             onClick = { confirmRemove = true },
                             enabled = !isBusy,
                             shape = RoundedCornerShape(14.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
                             colors = ButtonDefaults.outlinedButtonColors(
                                 contentColor = MaterialTheme.colorScheme.error
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(48.dp)
+                                .heightIn(min = 48.dp)
                                 .testTag("showcase_remove_button")
                         ) {
                             Icon(
@@ -1989,7 +2052,12 @@ private fun ShowcaseAccountsManagerSheet(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Remove All Starter Accounts", fontWeight = FontWeight.Bold)
+                            Text(
+                                text = "Remove All Starter",
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     } else {
                         Button(
@@ -1999,13 +2067,14 @@ private fun ShowcaseAccountsManagerSheet(
                             },
                             enabled = !isBusy,
                             shape = RoundedCornerShape(14.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MaterialTheme.colorScheme.error,
                                 contentColor = MaterialTheme.colorScheme.onError
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(48.dp)
+                                .heightIn(min = 48.dp)
                                 .testTag("showcase_confirm_remove_button")
                         ) {
                             Icon(
@@ -2014,7 +2083,12 @@ private fun ShowcaseAccountsManagerSheet(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Confirm Delete All Starter Content", fontWeight = FontWeight.Bold)
+                            Text(
+                                text = "Confirm Delete All",
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
                 }

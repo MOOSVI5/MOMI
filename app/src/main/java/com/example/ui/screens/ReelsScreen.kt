@@ -241,15 +241,18 @@ private fun ReelPageItem(
                 mediaId = reel.id,
                 localVideoPath = reel.localVideoPath,
                 videoData = reel.videoData,
+                videoUrl = reel.videoUrl,
                 videoChunksCount = reel.videoChunksCount,
                 videoDurationMs = reel.videoDurationMs,
                 fallbackImageKey = reel.imageKey,
                 fallbackLocalImagePath = reel.localImagePath,
                 fallbackImageData = reel.imageData,
+                fallbackImageUrl = reel.imageUrl,
                 filterTag = reel.filterTag,
                 isPlaying = isActivePage,
                 localAudioPath = reel.localAudioPath,
                 audioData = reel.audioData,
+                audioUrl = reel.audioUrl,
                 audioTitle = reel.audioTitle,
                 initialMuted = false,
                 showMuteButton = true,
@@ -267,11 +270,13 @@ private fun ReelPageItem(
             var clipMuted by remember(reel.id) { mutableStateOf(false) }
             val hasMusic = reel.audioTitle.isNotBlank() ||
                 !reel.localAudioPath.isNullOrBlank() ||
-                !reel.audioData.isNullOrBlank()
+                !reel.audioData.isNullOrBlank() ||
+                !reel.audioUrl.isNullOrBlank()
             PostMediaImage(
                 imageKey = reel.imageKey,
                 localImagePath = reel.localImagePath,
                 imageData = reel.imageData,
+                imageUrl = reel.imageUrl,
                 filterTag = reel.filterTag,
                 contentDescription = "Clip by ${reel.authorUsername}",
                 modifier = Modifier
@@ -283,6 +288,7 @@ private fun ReelPageItem(
                     mediaId = reel.id,
                     localAudioPath = reel.localAudioPath,
                     audioData = reel.audioData,
+                    audioUrl = reel.audioUrl,
                     audioTitle = reel.audioTitle,
                     isPlaying = isActivePage,
                     isMuted = clipMuted
@@ -365,6 +371,7 @@ private fun ReelPageItem(
                             username = reel.authorUsername,
                             avatarKey = reel.authorAvatarKey,
                             avatarData = reel.authorAvatarData,
+                            avatarUrl = reel.authorAvatarUrl,
                             size = 38.dp,
                             hasActiveStory = true
                         )

@@ -27,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AddBusiness
 import androidx.compose.material.icons.filled.AdminPanelSettings
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayCircleFilled
 import androidx.compose.material.icons.filled.Search
@@ -118,6 +119,7 @@ fun MarketplaceScreen(
     onMessageSeller: (String) -> Unit,
     onToggleProductFeatured: (String, Boolean) -> Unit = { _, _ -> },
     onReportProduct: (MarketProduct) -> Unit = {},
+    onOpenAiAssistant: () -> Unit = {},
     monetizationConfig: com.example.data.model.AdMonetizationConfig = com.example.data.model.AdMonetizationConfig(),
     modifier: Modifier = Modifier
 ) {
@@ -250,6 +252,18 @@ fun MarketplaceScreen(
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onOpenAiAssistant,
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("ai_assistant_fab")
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.AutoAwesome,
+                        contentDescription = "Ask Momi AI Assistant",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
                 IconButton(
                     onClick = { searchVisible = !searchVisible },
                     modifier = Modifier.minimumInteractiveComponentSize()
@@ -574,6 +588,7 @@ fun MarketplaceScreen(
                                             imageKey = itemProduct?.imageKey ?: showcaseKeys[idx % showcaseKeys.size],
                                             localImagePath = null,
                                             imageData = itemProduct?.imageData,
+                                            imageUrl = itemProduct?.imageUrl,
                                             filterTag = "NONE",
                                             contentDescription = itemProduct?.title ?: "Featured item",
                                             contentScale = ContentScale.Crop,
@@ -754,6 +769,7 @@ private fun MarketCompactDealCard(
                 imageKey = product.imageKey,
                 localImagePath = null,
                 imageData = product.imageData,
+                imageUrl = product.imageUrl,
                 filterTag = "NONE",
                 contentDescription = product.title,
                 contentScale = ContentScale.Crop,
@@ -821,6 +837,7 @@ private fun MarketLeadProductCard(
                     imageKey = product.imageKey,
                     localImagePath = null,
                     imageData = product.imageData,
+                    imageUrl = product.imageUrl,
                     filterTag = "NONE",
                     contentDescription = product.title,
                     contentScale = ContentScale.Crop,
@@ -939,6 +956,7 @@ private fun MarketGridProductCard(
                 imageKey = product.imageKey,
                 localImagePath = null,
                 imageData = product.imageData,
+                imageUrl = product.imageUrl,
                 filterTag = "NONE",
                 contentDescription = product.title,
                 contentScale = ContentScale.Crop,

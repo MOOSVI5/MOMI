@@ -117,6 +117,7 @@ export function mapFirestoreSnapshotToSupabaseBundle({
     bio: String(p.bio || '').slice(0, 300),
     website: String(p.website || '').slice(0, 200),
     avatar_key: String(p.avatarKey || 'avatar_aria').slice(0, 64),
+    avatar_url: p.avatarUrl || null,
     avatar_data: p.avatarData || null,
     followers_count: Number(p.followersCount || 0),
     following_count: Number(p.followingCount || 0),
@@ -138,9 +139,12 @@ export function mapFirestoreSnapshotToSupabaseBundle({
     author_verified: Boolean(p.authorVerified),
     location: String(p.location || '').slice(0, 120),
     image_key: String(p.imageKey || 'img_post_coastal').slice(0, 64),
+    image_url: p.imageUrl || null,
     image_data: p.imageData || null,
+    extra_image_urls: Array.isArray(p.extraImageUrls) ? p.extraImageUrls : [],
     extra_image_datas: Array.isArray(p.extraImageDatas) ? p.extraImageDatas : [],
     media_type: String(p.mediaType || 'IMAGE'),
+    video_url: p.videoUrl || null,
     video_data: p.videoData || null,
     video_duration_ms: Number(p.videoDurationMs || 0),
     filter_tag: String(p.filterTag || 'NONE'),
@@ -154,6 +158,7 @@ export function mapFirestoreSnapshotToSupabaseBundle({
     category: String(p.category || 'For You').slice(0, 40),
     is_reel: Boolean(p.isReel),
     audio_title: String(p.audioTitle || '').slice(0, 120),
+    audio_url: p.audioUrl || null,
     audio_data: p.audioData || null,
     is_boosted: Boolean(p.isBoosted),
     boost_tier: String(p.boostTier || ''),
@@ -169,11 +174,14 @@ export function mapFirestoreSnapshotToSupabaseBundle({
     username: String(s.username || 'momi.creator').slice(0, 50),
     avatar_key: String(s.avatarKey || 'avatar_aria').slice(0, 64),
     image_key: String(s.imageKey || 'img_post_coastal').slice(0, 64),
+    image_url: s.imageUrl || null,
     image_data: s.imageData || null,
     media_type: String(s.mediaType || 'IMAGE'),
+    video_url: s.videoUrl || null,
     video_data: s.videoData || null,
     video_duration_ms: Number(s.videoDurationMs || 0),
     audio_title: String(s.audioTitle || '').slice(0, 120),
+    audio_url: s.audioUrl || null,
     audio_data: s.audioData || null,
     caption: String(s.caption || '').slice(0, 300),
     created_at: toIsoTimestamp(s.createdAt)
@@ -187,6 +195,7 @@ export function mapFirestoreSnapshotToSupabaseBundle({
     category: String(m.category || 'Collectibles').slice(0, 40),
     location: String(m.location || '').slice(0, 120),
     avatar_key: String(m.avatarKey || 'avatar_aria').slice(0, 64),
+    avatar_url: m.avatarUrl || null,
     avatar_data: m.avatarData || null,
     is_verified: Boolean(m.isVerified),
     verified_by_email: m.verifiedByEmail || null,
@@ -207,8 +216,11 @@ export function mapFirestoreSnapshotToSupabaseBundle({
     discount_percent: Math.min(95, Math.max(0, Number(p.discountPercent || 0))),
     free_shipping: Boolean(p.freeShipping ?? true),
     image_key: String(p.imageKey || 'img_post_coastal').slice(0, 64),
+    image_url: p.imageUrl || null,
     image_data: p.imageData || null,
+    extra_image_urls: Array.isArray(p.extraImageUrls) ? p.extraImageUrls : [],
     extra_image_datas: Array.isArray(p.extraImageDatas) ? p.extraImageDatas : [],
+    video_url: p.videoUrl || null,
     video_data: p.videoData || null,
     video_duration_ms: Number(p.videoDurationMs || 0),
     stock_count: Math.max(0, Number(p.stockCount || 0)),
@@ -291,14 +303,14 @@ export async function checkSupabaseHealth(cfg = SUPABASE_WEB_CONFIG, fetchImpl =
         configured: true,
         connected: true,
         latencyMs,
-        message: `Connected to Supabase (${latencyMs} ms) — schema & RLS verified.`
+        message: `Connected to Supabase (${latencyMs} ms) — primary PostgreSQL & Storage active.`
       };
     }
     let hint = `Supabase responded HTTP ${res.status}.`;
     if (res.status === 404) {
-      hint = 'Supabase reachable, but app_config table missing — run supabase/schema.sql in SQL Editor.';
+      hint = 'Supabase reachable, but app_config table missing — run supabase/enable_sync.sql in SQL Editor.';
     } else if (res.status === 401 || res.status === 403) {
-      hint = 'Supabase rejected key or RLS policy — check publishable key & run supabase/schema.sql.';
+      hint = 'Supabase rejected key or RLS policy — run supabase/enable_sync.sql in SQL Editor.';
     }
     return {
       configured: true,
@@ -312,6 +324,33 @@ export async function checkSupabaseHealth(cfg = SUPABASE_WEB_CONFIG, fetchImpl =
       connected: false,
       message: `Network check failed: ${err?.message || 'unknown error'}`
     };
+  }
+}
+
+export async function selectSupabaseTable(
+  cfg = SUPABASE_WEB_CONFIG,
+  table,
+  queryString = 'select=*&limit=50',
+  fetchImpl = globalThis.fetch
+) {
+  const baseUrl = normalizeSupabaseUrl(cfg?.url);
+  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) return [];
+  if (!SUPABASE_SCHEMA_TABLES.includes(table)) return [];
+  const anonKey = String(cfg.anonKey).trim();
+  const cleanQuery = String(queryString || 'select=*').replace(/^\?/, '');
+  try {
+    const res = await fetchImpl(`${baseUrl}/rest/v1/${table}?${cleanQuery}`, {
+      method: 'GET',
+      headers: {
+        ...buildSupabaseAuthHeaders(anonKey),
+        Accept: 'application/json'
+      }
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
   }
 }
 
@@ -353,6 +392,84 @@ export async function upsertSupabaseTable(
     throw new Error(`Upsert ${table} failed (HTTP ${res.status})${detail ? `: ${detail.slice(0, 140)}` : ''}`);
   }
   return rows.length;
+}
+
+export async function patchSupabaseRows(
+  cfg = SUPABASE_WEB_CONFIG,
+  table,
+  filterQuery = '',
+  patch = {},
+  fetchImpl = globalThis.fetch
+) {
+  const baseUrl = normalizeSupabaseUrl(cfg?.url);
+  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey) || !filterQuery) return false;
+  if (!SUPABASE_SCHEMA_TABLES.includes(table)) return false;
+  const anonKey = String(cfg.anonKey).trim();
+  const cleanFilter = String(filterQuery).replace(/^\?/, '');
+  const res = await fetchImpl(`${baseUrl}/rest/v1/${table}?${cleanFilter}`, {
+    method: 'PATCH',
+    headers: {
+      ...buildSupabaseAuthHeaders(anonKey),
+      'Content-Type': 'application/json',
+      Prefer: 'return=minimal'
+    },
+    body: JSON.stringify(patch)
+  });
+  return res.ok;
+}
+
+export async function deleteSupabaseRows(
+  cfg = SUPABASE_WEB_CONFIG,
+  table,
+  filterQuery = '',
+  fetchImpl = globalThis.fetch
+) {
+  const baseUrl = normalizeSupabaseUrl(cfg?.url);
+  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey) || !filterQuery) return false;
+  if (!SUPABASE_SCHEMA_TABLES.includes(table)) return false;
+  const anonKey = String(cfg.anonKey).trim();
+  const cleanFilter = String(filterQuery).replace(/^\?/, '');
+  const res = await fetchImpl(`${baseUrl}/rest/v1/${table}?${cleanFilter}`, {
+    method: 'DELETE',
+    headers: {
+      ...buildSupabaseAuthHeaders(anonKey),
+      Prefer: 'return=minimal'
+    }
+  });
+  return res.ok;
+}
+
+export async function uploadWebFileToStorage(
+  cfg = SUPABASE_WEB_CONFIG,
+  bucket = 'momi-media',
+  objectPath = '',
+  blobOrFile,
+  contentType = 'application/octet-stream',
+  fetchImpl = globalThis.fetch
+) {
+  const baseUrl = normalizeSupabaseUrl(cfg?.url);
+  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) return null;
+  if (!SUPABASE_STORAGE_BUCKETS.includes(bucket) || !objectPath || !blobOrFile) return null;
+  const anonKey = String(cfg.anonKey).trim();
+  const safePath = String(objectPath)
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/');
+  try {
+    const res = await fetchImpl(`${baseUrl}/storage/v1/object/${bucket}/${safePath}`, {
+      method: 'POST',
+      headers: {
+        ...buildSupabaseAuthHeaders(anonKey),
+        'Content-Type': contentType || blobOrFile.type || 'application/octet-stream',
+        'x-upsert': 'true'
+      },
+      body: blobOrFile
+    });
+    if (!res.ok) return null;
+    return `${baseUrl}/storage/v1/object/public/${bucket}/${safePath}`;
+  } catch {
+    return null;
+  }
 }
 
 export async function syncBundleToSupabase(
@@ -412,11 +529,13 @@ export async function fetchSupabaseFeed(cfg = SUPABASE_WEB_CONFIG, fetchImpl = g
     Accept: 'application/json'
   };
   try {
-    const [postsRes, storiesRes, profilesRes, productsRes, configRes] = await Promise.all([
-      fetchImpl(`${baseUrl}/rest/v1/posts?select=*&order=created_at.desc&limit=50`, { headers }),
-      fetchImpl(`${baseUrl}/rest/v1/stories?select=*&order=created_at.desc&limit=20`, { headers }),
-      fetchImpl(`${baseUrl}/rest/v1/profiles?select=*&limit=50`, { headers }),
-      fetchImpl(`${baseUrl}/rest/v1/market_products?select=*&order=created_at.desc&limit=30`, { headers }),
+    const [postsRes, storiesRes, profilesRes, productsRes, merchantsRes, liveRes, configRes] = await Promise.all([
+      fetchImpl(`${baseUrl}/rest/v1/posts?select=*&order=created_at.desc&limit=120`, { headers }),
+      fetchImpl(`${baseUrl}/rest/v1/stories?select=*&order=created_at.desc&limit=50`, { headers }),
+      fetchImpl(`${baseUrl}/rest/v1/profiles?select=*&limit=100`, { headers }),
+      fetchImpl(`${baseUrl}/rest/v1/market_products?select=*&order=created_at.desc&limit=80`, { headers }),
+      fetchImpl(`${baseUrl}/rest/v1/merchants?select=*&limit=60`, { headers }),
+      fetchImpl(`${baseUrl}/rest/v1/live_streams?select=*&is_live=eq.true&order=updated_at.desc&limit=30`, { headers }),
       fetchImpl(`${baseUrl}/rest/v1/app_config?select=*&id=eq.monetization&limit=1`, { headers })
     ]);
     if (!postsRes.ok && !profilesRes.ok) return null;
@@ -424,11 +543,52 @@ export async function fetchSupabaseFeed(cfg = SUPABASE_WEB_CONFIG, fetchImpl = g
     const stories = storiesRes.ok ? await storiesRes.json() : [];
     const profiles = profilesRes.ok ? await profilesRes.json() : [];
     const products = productsRes.ok ? await productsRes.json() : [];
+    const merchants = merchantsRes.ok ? await merchantsRes.json() : [];
+    const liveStreams = liveRes.ok ? await liveRes.json() : [];
     const configs = configRes.ok ? await configRes.json() : [];
-    return { posts, stories, profiles, products, appConfig: configs[0] || null };
+    return {
+      posts,
+      stories,
+      profiles,
+      products,
+      merchants,
+      liveStreams,
+      appConfig: configs[0] || null
+    };
   } catch {
     return null;
   }
+}
+
+export async function fetchUserSupabaseWorkspace(cfg = SUPABASE_WEB_CONFIG, uid = '', fetchImpl = globalThis.fetch) {
+  if (!uid || !isSupabaseClientReady(cfg)) return null;
+  const eUid = encodeURIComponent(uid);
+  const [
+    follows,
+    interactions,
+    notifications,
+    threads,
+    wallets,
+    transactions,
+    orders
+  ] = await Promise.all([
+    selectSupabaseTable(cfg, 'follows', `select=*&follower_uid=eq.${eUid}`, fetchImpl),
+    selectSupabaseTable(cfg, 'user_interactions', `select=*&user_id=eq.${eUid}`, fetchImpl),
+    selectSupabaseTable(cfg, 'notifications', `select=*&user_id=eq.${eUid}&order=created_at.desc&limit=50`, fetchImpl),
+    selectSupabaseTable(cfg, 'threads', `select=*&participant_uids=cs.{${eUid}}&order=updated_at.desc&limit=40`, fetchImpl),
+    selectSupabaseTable(cfg, 'wallets', `select=*&user_id=eq.${eUid}&limit=1`, fetchImpl),
+    selectSupabaseTable(cfg, 'credit_transactions', `select=*&or=(sender_uid.eq.${eUid},recipient_uid.eq.${eUid})&order=created_at.desc&limit=40`, fetchImpl),
+    selectSupabaseTable(cfg, 'market_orders', `select=*&or=(buyer_uid.eq.${eUid},seller_uid.eq.${eUid})&order=created_at.desc&limit=30`, fetchImpl)
+  ]);
+  return {
+    follows,
+    interactions,
+    notifications,
+    threads,
+    wallet: wallets[0] || null,
+    transactions,
+    orders
+  };
 }
 
 export function mapSupabasePostToWeb(row = {}) {
@@ -441,9 +601,12 @@ export function mapSupabasePostToWeb(row = {}) {
     authorVerified: Boolean(row.author_verified),
     location: String(row.location || ''),
     imageKey: String(row.image_key || 'img_post_coastal'),
+    imageUrl: row.image_url || null,
     imageData: row.image_data || null,
+    extraImageUrls: Array.isArray(row.extra_image_urls) ? row.extra_image_urls : [],
     extraImageDatas: Array.isArray(row.extra_image_datas) ? row.extra_image_datas : [],
     mediaType: String(row.media_type || 'IMAGE'),
+    videoUrl: row.video_url || null,
     videoData: row.video_data || null,
     videoDurationMs: Number(row.video_duration_ms || 0),
     filterTag: String(row.filter_tag || 'NONE'),
@@ -457,6 +620,7 @@ export function mapSupabasePostToWeb(row = {}) {
     category: String(row.category || 'For You'),
     isReel: Boolean(row.is_reel),
     audioTitle: String(row.audio_title || ''),
+    audioUrl: row.audio_url || null,
     audioData: row.audio_data || null,
     isBoosted: Boolean(row.is_boosted),
     boostTier: String(row.boost_tier || ''),
@@ -475,11 +639,14 @@ export function mapSupabaseStoryToWeb(row = {}) {
     username: String(row.username || 'momi.creator'),
     avatarKey: String(row.avatar_key || 'avatar_aria'),
     imageKey: String(row.image_key || 'img_post_coastal'),
+    imageUrl: row.image_url || null,
     imageData: row.image_data || null,
     mediaType: String(row.media_type || 'IMAGE'),
+    videoUrl: row.video_url || null,
     videoData: row.video_data || null,
     videoDurationMs: Number(row.video_duration_ms || 0),
     audioTitle: String(row.audio_title || ''),
+    audioUrl: row.audio_url || null,
     audioData: row.audio_data || null,
     caption: String(row.caption || ''),
     createdAt: row.created_at ? { seconds: Math.floor(new Date(row.created_at).getTime() / 1000) } : null
@@ -500,13 +667,32 @@ export function mapSupabaseProductToWeb(row = {}) {
     discountPercent: Number(row.discount_percent || 0),
     freeShipping: Boolean(row.free_shipping ?? true),
     imageKey: String(row.image_key || 'img_post_coastal'),
+    imageUrl: row.image_url || null,
     imageData: row.image_data || null,
+    extraImageUrls: Array.isArray(row.extra_image_urls) ? row.extra_image_urls : [],
     extraImageDatas: Array.isArray(row.extra_image_datas) ? row.extra_image_datas : [],
+    videoUrl: row.video_url || null,
     videoData: row.video_data || null,
     videoDurationMs: Number(row.video_duration_ms || 0),
     stockCount: Number(row.stock_count || 0),
     isFeatured: Boolean(row.is_featured),
     createdAt: row.created_at ? { seconds: Math.floor(new Date(row.created_at).getTime() / 1000) } : null
+  };
+}
+
+export function mapSupabaseMerchantToWeb(row = {}) {
+  return {
+    userId: String(row.user_id || ''),
+    ownerUsername: String(row.owner_username || 'momi.seller'),
+    storeName: String(row.store_name || 'Momi Store'),
+    tagline: String(row.tagline || ''),
+    category: String(row.category || 'Collectibles'),
+    location: String(row.location || ''),
+    avatarKey: String(row.avatar_key || 'avatar_aria'),
+    avatarUrl: row.avatar_url || null,
+    avatarData: row.avatar_data || null,
+    isVerified: Boolean(row.is_verified),
+    totalSales: Number(row.total_sales || 0)
   };
 }
 
@@ -541,6 +727,7 @@ export function mapSupabaseProfileToWeb(row = {}) {
     bio: String(row.bio || ''),
     website: String(row.website || ''),
     avatarKey: String(row.avatar_key || 'avatar_aria'),
+    avatarUrl: row.avatar_url || null,
     avatarData: row.avatar_data || null,
     followersCount: Number(row.followers_count || 0),
     followingCount: Number(row.following_count || 0),
@@ -551,3 +738,129 @@ export function mapSupabaseProfileToWeb(row = {}) {
   };
 }
 
+export function mapSupabaseLiveStreamToWeb(row = {}) {
+  return {
+    id: String(row.id || row.user_id || ''),
+    userId: String(row.user_id || row.id || ''),
+    username: String(row.username || 'momi.creator'),
+    displayName: String(row.display_name || row.username || 'Creator'),
+    avatarKey: String(row.avatar_key || 'avatar_aria'),
+    authorVerified: Boolean(row.author_verified),
+    title: String(row.title || 'Live Broadcast'),
+    category: String(row.category || 'Live'),
+    isLive: Boolean(row.is_live),
+    viewerCount: Number(row.viewer_count || 0),
+    likesCount: Number(row.likes_count || 0),
+    giftsCredits: Number(row.gifts_credits || 0),
+    updatedAtMs: row.updated_at ? new Date(row.updated_at).getTime() : Date.now()
+  };
+}
+
+export function mapSupabaseThreadToWeb(row = {}) {
+  return {
+    id: String(row.id || ''),
+    participantUids: Array.isArray(row.participant_uids) ? row.participant_uids : [],
+    userAId: String(row.user_a_id || ''),
+    userAUsername: String(row.user_a_username || ''),
+    userADisplayName: String(row.user_a_display_name || ''),
+    userAAvatarKey: String(row.user_a_avatar_key || 'avatar_aria'),
+    userBId: String(row.user_b_id || ''),
+    userBUsername: String(row.user_b_username || ''),
+    userBDisplayName: String(row.user_b_display_name || ''),
+    userBAvatarKey: String(row.user_b_avatar_key || 'avatar_aria'),
+    lastMessage: String(row.last_message || ''),
+    lastSenderUid: String(row.last_sender_uid || ''),
+    unreadUid: String(row.unread_uid || ''),
+    timeLabel: String(row.time_label || 'Now'),
+    unreadCount: Number(row.unread_count || 0),
+    isOnline: Boolean(row.is_online)
+  };
+}
+
+export function mapSupabaseChatMessageToWeb(row = {}) {
+  return {
+    id: String(row.id || ''),
+    threadId: String(row.thread_id || ''),
+    participantUids: Array.isArray(row.participant_uids) ? row.participant_uids : [],
+    senderUid: String(row.sender_uid || ''),
+    senderUsername: String(row.sender_username || ''),
+    text: String(row.text || ''),
+    messageType: String(row.message_type || 'TEXT'),
+    mediaUrl: row.media_url || null,
+    imageData: row.image_data || null,
+    videoData: row.video_data || null,
+    videoDurationMs: Number(row.video_duration_ms || 0),
+    audioData: row.audio_data || null,
+    audioDurationMs: Number(row.audio_duration_ms || 0),
+    createdAt: row.created_at
+  };
+}
+
+export function mapSupabaseNotificationToWeb(row = {}) {
+  return {
+    id: String(row.id || ''),
+    userId: String(row.user_id || ''),
+    actorUid: String(row.actor_uid || ''),
+    actorUsername: String(row.actor_username || ''),
+    actorAvatarKey: String(row.actor_avatar_key || 'avatar_aria'),
+    message: String(row.message || ''),
+    timeLabel: String(row.time_label || 'Just now'),
+    section: String(row.section || 'Today'),
+    previewImageKey: row.preview_image_key || null,
+    isFollowAction: Boolean(row.is_follow_action),
+    isFollowingBack: Boolean(row.is_following_back),
+    isUnread: Boolean(row.is_unread)
+  };
+}
+
+export function mapSupabaseWalletToWeb(row = {}) {
+  return {
+    userId: String(row.user_id || ''),
+    balance: Number(row.balance || 0),
+    totalEarned: Number(row.total_earned || 0),
+    totalSpent: Number(row.total_spent || 0),
+    totalPurchased: Number(row.total_purchased || 0),
+    accountTier: String(row.account_tier || 'STANDARD'),
+    verificationTier: String(row.verification_tier || 'NONE'),
+    unlockedPerks: Array.isArray(row.unlocked_perks) ? row.unlocked_perks : [],
+    lastTxId: row.last_tx_id || null
+  };
+}
+
+export function mapSupabaseTransactionToWeb(row = {}) {
+  return {
+    txId: String(row.tx_id || ''),
+    type: String(row.type || ''),
+    senderUid: String(row.sender_uid || ''),
+    senderUsername: String(row.sender_username || ''),
+    recipientUid: String(row.recipient_uid || ''),
+    recipientUsername: String(row.recipient_username || ''),
+    creditsAmount: Number(row.credits_amount || 0),
+    priceUsd: Number(row.price_usd || 0),
+    paymentMethod: String(row.payment_method || ''),
+    giftKey: row.gift_key || null,
+    giftName: row.gift_name || null,
+    streamId: row.stream_id || null,
+    perkKey: row.perk_key || null,
+    postId: row.post_id || null,
+    recipientClaimed: Boolean(row.recipient_claimed ?? true),
+    status: String(row.status || 'COMPLETED')
+  };
+}
+
+export function mapSupabaseOrderToWeb(row = {}) {
+  return {
+    id: String(row.id || ''),
+    buyerUid: String(row.buyer_uid || ''),
+    buyerUsername: String(row.buyer_username || ''),
+    sellerUid: String(row.seller_uid || ''),
+    sellerStoreName: String(row.seller_store_name || ''),
+    productId: String(row.product_id || ''),
+    productTitle: String(row.product_title || ''),
+    productImageKey: String(row.product_image_key || 'img_post_coastal'),
+    productImageData: row.product_image_data || null,
+    priceUsd: Number(row.price_usd || 0),
+    shippingAddress: String(row.shipping_address || ''),
+    status: String(row.status || 'PLACED')
+  };
+}

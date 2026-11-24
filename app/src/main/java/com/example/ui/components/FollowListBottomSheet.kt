@@ -226,6 +226,7 @@ fun FollowListBottomSheet(
                                 username = user.username,
                                 avatarKey = user.avatarKey,
                                 avatarData = user.avatarData,
+                                avatarUrl = user.avatarUrl,
                                 size = 44.dp,
                                 hasActiveStory = true
                             )

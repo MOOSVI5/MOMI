@@ -35,6 +35,7 @@ fun LumaAvatar(
     avatarKey: String,
     size: Dp = 40.dp,
     avatarData: String? = null,
+    avatarUrl: String? = null,
     hasActiveStory: Boolean = false,
     isSeenStory: Boolean = false,
     showAddBadge: Boolean = false,
@@ -45,6 +46,9 @@ fun LumaAvatar(
     val initials = MediaAssets.initialsForUsername(username)
     val brandGradient = LocalMomiBrandGradient.current
     val decodedBytes = remember(avatarData) { MediaAssets.decodeBase64ToBytes(avatarData) }
+    val cleanAvatarUrl = remember(avatarUrl) {
+        avatarUrl?.trim()?.takeIf { it.startsWith("https://", true) || it.startsWith("http://", true) }
+    }
 
     val ringModifier = when {
         hasActiveStory && !isSeenStory -> Modifier
@@ -80,7 +84,14 @@ fun LumaAvatar(
                 .background(Brush.linearGradient(listOf(startColor, endColor))),
             contentAlignment = Alignment.Center
         ) {
-            if (decodedBytes != null) {
+            if (cleanAvatarUrl != null) {
+                AsyncImage(
+                    model = cleanAvatarUrl,
+                    contentDescription = "$username profile picture",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else if (decodedBytes != null) {
                 AsyncImage(
                     model = decodedBytes,
                     contentDescription = "$username profile picture",

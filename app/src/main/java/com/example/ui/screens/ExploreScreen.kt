@@ -24,6 +24,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.Favorite
@@ -82,6 +83,7 @@ fun ExploreScreen(
     onCreatorClick: (UserProfile) -> Unit = {},
     onFollowCreator: (UserProfile, Boolean) -> Unit = { _, _ -> },
     onMessageCreator: (UserProfile) -> Unit = {},
+    onOpenAiAssistant: () -> Unit = {},
     monetizationConfig: AdMonetizationConfig = AdMonetizationConfig(),
     modifier: Modifier = Modifier
 ) {
@@ -118,65 +120,86 @@ fun ExploreScreen(
             .background(MaterialTheme.colorScheme.background)
             .statusBarsPadding()
     ) {
-        // Search Bar — uses heightIn(min = 48.dp) so text never clips on large system fonts
+        // Search Bar + Header AI Assistant trigger
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp)
-                .heightIn(min = 48.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Icon(
-                imageVector = Icons.Filled.Search,
-                contentDescription = "Search",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp)
-            )
-            Box(
+            Row(
                 modifier = Modifier
                     .weight(1f)
-                    .padding(horizontal = 10.dp),
-                contentAlignment = Alignment.CenterStart
+                    .heightIn(min = 48.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                if (searchQuery.isEmpty()) {
-                    Text(
-                        text = "Search creators, tags, or places",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                BasicTextField(
-                    value = searchQuery,
-                    onValueChange = onSearchQueryChange,
-                    singleLine = true,
-                    textStyle = MaterialTheme.typography.bodyMedium.copy(
-                        color = MaterialTheme.colorScheme.onSurface
-                    ),
-                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("explore_search_input")
+                Icon(
+                    imageVector = Icons.Filled.Search,
+                    contentDescription = "Search",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
                 )
-            }
-            if (searchQuery.isNotEmpty()) {
-                IconButton(
-                    onClick = { onSearchQueryChange("") },
+                Box(
                     modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .size(32.dp)
+                        .weight(1f)
+                        .padding(horizontal = 10.dp),
+                    contentAlignment = Alignment.CenterStart
                 ) {
-                    Icon(
-                        imageVector = Icons.Filled.Close,
-                        contentDescription = "Clear search",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp)
+                    if (searchQuery.isEmpty()) {
+                        Text(
+                            text = "Search creators, tags, or places",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    BasicTextField(
+                        value = searchQuery,
+                        onValueChange = onSearchQueryChange,
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(
+                            color = MaterialTheme.colorScheme.onSurface
+                        ),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("explore_search_input")
                     )
                 }
+                if (searchQuery.isNotEmpty()) {
+                    IconButton(
+                        onClick = { onSearchQueryChange("") },
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = "Clear search",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+            IconButton(
+                onClick = onOpenAiAssistant,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f))
+                    .testTag("ai_assistant_fab")
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.AutoAwesome,
+                    contentDescription = "Momi AI Assistant",
+                    tint = MaterialTheme.colorScheme.primary
+                )
             }
         }
 
@@ -333,6 +356,7 @@ fun ExploreScreen(
                                             username = creator.username,
                                             avatarKey = creator.avatarKey,
                                             avatarData = creator.avatarData,
+                                            avatarUrl = creator.avatarUrl,
                                             size = 56.dp,
                                             hasActiveStory = true
                                         )
@@ -387,6 +411,7 @@ fun ExploreScreen(
                                 username = creator.username,
                                 avatarKey = creator.avatarKey,
                                 avatarData = creator.avatarData,
+                                avatarUrl = creator.avatarUrl,
                                 size = 46.dp,
                                 hasActiveStory = true
                             )
@@ -580,6 +605,7 @@ private fun ExploreGridTile(
             imageKey = post.imageKey,
             localImagePath = post.localImagePath,
             imageData = post.imageData,
+            imageUrl = post.imageUrl,
             filterTag = post.filterTag,
             contentDescription = "Explore post by ${post.authorUsername}",
             modifier = Modifier.fillMaxSize()
@@ -656,6 +682,7 @@ private fun ExploreNoteCard(
                     imageKey = post.imageKey,
                     localImagePath = post.localImagePath,
                     imageData = post.imageData,
+                    imageUrl = post.imageUrl,
                     filterTag = post.filterTag,
                     contentDescription = "Explore note by ${post.authorUsername}",
                     modifier = Modifier.fillMaxSize()
@@ -755,6 +782,7 @@ private fun ExploreNoteCard(
                             username = post.authorUsername,
                             avatarKey = post.authorAvatarKey,
                             avatarData = post.authorAvatarData,
+                            avatarUrl = post.authorAvatarUrl,
                             size = 20.dp
                         )
                         Spacer(modifier = Modifier.width(6.dp))

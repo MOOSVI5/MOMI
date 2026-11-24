@@ -151,6 +151,7 @@ fun PostCard(
                     username = post.authorUsername,
                     avatarKey = post.authorAvatarKey,
                     avatarData = post.authorAvatarData,
+                    avatarUrl = post.authorAvatarUrl,
                     size = 40.dp,
                     hasActiveStory = true,
                     isSeenStory = false
@@ -344,13 +345,23 @@ fun PostCard(
 
         // Edge-to-Edge Media with Single-Tap Open Post, Double-Tap Coral Heart, Carousel Pager, ExoPlayer, Audio for Photo+Music
         val mediaAspectRatio = post.numericAspectRatio
-        val imageFrames = remember(post.id, post.imageKey, post.localImagePath, post.imageData, post.localExtraImagePaths, post.extraImageDatas) {
+        val imageFrames = remember(
+            post.id,
+            post.imageKey,
+            post.localImagePath,
+            post.imageData,
+            post.imageUrl,
+            post.localExtraImagePaths,
+            post.extraImageDatas,
+            post.extraImageUrls
+        ) {
             post.allImageFrames
         }
         val hasPhotoMusic = !post.isVideoPost && (
             post.audioTitle.isNotBlank() ||
                 !post.localAudioPath.isNullOrBlank() ||
-                !post.audioData.isNullOrBlank()
+                !post.audioData.isNullOrBlank() ||
+                !post.audioUrl.isNullOrBlank()
             )
         var localPhotoMuted by remember(post.id) { mutableStateOf(true) }
         val isPhotoMuted = externalMuted ?: localPhotoMuted
@@ -360,6 +371,7 @@ fun PostCard(
                 mediaId = post.id,
                 localAudioPath = post.localAudioPath,
                 audioData = post.audioData,
+                audioUrl = post.audioUrl,
                 audioTitle = post.audioTitle,
                 isPlaying = isPlaybackActive,
                 isMuted = isPhotoMuted
@@ -402,15 +414,18 @@ fun PostCard(
                     mediaId = post.id,
                     localVideoPath = post.localVideoPath,
                     videoData = post.videoData,
+                    videoUrl = post.videoUrl,
                     videoChunksCount = post.videoChunksCount,
                     videoDurationMs = post.videoDurationMs,
                     fallbackImageKey = post.imageKey,
                     fallbackLocalImagePath = post.localImagePath,
                     fallbackImageData = post.imageData,
+                    fallbackImageUrl = post.imageUrl,
                     filterTag = post.filterTag,
                     isPlaying = isPlaybackActive,
                     localAudioPath = post.localAudioPath,
                     audioData = post.audioData,
+                    audioUrl = post.audioUrl,
                     audioTitle = post.audioTitle,
                     initialMuted = true,
                     externalMuted = externalMuted,
@@ -436,6 +451,7 @@ fun PostCard(
                             imageKey = frame.imageKey,
                             localImagePath = frame.localImagePath,
                             imageData = frame.imageData,
+                            imageUrl = frame.imageUrl,
                             filterTag = post.filterTag,
                             contentDescription = "Post ${page + 1} by ${post.authorUsername}",
                             modifier = Modifier.fillMaxSize()
@@ -484,6 +500,7 @@ fun PostCard(
                     imageKey = post.imageKey,
                     localImagePath = post.localImagePath,
                     imageData = post.imageData,
+                    imageUrl = post.imageUrl,
                     filterTag = post.filterTag,
                     contentDescription = "Post by ${post.authorUsername}",
                     modifier = Modifier.fillMaxWidth().aspectRatio(mediaAspectRatio)

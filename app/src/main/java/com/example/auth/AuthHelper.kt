@@ -10,6 +10,7 @@ import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
 import com.example.R
 import com.example.data.supabase.MomiSupabaseClient
+import com.example.data.supabase.SupabaseAuthSession
 import com.example.ui.theme.AppearancePrefs
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
@@ -46,6 +47,16 @@ fun attemptAutoSignIn(
     onUnauthenticated: () -> Unit,
     scope: CoroutineScope
 ) {
+    AppearancePrefs.loadSupabaseSessionRaw(context)?.let { parts ->
+        if (MomiSupabaseClient.activeSession == null) {
+            MomiSupabaseClient.activeSession = SupabaseAuthSession(
+                accessToken = parts[0].orEmpty(),
+                refreshToken = parts[1].orEmpty(),
+                userId = parts[2].orEmpty(),
+                email = parts[3]
+            )
+        }
+    }
     if (Firebase.auth.currentUser != null) {
         AppearancePrefs.setAutoSignInEnabled(context, true)
         onAuthSuccess()
@@ -82,6 +93,9 @@ fun attemptAutoSignIn(
             AppearancePrefs.setAutoSignInEnabled(context, true)
             scope.launch {
                 runCatching { MomiSupabaseClient().signInWithGoogleIdToken(googleIdToken) }
+                    .getOrNull()?.getOrNull()?.let { sess ->
+                        AppearancePrefs.saveSupabaseSession(context, sess.accessToken, sess.refreshToken, sess.userId, sess.email)
+                    }
             }
             return true
         }
@@ -145,6 +159,9 @@ fun onGoogleSignInClicked(
                 AppearancePrefs.setAutoSignInEnabled(context, true)
                 scope.launch {
                     runCatching { MomiSupabaseClient().signInWithGoogleIdToken(googleIdToken) }
+                        .getOrNull()?.getOrNull()?.let { sess ->
+                            AppearancePrefs.saveSupabaseSession(context, sess.accessToken, sess.refreshToken, sess.userId, sess.email)
+                        }
                 }
                 onAuthSuccess()
             } else {
@@ -174,6 +191,7 @@ fun signOut(
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to clear credential state: ${e.message}")
             } finally {
+                AppearancePrefs.clearSupabaseSession(context)
                 MomiSupabaseClient.activeSession = null
                 Firebase.auth.signOut()
                 onSignOutComplete()

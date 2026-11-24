@@ -240,12 +240,12 @@ fun LiveViewerScreen(
             )
         }
 
-        // Center Stage (shown when broadcast ended, camera paused, or connecting first frame)
+        // Center Stage (interactive Live Studio Stage when no camera frame is active, or ended view)
         if (!showingVideoFrame) {
             Column(
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .padding(horizontal = 28.dp),
+                    .padding(horizontal = 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 if (stream == null || !stream.isLive) {
@@ -269,8 +269,8 @@ fun LiveViewerScreen(
                     val isCameraPaused = liveFrame?.cameraEnabled == false
                     Box(
                         modifier = Modifier
-                            .size(116.dp)
-                            .alpha(if (isCameraPaused) 0.9f else pulseAlpha)
+                            .size(118.dp)
+                            .alpha(if (isCameraPaused) 0.92f else pulseAlpha)
                             .clip(CircleShape)
                             .border(3.dp, Color(0xFFD92D4E), CircleShape)
                             .padding(6.dp),
@@ -280,17 +280,42 @@ fun LiveViewerScreen(
                             username = stream.username,
                             avatarKey = stream.avatarKey,
                             avatarData = stream.avatarData,
-                            size = 100.dp
+                            avatarUrl = stream.avatarUrl,
+                            size = 102.dp,
+                            hasActiveStory = true
                         )
                     }
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFFD92D4E))
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .alpha(pulseAlpha)
+                                .clip(CircleShape)
+                                .background(Color.White)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "LIVE STUDIO STAGE",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        text = stream.title,
+                        text = stream.title.ifBlank { "@${stream.username} Live" },
                         color = Color.White,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
                     Row(
                         modifier = Modifier
                             .clip(RoundedCornerShape(12.dp))
@@ -307,13 +332,63 @@ fun LiveViewerScreen(
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = if (isCameraPaused) {
-                                "Broadcaster camera paused · Chat & gifts active"
+                                "Broadcaster camera paused · Chat & gifts live"
                             } else {
-                                "Connecting live camera feed..."
+                                "Live Audio & Studio Stage Active"
                             },
-                            color = Color.White.copy(alpha = 0.88f),
+                            color = Color.White.copy(alpha = 0.9f),
                             style = MaterialTheme.typography.labelMedium
                         )
+                    }
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(Color(0xFFD92D4E).copy(alpha = 0.9f))
+                                .clickable(onClick = onSendHeart)
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Favorite,
+                                contentDescription = "Send heart",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Send Heart",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(Color(0xFFF59E0B).copy(alpha = 0.92f))
+                                .clickable { showGiftSheet = true }
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.CardGiftcard,
+                                contentDescription = "Send gift",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Send Gift",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }
@@ -344,6 +419,7 @@ fun LiveViewerScreen(
                             username = stream.username,
                             avatarKey = stream.avatarKey,
                             avatarData = stream.avatarData,
+                            avatarUrl = stream.avatarUrl,
                             size = 40.dp,
                             hasActiveStory = stream.isLive
                         )

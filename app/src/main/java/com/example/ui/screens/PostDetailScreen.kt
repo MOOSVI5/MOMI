@@ -244,6 +244,7 @@ private fun RelatedExploreNoteCard(
                     imageKey = post.imageKey,
                     localImagePath = post.localImagePath,
                     imageData = post.imageData,
+                    imageUrl = post.imageUrl,
                     filterTag = post.filterTag,
                     contentDescription = "Related post by ${post.authorUsername}",
                     modifier = Modifier.fillMaxSize()
@@ -309,6 +310,7 @@ private fun RelatedExploreNoteCard(
                             username = post.authorUsername,
                             avatarKey = post.authorAvatarKey,
                             avatarData = post.authorAvatarData,
+                            avatarUrl = post.authorAvatarUrl,
                             size = 20.dp
                         )
                         Spacer(modifier = Modifier.width(6.dp))

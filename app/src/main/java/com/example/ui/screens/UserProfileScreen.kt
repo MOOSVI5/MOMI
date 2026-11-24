@@ -112,6 +112,7 @@ fun UserProfileScreen(
                         username = fallbackUsername,
                         displayName = samplePost?.authorDisplayName ?: fallbackUsername,
                         avatarKey = samplePost?.authorAvatarKey ?: MediaAssets.avatarKeyForUid(targetUserId),
+                        avatarUrl = samplePost?.authorAvatarUrl,
                         avatarData = samplePost?.authorAvatarData,
                         followersCount = follows.count { it.targetUid == targetUserId }.toLong(),
                         followingCount = follows.count { it.followerUid == targetUserId }.toLong(),
@@ -248,6 +249,7 @@ fun UserProfileScreen(
                             username = resolvedProfile.username,
                             avatarKey = resolvedProfile.avatarKey,
                             avatarData = resolvedProfile.avatarData,
+                            avatarUrl = resolvedProfile.avatarUrl,
                             size = 86.dp,
                             hasActiveStory = userPosts.isNotEmpty()
                         )
@@ -467,6 +469,7 @@ fun UserProfileScreen(
                                     imageKey = post.imageKey,
                                     localImagePath = post.localImagePath,
                                     imageData = post.imageData,
+                                    imageUrl = post.imageUrl,
                                     filterTag = post.filterTag,
                                     contentDescription = "Post by ${post.authorUsername}",
                                     modifier = Modifier.fillMaxSize()

@@ -46,8 +46,8 @@ android {
     val admobMrecUnitId = resolveEnv("ADMOB_MREC_UNIT_ID", "ca-app-pub-3940256099942544/6300978111")
     val admobInterstitialUnitId = resolveEnv("ADMOB_INTERSTITIAL_UNIT_ID", "ca-app-pub-3940256099942544/1033173712")
     val monetagDirectLinkUrl = resolveEnv("MONETAG_DIRECT_LINK_URL", "")
-    val supabaseUrl = resolveEnv("SUPABASE_URL", "")
-    val supabaseAnonKey = resolveEnv("SUPABASE_ANON_KEY", "")
+    val supabaseUrl = resolveEnv("SUPABASE_URL", "https://qotuvugkapaspowhbsbf.supabase.co")
+    val supabaseAnonKey = resolveEnv("SUPABASE_ANON_KEY", "sb_publishable_LbrQBbU_4qH18qjopmNwIg_ALsMhlln")
 
     manifestPlaceholders["startIoAppId"] = startIoAppId
     manifestPlaceholders["admobAppId"] = admobAppId

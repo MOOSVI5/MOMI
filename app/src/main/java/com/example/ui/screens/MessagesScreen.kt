@@ -137,11 +137,12 @@ fun MessagesScreen(
         }.collectAsStateWithLifecycle(initialValue = emptyList())
 
         val peerUid = openThread.participantUids.firstOrNull { it != currentUserId }
-        val peerAvatarData = allCreators.firstOrNull { it.userId == peerUid }?.avatarData
+        val peerProfile = allCreators.firstOrNull { it.userId == peerUid }
         ChatThreadView(
             currentUserId = currentUserId,
             thread = openThread,
-            peerAvatarData = peerAvatarData,
+            peerAvatarData = peerProfile?.avatarData,
+            peerAvatarUrl = peerProfile?.avatarUrl,
             messages = messages,
             isSendingMedia = isSendingMedia,
             onSend = { text -> onSendMessage(openThread, text) },
@@ -234,6 +235,7 @@ fun MessagesScreen(
                                         username = profile?.username ?: "you",
                                         avatarKey = profile?.avatarKey ?: "avatar_aria",
                                         avatarData = profile?.avatarData,
+                                        avatarUrl = profile?.avatarUrl,
                                         size = 58.dp
                                     )
                                     Spacer(modifier = Modifier.height(4.dp))
@@ -277,6 +279,7 @@ fun MessagesScreen(
                                             username = creator.username,
                                             avatarKey = creator.avatarKey,
                                             avatarData = creator.avatarData,
+                                            avatarUrl = creator.avatarUrl,
                                             size = 58.dp
                                         )
                                         Box(
@@ -351,7 +354,9 @@ fun MessagesScreen(
                         val peerDisplayName = thread.peerDisplayNameFor(currentUserId)
                         val peerAvatarKey = thread.peerAvatarKeyFor(currentUserId)
                         val peerUid = thread.participantUids.firstOrNull { it != currentUserId }
-                        val peerAvatarData = allCreators.firstOrNull { it.userId == peerUid }?.avatarData
+                        val peerProfile = allCreators.firstOrNull { it.userId == peerUid }
+                        val peerAvatarData = peerProfile?.avatarData
+                        val peerAvatarUrl = peerProfile?.avatarUrl
                         val isUnread = thread.isUnreadFor(currentUserId)
 
                         Row(
@@ -370,6 +375,7 @@ fun MessagesScreen(
                                     username = peerUsername,
                                     avatarKey = peerAvatarKey,
                                     avatarData = peerAvatarData,
+                                    avatarUrl = peerAvatarUrl,
                                     size = 54.dp,
                                     hasActiveStory = true
                                 )
@@ -424,6 +430,7 @@ private fun ChatThreadView(
     currentUserId: String,
     thread: MessageThread,
     peerAvatarData: String?,
+    peerAvatarUrl: String? = null,
     messages: List<ChatMessage>,
     isSendingMedia: Boolean,
     onSend: (String) -> Unit,
@@ -613,6 +620,7 @@ private fun ChatThreadView(
                 username = peerUsername,
                 avatarKey = peerAvatarKey,
                 avatarData = peerAvatarData,
+                avatarUrl = peerAvatarUrl,
                 size = 36.dp
             )
             Spacer(modifier = Modifier.width(10.dp))
@@ -701,6 +709,7 @@ private fun ChatThreadView(
                                         imageKey = "img_post_coastal",
                                         localImagePath = null,
                                         imageData = msg.imageData,
+                                        imageUrl = msg.mediaUrl,
                                         filterTag = "NONE",
                                         contentDescription = "Photo message",
                                         modifier = Modifier
@@ -736,6 +745,7 @@ private fun ChatThreadView(
                                             mediaId = "chat_${msg.id}",
                                             localVideoPath = null,
                                             videoData = msg.videoData,
+                                            videoUrl = msg.mediaUrl,
                                             videoDurationMs = msg.videoDurationMs,
                                             fallbackImageKey = "img_post_coastal",
                                             fallbackLocalImagePath = null,
@@ -777,11 +787,12 @@ private fun ChatThreadView(
                             }
                             "AUDIO" -> {
                                 val isPlayingAudio = playingAudioMsgId == msg.id
-                                if (isPlayingAudio && !msg.audioData.isNullOrBlank()) {
+                                if (isPlayingAudio && (!msg.audioData.isNullOrBlank() || !msg.mediaUrl.isNullOrBlank())) {
                                     MomiMusicAudioPlayer(
                                         mediaId = "voice_${msg.id}",
                                         localAudioPath = null,
                                         audioData = msg.audioData,
+                                        audioUrl = msg.mediaUrl,
                                         audioTitle = "Voice note",
                                         isPlaying = true,
                                         isMuted = false

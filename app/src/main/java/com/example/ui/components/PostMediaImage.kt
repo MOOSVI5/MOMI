@@ -19,16 +19,32 @@ fun PostMediaImage(
     contentDescription: String,
     modifier: Modifier = Modifier,
     imageData: String? = null,
+    imageUrl: String? = null,
     contentScale: ContentScale = ContentScale.Crop,
     customColorFilter: ColorFilter? = null
 ) {
     val colorFilter = customColorFilter ?: MediaAssets.colorFilterForTag(filterTag)
     val decodedBytes = remember(imageData) { MediaAssets.decodeBase64ToBytes(imageData) }
+    val cleanUrl = remember(imageUrl) {
+        imageUrl?.trim()?.takeIf { it.startsWith("https://", true) || it.startsWith("http://", true) }
+    }
+    val fallbackPainter = painterResource(id = MediaAssets.drawableForKey(imageKey))
 
     when {
         !localImagePath.isNullOrBlank() && File(localImagePath).exists() -> {
             AsyncImage(
                 model = File(localImagePath),
+                contentDescription = contentDescription,
+                modifier = modifier,
+                contentScale = contentScale,
+                colorFilter = colorFilter
+            )
+        }
+        cleanUrl != null -> {
+            AsyncImage(
+                model = cleanUrl,
+                placeholder = fallbackPainter,
+                error = fallbackPainter,
                 contentDescription = contentDescription,
                 modifier = modifier,
                 contentScale = contentScale,
@@ -46,7 +62,7 @@ fun PostMediaImage(
         }
         else -> {
             Image(
-                painter = painterResource(id = MediaAssets.drawableForKey(imageKey)),
+                painter = fallbackPainter,
                 contentDescription = contentDescription,
                 modifier = modifier,
                 contentScale = contentScale,

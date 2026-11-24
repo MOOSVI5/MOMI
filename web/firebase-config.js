@@ -134,13 +134,26 @@ export function extractMentions(caption = '', extraMentions = []) {
   return [...new Set(combined)].slice(0, 10);
 }
 
-export function resolveImageSrc({ imageData, imageKey, fallbackKey = 'img_post_coastal' } = {}) {
+export function resolveImageSrc({ imageUrl, avatarUrl, imageData, imageKey, fallbackKey = 'img_post_coastal' } = {}) {
+  const remoteUrl = [imageUrl, avatarUrl].find((u) => typeof u === 'string' && /^https?:\/\//i.test(u.trim()));
+  if (remoteUrl) return remoteUrl.trim();
   if (typeof imageData === 'string' && imageData.trim().length > 0) {
     const clean = imageData.trim();
-    if (clean.startsWith('data:')) return clean;
+    if (clean.startsWith('data:') || /^https?:\/\//i.test(clean)) return clean;
     return `data:image/jpeg;base64,${clean}`;
   }
   return PRESET_IMAGE_MAP[imageKey] || PRESET_IMAGE_MAP[fallbackKey];
+}
+
+export function resolveVideoSrc(item = {}) {
+  const url = [item?.videoUrl, item?.mediaUrl].find((u) => typeof u === 'string' && /^https?:\/\//i.test(u.trim()));
+  if (url) return url.trim();
+  if (typeof item?.videoData === 'string' && item.videoData.trim().length > 0) {
+    const clean = item.videoData.trim();
+    if (clean.startsWith('data:')) return clean;
+    return `data:video/mp4;base64,${clean}`;
+  }
+  return '';
 }
 
 export function initialsForUsername(username = 'momi') {

@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Send
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sensors
@@ -83,6 +84,7 @@ fun HomeScreen(
     unreadMessageCount: Int,
     onOpenSearch: () -> Unit = {},
     onOpenMarketplace: () -> Unit = {},
+    onOpenAiAssistant: () -> Unit = {},
     onOpenNotifications: () -> Unit,
     onOpenMessages: () -> Unit,
     onOpenStory: (Story) -> Unit,
@@ -136,7 +138,8 @@ fun HomeScreen(
                 it.isVideoPost ||
                     it.audioTitle.isNotBlank() ||
                     !it.localAudioPath.isNullOrBlank() ||
-                    !it.audioData.isNullOrBlank()
+                    !it.audioData.isNullOrBlank() ||
+                    !it.audioUrl.isNullOrBlank()
             }
             .map { it.id }
             .toSet()
@@ -269,6 +272,20 @@ fun HomeScreen(
                     )
                 }
 
+                IconButton(
+                    onClick = onOpenAiAssistant,
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("ai_assistant_fab")
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.AutoAwesome,
+                        contentDescription = "Momi AI Assistant",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(23.dp)
+                    )
+                }
+
                 // Notifications / Activity Heart
                 Box(contentAlignment = Alignment.TopEnd) {
                     IconButton(
@@ -359,6 +376,7 @@ fun HomeScreen(
                                 username = profile?.username ?: "aria.studio",
                                 avatarKey = profile?.avatarKey ?: "avatar_aria",
                                 avatarData = profile?.avatarData,
+                                avatarUrl = profile?.avatarUrl,
                                 size = 70.dp,
                                 hasActiveStory = ownStory != null,
                                 isSeenStory = ownStory?.isSeen ?: false,
@@ -437,6 +455,7 @@ fun HomeScreen(
                                     username = stream.username,
                                     avatarKey = stream.avatarKey,
                                     avatarData = stream.avatarData,
+                                    avatarUrl = stream.avatarUrl,
                                     size = 70.dp,
                                     hasActiveStory = true,
                                     isSeenStory = false,
@@ -478,6 +497,7 @@ fun HomeScreen(
                                 username = story.username,
                                 avatarKey = story.avatarKey,
                                 avatarData = story.avatarData,
+                                avatarUrl = story.avatarUrl,
                                 size = 70.dp,
                                 hasActiveStory = true,
                                 isSeenStory = story.isSeen,
@@ -647,6 +667,7 @@ private fun SuggestedCreatorsSection(
                         username = creator.username,
                         avatarKey = creator.avatarKey,
                         avatarData = creator.avatarData,
+                        avatarUrl = creator.avatarUrl,
                         size = 64.dp,
                         hasActiveStory = true
                     )

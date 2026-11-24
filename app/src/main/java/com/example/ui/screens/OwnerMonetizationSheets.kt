@@ -463,7 +463,10 @@ fun OwnerMonetizationAndPlaySheet(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Icon(
                                     imageVector = Icons.Filled.CloudSync,
                                     contentDescription = null,
@@ -472,11 +475,14 @@ fun OwnerMonetizationAndPlaySheet(
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = "Supabase Migration (Phase 1)",
+                                    text = "Supabase Cloud Sync",
                                     style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
+                            Spacer(modifier = Modifier.width(8.dp))
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
                                 color = if (isSupabaseConfigured) {
@@ -486,17 +492,19 @@ fun OwnerMonetizationAndPlaySheet(
                                 }
                             ) {
                                 Text(
-                                    text = if (isSupabaseConfigured) "Configured ✓" else "Waiting for Secrets",
+                                    text = if (isSupabaseConfigured) "Configured ✓" else "Needs Secrets",
                                     color = if (isSupabaseConfigured) Color(0xFF16A34A) else MaterialTheme.colorScheme.onSurfaceVariant,
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    softWrap = false,
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                                 )
                             }
                         }
 
                         Text(
-                            text = supabaseStatus ?: "Add SUPABASE_URL & SUPABASE_ANON_KEY in AI Studio Secrets after running supabase/schema.sql. Firebase stays live during migration.",
+                            text = supabaseStatus ?: "Supabase is Momi's primary cloud database & media storage. Use Test Sync or Sync Data anytime.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -509,15 +517,17 @@ fun OwnerMonetizationAndPlaySheet(
                                 enabled = !isSupabaseBusy,
                                 onClick = onTestSupabaseConnection,
                                 shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
                                 modifier = Modifier
                                     .weight(1f)
                                     .heightIn(min = 48.dp)
                                     .testTag("supabase_test_connection_btn")
                             ) {
                                 Text(
-                                    text = if (isSupabaseBusy) "Checking..." else "Test Connection",
+                                    text = if (isSupabaseBusy) "Testing..." else "Test Sync",
                                     fontWeight = FontWeight.Bold,
                                     maxLines = 1,
+                                    softWrap = false,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
@@ -525,6 +535,7 @@ fun OwnerMonetizationAndPlaySheet(
                                 enabled = isSupabaseConfigured && !isSupabaseBusy,
                                 onClick = onSyncSupabaseSnapshot,
                                 shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
                                 modifier = Modifier
                                     .weight(1f)
                                     .heightIn(min = 48.dp)
@@ -534,6 +545,7 @@ fun OwnerMonetizationAndPlaySheet(
                                     text = "Sync Data",
                                     fontWeight = FontWeight.Bold,
                                     maxLines = 1,
+                                    softWrap = false,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
@@ -796,6 +808,7 @@ fun OwnerPerksAndGrantsSheet(
                                         username = creator.username,
                                         avatarKey = creator.avatarKey,
                                         avatarData = creator.avatarData,
+                                        avatarUrl = creator.avatarUrl,
                                         size = 40.dp
                                     )
                                     Spacer(modifier = Modifier.width(10.dp))

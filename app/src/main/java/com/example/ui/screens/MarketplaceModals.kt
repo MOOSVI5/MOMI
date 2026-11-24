@@ -106,7 +106,7 @@ internal fun MarketProductDetailSheet(
     var shippingAddress by remember { mutableStateOf("") }
     var isOrdering by remember { mutableStateOf(false) }
 
-    val frames = remember(product.id, product.imageData, product.extraImageDatas) {
+    val frames = remember(product.id, product.imageData, product.imageUrl, product.extraImageDatas, product.extraImageUrls) {
         product.allProductFrames
     }
     val totalSlides = frames.size + if (product.isVideoProduct) 1 else 0
@@ -182,12 +182,14 @@ internal fun MarketProductDetailSheet(
                             mediaId = product.id,
                             localVideoPath = null,
                             videoData = product.videoData,
+                            videoUrl = product.videoUrl,
                             videoChunksCount = product.videoChunksCount,
                             remoteCollection = "marketProducts",
                             videoDurationMs = product.videoDurationMs,
                             fallbackImageKey = product.imageKey,
                             fallbackLocalImagePath = null,
                             fallbackImageData = product.imageData,
+                            fallbackImageUrl = product.imageUrl,
                             filterTag = "NONE",
                             isPlaying = pagerState.currentPage == page,
                             initialMuted = false,
@@ -202,6 +204,7 @@ internal fun MarketProductDetailSheet(
                             imageKey = frame.imageKey,
                             localImagePath = null,
                             imageData = frame.imageData,
+                            imageUrl = frame.imageUrl,
                             filterTag = "NONE",
                             contentDescription = product.title,
                             contentScale = ContentScale.Crop,
@@ -942,6 +945,7 @@ internal fun AdminVerifyMerchantsSheet(
                                 username = merchant.ownerUsername,
                                 avatarKey = merchant.avatarKey,
                                 avatarData = merchant.avatarData,
+                                avatarUrl = merchant.avatarUrl,
                                 size = 42.dp
                             )
                             Spacer(modifier = Modifier.width(12.dp))

@@ -161,16 +161,19 @@ fun StoryViewerScreen(
                 mediaId = currentStory.id,
                 localVideoPath = currentStory.localVideoPath,
                 videoData = currentStory.videoData,
+                videoUrl = currentStory.videoUrl,
                 videoChunksCount = currentStory.videoChunksCount,
                 remoteCollection = "stories",
                 videoDurationMs = currentStory.videoDurationMs,
                 fallbackImageKey = currentStory.imageKey,
                 fallbackLocalImagePath = currentStory.localImagePath,
                 fallbackImageData = currentStory.imageData,
+                fallbackImageUrl = currentStory.imageUrl,
                 filterTag = "NONE",
                 isPlaying = !isPaused,
                 localAudioPath = currentStory.localAudioPath,
                 audioData = currentStory.audioData,
+                audioUrl = currentStory.audioUrl,
                 audioTitle = currentStory.audioTitle,
                 initialMuted = false,
                 externalMuted = storyMuted,
@@ -187,18 +190,21 @@ fun StoryViewerScreen(
                 imageKey = currentStory.imageKey,
                 localImagePath = currentStory.localImagePath,
                 imageData = currentStory.imageData,
+                imageUrl = currentStory.imageUrl,
                 filterTag = "NONE",
                 contentDescription = "Story by ${currentStory.username}",
                 modifier = Modifier.fillMaxSize()
             )
             val hasMusic = currentStory.audioTitle.isNotBlank() ||
                 !currentStory.localAudioPath.isNullOrBlank() ||
-                !currentStory.audioData.isNullOrBlank()
+                !currentStory.audioData.isNullOrBlank() ||
+                !currentStory.audioUrl.isNullOrBlank()
             if (hasMusic) {
                 MomiMusicAudioPlayer(
                     mediaId = currentStory.id,
                     localAudioPath = currentStory.localAudioPath,
                     audioData = currentStory.audioData,
+                    audioUrl = currentStory.audioUrl,
                     audioTitle = currentStory.audioTitle,
                     isPlaying = !isPaused,
                     isMuted = storyMuted
@@ -279,6 +285,7 @@ fun StoryViewerScreen(
                         username = currentStory.username,
                         avatarKey = currentStory.avatarKey,
                         avatarData = currentStory.avatarData,
+                        avatarUrl = currentStory.avatarUrl,
                         size = 34.dp
                     )
                     Spacer(modifier = Modifier.width(10.dp))

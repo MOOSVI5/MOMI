@@ -92,18 +92,20 @@ fun MomiMusicAudioPlayer(
     audioData: String?,
     audioTitle: String,
     isPlaying: Boolean,
-    isMuted: Boolean
+    isMuted: Boolean,
+    audioUrl: String? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    val playableMusicUri = remember(mediaId, localAudioPath, audioData, audioTitle) {
+    val playableMusicUri = remember(mediaId, localAudioPath, audioData, audioTitle, audioUrl) {
         StudioMusicCatalog.resolvePlayableMusicUri(
             context = context,
             localAudioPath = localAudioPath,
             audioTitle = audioTitle,
             audioData = audioData,
-            cacheKey = mediaId
+            cacheKey = mediaId,
+            audioUrl = audioUrl
         )
     }
 
@@ -160,9 +162,12 @@ fun MomiVideoPlayer(
     filterTag: String,
     isPlaying: Boolean,
     modifier: Modifier = Modifier,
+    videoUrl: String? = null,
+    fallbackImageUrl: String? = null,
     videoChunksCount: Long = 0L,
     remoteCollection: String = "posts",
     localAudioPath: String? = null,
+    audioUrl: String? = null,
     audioData: String? = null,
     audioTitle: String = "",
     muteOriginalVideoWhenMusicAdded: Boolean = true,
@@ -183,13 +188,14 @@ fun MomiVideoPlayer(
     val remoteVideoResolver = LocalRemoteVideoResolver.current
 
     var retryNonce by remember(mediaId) { mutableIntStateOf(0) }
-    var playableUri by remember(overrideVideoUri, mediaId, localVideoPath, videoData) {
+    var playableUri by remember(overrideVideoUri, mediaId, localVideoPath, videoData, videoUrl) {
         mutableStateOf(
             overrideVideoUri ?: MediaAssets.resolvePlayableVideoUri(
                 context = context,
                 mediaId = mediaId,
                 localVideoPath = localVideoPath,
-                videoData = videoData
+                videoData = videoData,
+                videoUrl = videoUrl
             )
         )
     }
@@ -202,6 +208,7 @@ fun MomiVideoPlayer(
         mediaId,
         localVideoPath,
         videoData,
+        videoUrl,
         videoChunksCount,
         remoteCollection,
         remoteVideoResolver,
@@ -218,7 +225,8 @@ fun MomiVideoPlayer(
                 context = context,
                 mediaId = mediaId,
                 localVideoPath = localVideoPath,
-                videoData = videoData
+                videoData = videoData,
+                videoUrl = videoUrl
             )
         }
         if (fastUri != null) {
@@ -236,13 +244,14 @@ fun MomiVideoPlayer(
         }
     }
 
-    val playableMusicUri = remember(mediaId, localAudioPath, audioData, audioTitle) {
+    val playableMusicUri = remember(mediaId, localAudioPath, audioData, audioTitle, audioUrl) {
         StudioMusicCatalog.resolvePlayableMusicUri(
             context = context,
             localAudioPath = localAudioPath,
             audioTitle = audioTitle,
             audioData = audioData,
-            cacheKey = mediaId
+            cacheKey = mediaId,
+            audioUrl = audioUrl
         )
     }
 
@@ -257,6 +266,16 @@ fun MomiVideoPlayer(
         if (!isPlaying) {
             userPaused = false
             isBuffering = false
+        }
+    }
+
+    LaunchedEffect(isBuffering, isPlaying, userPaused, playableUri) {
+        if (isPlaying && isBuffering && !userPaused && playableUri != null) {
+            delay(10_000L)
+            if (isBuffering && isPlaying && !userPaused) {
+                isBuffering = false
+                playbackFailed = true
+            }
         }
     }
 
@@ -280,6 +299,7 @@ fun MomiVideoPlayer(
             imageKey = fallbackImageKey,
             localImagePath = fallbackLocalImagePath,
             imageData = fallbackImageData,
+            imageUrl = fallbackImageUrl,
             filterTag = filterTag,
             contentDescription = "Video preview",
             modifier = Modifier

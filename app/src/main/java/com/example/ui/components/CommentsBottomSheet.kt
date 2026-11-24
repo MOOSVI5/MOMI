@@ -134,6 +134,7 @@ fun CommentsBottomSheet(
                                 username = comment.authorUsername,
                                 avatarKey = comment.authorAvatarKey,
                                 avatarData = comment.authorAvatarData,
+                                avatarUrl = comment.authorAvatarUrl,
                                 size = 36.dp,
                                 onClick = {
                                     if (comment.userId.isNotBlank()) {
@@ -211,6 +212,7 @@ fun CommentsBottomSheet(
                     username = currentUser?.username ?: "momi",
                     avatarKey = currentUser?.avatarKey ?: "avatar_aria",
                     avatarData = currentUser?.avatarData,
+                    avatarUrl = currentUser?.avatarUrl,
                     size = 34.dp
                 )
                 Spacer(modifier = Modifier.width(10.dp))

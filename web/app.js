@@ -14,26 +14,17 @@ import {
   collection,
   deleteDoc,
   doc,
-  getDoc,
-  getDocs,
-  increment,
   initializeFirestore,
-  limit,
-  onSnapshot,
-  orderBy,
-  query,
   serverTimestamp,
-  setDoc,
-  updateDoc,
-  where,
-  writeBatch
+  setDoc
 } from 'https://www.gstatic.com/firebasejs/11.6.0/firebase-firestore.js';
 import {
   ADMIN_OWNER_EMAIL,
   ANDROID_APK_URL,
   ANDROID_RELEASES_URL,
   ASPECT_RATIOS,
-  COLOR_SCHEMES,
+  buildPostShareUrl,
+  buildProfileShareUrl,
   DEFAULT_MONETIZATION_CONFIG,
   escapeHtml,
   EXPLORE_CATEGORIES,
@@ -48,9 +39,13 @@ import {
   MAX_IMAGE_BASE64_CHARS,
   normalizeMonetagDirectUrl,
   normalizeUsername,
+  parseDeepLinkFromLocation,
   POST_BOOST_OPTIONS,
   PRESET_IMAGE_OPTIONS,
+  renderRichCaptionHtml,
   resolveGamezopUrl,
+  resolveImageSrc,
+  resolveVideoSrc,
   sanitizeGamezopPublisherId,
   sanitizeMonetagZoneId,
   SHOWCASE_COMMENTS,
@@ -58,29 +53,38 @@ import {
   sortFeedWithBoostPriority,
   SUPABASE_WEB_CONFIG,
   tierForTotalPurchased,
+  TRENDING_HASHTAGS,
   verificationTierForPerks,
   WEB_APP_URL,
   WEB_PERK_CATALOG,
-  buildPostShareUrl,
-  buildProfileShareUrl,
-  parseDeepLinkFromLocation,
-  renderRichCaptionHtml,
-  resolveImageSrc,
-  TRENDING_HASHTAGS,
   aspectRatioCss
 } from './firebase-config.js';
 import {
-  SUPABASE_SCHEMA_TABLES,
   checkSupabaseHealth,
+  deleteSupabaseRows,
   fetchSupabaseFeed,
+  fetchUserSupabaseWorkspace,
   isSupabaseClientReady,
   mapFirestoreSnapshotToSupabaseBundle,
+  mapSupabaseChatMessageToWeb,
   mapSupabaseConfigToWeb,
+  mapSupabaseLiveStreamToWeb,
+  mapSupabaseMerchantToWeb,
+  mapSupabaseNotificationToWeb,
+  mapSupabaseOrderToWeb,
   mapSupabasePostToWeb,
   mapSupabaseProductToWeb,
   mapSupabaseProfileToWeb,
   mapSupabaseStoryToWeb,
-  syncBundleToSupabase
+  mapSupabaseThreadToWeb,
+  mapSupabaseTransactionToWeb,
+  mapSupabaseWalletToWeb,
+  patchSupabaseRows,
+  selectSupabaseTable,
+  SUPABASE_SCHEMA_TABLES,
+  syncBundleToSupabase,
+  uploadWebFileToStorage,
+  upsertSupabaseTable
 } from './supabase-client.js';
 import {
   assembleVideoChunksToObjectUrl,
@@ -92,6 +96,7 @@ import {
 
 const firebaseApp = initializeApp(FIREBASE_WEB_CONFIG);
 const auth = getAuth(firebaseApp);
+// Secondary best-effort Firestore handle (Supabase is primary; experimentalAutoDetectLongPolling kept for fallback telemetry)
 const db = initializeFirestore(
   firebaseApp,
   { experimentalAutoDetectLongPolling: true },
@@ -124,6 +129,7 @@ const state = {
   bookmarkIds: new Set(),
   seenStoryIds: new Set(),
   followingUids: new Set(),
+  merchants: [],
   products: [],
   orders: [],
   transactions: [],
@@ -132,6 +138,7 @@ const state = {
   exploreQuery: '',
   exploreCategory: 'For You',
   exploreLayout: 'rednote',
+  marketCategory: 'All',
   profileTab: 'posts',
   ownerConsoleTab: 'monetizers',
   viewedProfileUid: null,
@@ -140,11 +147,12 @@ const state = {
   themeMode: localStorage.getItem('momi_theme') || 'dark',
   scheme: localStorage.getItem('momi_scheme') || 'MIDNIGHT_SUNSET',
   soundEnabled: localStorage.getItem('momi_sound') !== 'false',
-  unsubs: [],
-  msgUnsubs: null,
-  liveUnsubs: [],
+  pollTimers: [],
+  livePollTimer: null,
   liveTimer: null,
   liveStreamMedia: null,
+  liveCameraOn: true,
+  liveMicOn: true,
   seenNotifIds: new Set(),
   seenMsgKeys: new Set(),
   initialSnapshotsLoaded: { notifs: false, threads: false },
@@ -154,12 +162,17 @@ const state = {
   adminBusy: false,
   supabaseBusy: false,
   supabaseStatus: isSupabaseClientReady(SUPABASE_WEB_CONFIG)
-    ? 'Supabase web config ready — test connection after running supabase/schema.sql.'
-    : 'Waiting for SUPABASE_WEB_CONFIG (url + anonKey). Firebase stays live.',
+    ? 'Supabase primary PostgreSQL & Storage active.'
+    : 'Waiting for SUPABASE_WEB_CONFIG (url + anonKey).',
   pendingDeepLink: parseDeepLinkFromLocation(window.location.search, window.location.hash),
   studio: {
+    mode: 'POST', // 'POST' | 'CLIP' | 'STORY'
     imageKey: 'img_post_coastal',
     uploadedSrc: null,
+    uploadedFile: null,
+    uploadedVideoUrl: null,
+    uploadedVideoFile: null,
+    videoDurationMs: 0,
     filterTag: 'NONE',
     aspectRatio: '1:1',
     rotationDeg: 0,
@@ -186,8 +199,10 @@ const authErrorBox = document.getElementById('authErrorBox');
 const modalBackdrop = document.getElementById('modalBackdrop');
 const modalContent = document.getElementById('modalContent');
 const toastBar = document.getElementById('toastBar');
+const mobileDrawerBackdrop = document.getElementById('mobileDrawerBackdrop');
 
-document.getElementById('currentHostnameLabel').textContent = window.location.hostname || 'localhost';
+const hostnameEl = document.getElementById('currentHostnameLabel');
+if (hostnameEl) hostnameEl.textContent = window.location.hostname || 'localhost';
 
 const pendingLinkNotice = document.getElementById('pendingLinkNotice');
 if (pendingLinkNotice) {
@@ -207,48 +222,80 @@ if ('serviceWorker' in navigator) {
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();
   deferredPwaPrompt = e;
-  document.getElementById('installPwaBtn').classList.remove('hidden');
+  document.getElementById('installPwaBtn')?.classList.remove('hidden');
 });
 
-document.getElementById('installPwaBtn').addEventListener('click', async () => {
+document.getElementById('installPwaBtn')?.addEventListener('click', async () => {
   if (!deferredPwaPrompt) return;
   deferredPwaPrompt.prompt();
   await deferredPwaPrompt.userChoice;
   deferredPwaPrompt = null;
-  document.getElementById('installPwaBtn').classList.add('hidden');
+  document.getElementById('installPwaBtn')?.classList.add('hidden');
 });
 
 function applyAppearance() {
   document.body.dataset.theme = state.themeMode;
   document.body.dataset.scheme = state.scheme;
-  document.getElementById('themeModeLabel').textContent = state.themeMode === 'dark' ? 'Dark' : 'Light';
-  document.getElementById('soundModeLabel').textContent = state.soundEnabled ? 'On' : 'Muted';
-  document.getElementById('schemeSelect').value = state.scheme;
+  const themeLbl = document.getElementById('themeModeLabel');
+  if (themeLbl) themeLbl.textContent = state.themeMode === 'dark' ? 'Dark' : 'Light';
+  const soundLbl = document.getElementById('soundModeLabel');
+  if (soundLbl) soundLbl.textContent = state.soundEnabled ? 'On' : 'Muted';
+  const sel = document.getElementById('schemeSelect');
+  if (sel) sel.value = state.scheme;
+  const dSel = document.getElementById('drawerSchemeSelect');
+  if (dSel) dSel.value = state.scheme;
 }
 
 applyAppearance();
 
-document.getElementById('themeToggleBtn').addEventListener('click', () => {
+function toggleThemeMode() {
   state.themeMode = state.themeMode === 'dark' ? 'light' : 'dark';
   localStorage.setItem('momi_theme', state.themeMode);
   applyAppearance();
-});
+}
 
-document.getElementById('soundToggleBtn').addEventListener('click', () => {
+function toggleSoundMode() {
   state.soundEnabled = !state.soundEnabled;
   localStorage.setItem('momi_sound', String(state.soundEnabled));
   applyAppearance();
   if (state.soundEnabled) playMomiAlertChime();
   showToast(state.soundEnabled ? 'Alert chimes enabled' : 'Alert chimes muted');
-});
+}
 
-document.getElementById('schemeSelect').addEventListener('change', (e) => {
+document.getElementById('themeToggleBtn')?.addEventListener('click', toggleThemeMode);
+document.getElementById('drawerThemeBtn')?.addEventListener('click', toggleThemeMode);
+document.getElementById('soundToggleBtn')?.addEventListener('click', toggleSoundMode);
+document.getElementById('drawerSoundBtn')?.addEventListener('click', toggleSoundMode);
+
+document.getElementById('schemeSelect')?.addEventListener('change', (e) => {
+  state.scheme = e.target.value;
+  localStorage.setItem('momi_scheme', state.scheme);
+  applyAppearance();
+});
+document.getElementById('drawerSchemeSelect')?.addEventListener('change', (e) => {
   state.scheme = e.target.value;
   localStorage.setItem('momi_scheme', state.scheme);
   applyAppearance();
 });
 
+function openMobileDrawer() {
+  mobileDrawerBackdrop?.classList.remove('hidden');
+  mobileDrawerBackdrop?.setAttribute('aria-hidden', 'false');
+}
+
+function closeMobileDrawer() {
+  mobileDrawerBackdrop?.classList.add('hidden');
+  mobileDrawerBackdrop?.setAttribute('aria-hidden', 'true');
+}
+
+document.getElementById('mobileMenuBtn')?.addEventListener('click', openMobileDrawer);
+document.getElementById('closeMobileDrawerBtn')?.addEventListener('click', closeMobileDrawer);
+mobileDrawerBackdrop?.addEventListener('click', (e) => {
+  if (e.target === mobileDrawerBackdrop) closeMobileDrawer();
+});
+
 function showToast(message) {
+  if (!toastBar) return;
   toastBar.textContent = message;
   toastBar.classList.remove('hidden');
   clearTimeout(showToast._timer);
@@ -260,10 +307,19 @@ function makeClientId(prefix) {
   return `${prefix}_${Date.now()}_${rand}`;
 }
 
+function creatorLookup(uid) {
+  if (!uid) return null;
+  if (state.profile?.userId === uid) return state.profile;
+  return state.creators.find((c) => c.userId === uid) || null;
+}
+
 function avatarHtml(profileLike, size = 38) {
   const username = profileLike?.username || profileLike?.authorUsername || 'momi';
-  if (profileLike?.avatarData) {
-    return `<img class="avatar" src="${resolveImageSrc({ imageData: profileLike.avatarData })}" alt="@${escapeHtml(username)}" style="width:${size}px;height:${size}px;" />`;
+  const matchedCreator = profileLike?.userId ? creatorLookup(profileLike.userId) : null;
+  const avatarUrl = profileLike?.avatarUrl || matchedCreator?.avatarUrl || null;
+  const avatarData = profileLike?.avatarData || matchedCreator?.avatarData || null;
+  if (avatarUrl || avatarData) {
+    return `<img class="avatar" src="${resolveImageSrc({ avatarUrl, imageData: avatarData })}" alt="@${escapeHtml(username)}" style="width:${size}px;height:${size}px;" />`;
   }
   const initials = initialsForUsername(username);
   return `<span class="avatar" style="width:${size}px;height:${size}px;font-size:${Math.max(11, Math.round(size * 0.36))}px;" aria-label="@${escapeHtml(username)}">${escapeHtml(initials)}</span>`;
@@ -276,8 +332,10 @@ function openModal(html) {
 
 function closeModal() {
   stopLiveBroadcast();
-  state.liveUnsubs.forEach((u) => u());
-  state.liveUnsubs = [];
+  if (state.livePollTimer) {
+    clearInterval(state.livePollTimer);
+    state.livePollTimer = null;
+  }
   modalBackdrop.classList.add('hidden');
   modalContent.innerHTML = '';
   if (window.location.search.includes('post=') || window.location.hash.startsWith('#post-')) {
@@ -285,7 +343,7 @@ function closeModal() {
   }
 }
 
-modalBackdrop.addEventListener('click', (e) => {
+modalBackdrop?.addEventListener('click', (e) => {
   if (e.target === modalBackdrop) closeModal();
 });
 
@@ -293,15 +351,15 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !modalBackdrop.classList.contains('hidden')) closeModal();
 });
 
-// Authentication
+// Authentication (Firebase Google Auth)
 const googleSignInBtn = document.getElementById('googleSignInBtn');
 const defaultGoogleSignInHtml = googleSignInBtn.innerHTML;
 let signInPending = false;
 
 function isStandalonePwaMode() {
   return Boolean(
-    window.matchMedia?.('(display-mode: standalone)')?.matches
-      || window.navigator?.standalone === true
+    window.matchMedia?.('(display-mode: standalone)')?.matches ||
+    window.navigator?.standalone === true
   );
 }
 
@@ -337,13 +395,13 @@ function formatGoogleAuthError(err) {
   if (code === 'auth/unauthorized-domain') {
     const host = window.location.hostname || 'this domain';
     return {
-      text: `Domain "${host}" is not authorized. Add "${host}" in Firebase Console -> Authentication -> Settings -> Authorized domains (gen-lang-client-0132255277).`,
+      text: `Domain "${host}" is not authorized. Add "${host}" in Firebase Console -> Authentication -> Settings -> Authorized domains.`,
       openChrome: false
     };
   }
   if (code === 'auth/popup-closed-by-user') {
     return {
-      text: 'Google sign-in closed before finishing. If Google shows a permission screen, scroll down (↓) and tap Continue.',
+      text: 'Google sign-in closed before finishing. If Google shows a permission screen, scroll down and tap Continue.',
       openChrome: isStandalonePwaMode()
     };
   }
@@ -409,81 +467,34 @@ googleSignInBtn.addEventListener('click', async () => {
   }
 });
 
-document.getElementById('signOutBtn').addEventListener('click', async () => {
+async function handleSignOutClick() {
+  closeMobileDrawer();
   cleanupSubscriptions();
   await signOut(auth);
-});
+}
+
+document.getElementById('signOutBtn')?.addEventListener('click', handleSignOutClick);
+document.getElementById('drawerSignOutBtn')?.addEventListener('click', handleSignOutClick);
 
 function cleanupSubscriptions() {
   stopLiveBroadcast();
-  state.unsubs.forEach((u) => u());
-  state.unsubs = [];
-  if (state.msgUnsubs) {
-    state.msgUnsubs();
-    state.msgUnsubs = null;
+  if (state.livePollTimer) {
+    clearInterval(state.livePollTimer);
+    state.livePollTimer = null;
   }
-  state.liveUnsubs.forEach((u) => u());
-  state.liveUnsubs = [];
+  state.pollTimers.forEach((id) => clearInterval(id));
+  state.pollTimers = [];
   state.initialSnapshotsLoaded = { notifs: false, threads: false };
 }
 
-let isSupabaseFallbackLoading = false;
-async function fallbackLoadFromSupabase() {
-  if (isSupabaseFallbackLoading || !isSupabaseClientReady(SUPABASE_WEB_CONFIG)) return;
-  isSupabaseFallbackLoading = true;
-  try {
-    const feed = await fetchSupabaseFeed(SUPABASE_WEB_CONFIG);
-    if (feed) {
-      if (Array.isArray(feed.posts) && feed.posts.length > 0 && state.posts.length === 0) {
-        state.posts = sortFeedWithBoostPriority(feed.posts.map(mapSupabasePostToWeb));
-        state.isLoadingFeed = false;
-      }
-      if (Array.isArray(feed.stories) && feed.stories.length > 0 && state.stories.length === 0) {
-        state.stories = feed.stories.map(mapSupabaseStoryToWeb);
-      }
-      if (Array.isArray(feed.products) && feed.products.length > 0 && state.products.length === 0) {
-        state.products = feed.products.map(mapSupabaseProductToWeb);
-      }
-      if (feed.appConfig && !state.monetizationConfig) {
-        state.monetizationConfig = mapSupabaseConfigToWeb(feed.appConfig);
-        syncMonetagWebIntegration(state.monetizationConfig);
-      }
-      if (Array.isArray(feed.profiles) && feed.profiles.length > 0) {
-        const mappedCreators = feed.profiles.map(mapSupabaseProfileToWeb);
-        const existingMap = new Map(state.creators.map((c) => [c.userId, c]));
-        mappedCreators.forEach((c) => {
-          if (!existingMap.has(c.userId)) {
-            state.creators.push(c);
-          }
-        });
-        if (state.user) {
-          const mySupabaseProfile = mappedCreators.find((p) => p.userId === state.user.uid);
-          if (mySupabaseProfile) {
-            state.profile = { ...state.profile, ...mySupabaseProfile };
-          }
-        }
-      }
-      state.isLoadingFeed = false;
-      renderAll();
-    }
-  } catch (err) {
-    console.warn('[Momi Web] Supabase fallback feed load skipped:', err);
-  } finally {
-    isSupabaseFallbackLoading = false;
-  }
-}
-
-function handleSyncError(err, label = 'Firestore sync') {
-  console.error(`[Momi Web] ${label}:`, err);
+function handleSyncError(err, label = 'Cloud sync') {
+  console.warn(`[Momi Web] ${label}:`, err);
   const code = err?.code || 'sync-error';
-  const msg = err?.message || 'Unable to reach Momi cloud feed.';
-  if (code === 'resource-exhausted') {
-    state.syncError = 'Daily Firebase Spark quota temporarily reached — cached posts remain visible. Quota resets daily or after upgrading to Blaze.';
-  } else {
-    state.syncError = `${label} (${code}): ${msg}`;
+  const msg = err?.message || 'Unable to reach Supabase cloud feed.';
+  if (code !== 'resource-exhausted') {
+    state.syncError = `${label}: ${msg}`;
   }
   state.isLoadingFeed = false;
-  fallbackLoadFromSupabase();
   renderMainStage();
 }
 
@@ -497,16 +508,22 @@ function buildFallbackProfile(user) {
     username,
     displayName,
     category: 'Visual Creator',
-    bio: 'Capturing moments across Momi mobile & desktop.',
+    bio: 'Capturing moments across Momi mobile & web.',
     website: '',
     avatarKey,
+    avatarUrl: user.photoURL || null,
+    avatarData: null,
     followersCount: 0,
     followingCount: 0,
     isVerified: user.email === ADMIN_OWNER_EMAIL && Boolean(user.emailVerified),
     role: 'USER',
     moderationScopes: [],
-    assignedByEmail: null
+    partnerConsent: false
   };
+}
+
+function mirrorFirestoreBestEffort(fn) {
+  Promise.resolve().then(fn).catch(() => undefined);
 }
 
 onAuthStateChanged(auth, (user) => {
@@ -525,190 +542,203 @@ onAuthStateChanged(auth, (user) => {
   authGate.classList.add('hidden');
   mainShell.classList.remove('hidden');
   renderAll();
-  startRealtimeSync(user.uid);
-  fallbackLoadFromSupabase();
-  ensureUserSeeded(user).catch((err) => handleSyncError(err, 'Account initialization'));
+  initializeSupabaseWorkspace(user);
 });
 
-async function ensureUserSeeded(user) {
-  const userRef = doc(db, 'users', user.uid);
-  const snap = await getDoc(userRef);
-  if (!snap.exists()) {
-    const base = buildFallbackProfile(user);
-    await setDoc(userRef, {
-      ...base,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    });
-  }
+async function initializeSupabaseWorkspace(user) {
+  await ensureUserSeededInSupabase(user);
+  await refreshAllFromSupabase({ showErrors: true });
+  startSupabasePolling(user.uid);
+}
 
-  const walletRef = doc(db, 'wallets', user.uid);
-  const walletSnap = await getDoc(walletRef);
-  if (!walletSnap.exists()) {
-    await setDoc(walletRef, {
-      userId: user.uid,
-      balance: 0,
-      totalEarned: 0,
-      totalSpent: 0,
-      totalPurchased: 0,
-      accountTier: 'STANDARD',
-      verificationTier: 'NONE',
-      unlockedPerks: [],
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    });
-  }
+async function ensureUserSeededInSupabase(user) {
+  const uid = user.uid;
+  const fallback = buildFallbackProfile(user);
+  try {
+    const existingProfiles = await selectSupabaseTable(
+      SUPABASE_WEB_CONFIG,
+      'profiles',
+      `select=*&user_id=eq.${encodeURIComponent(uid)}&limit=1`
+    );
+    if (existingProfiles.length === 0) {
+      await upsertSupabaseTable(
+        SUPABASE_WEB_CONFIG,
+        'profiles',
+        [{
+          user_id: uid,
+          username: fallback.username,
+          display_name: fallback.displayName,
+          category: fallback.category,
+          bio: fallback.bio,
+          website: '',
+          avatar_key: fallback.avatarKey,
+          avatar_url: fallback.avatarUrl,
+          avatar_data: null,
+          followers_count: 0,
+          following_count: 0,
+          is_verified: fallback.isVerified,
+          role: 'USER',
+          moderation_scopes: [],
+          partner_consent: false
+        }],
+        '',
+        globalThis.fetch,
+        'user_id'
+      ).catch(() => undefined);
+    }
 
-  const postsProbe = await getDocs(query(collection(db, 'posts'), limit(1)));
-  if (postsProbe.empty) {
-    await publishShowcaseBurst(user.uid, { silent: true });
+    const existingWallets = await selectSupabaseTable(
+      SUPABASE_WEB_CONFIG,
+      'wallets',
+      `select=*&user_id=eq.${encodeURIComponent(uid)}&limit=1`
+    );
+    if (existingWallets.length === 0) {
+      await upsertSupabaseTable(
+        SUPABASE_WEB_CONFIG,
+        'wallets',
+        [{
+          user_id: uid,
+          balance: 0,
+          total_earned: 0,
+          total_spent: 0,
+          total_purchased: 0,
+          account_tier: 'STANDARD',
+          verification_tier: 'NONE',
+          unlocked_perks: []
+        }],
+        '',
+        globalThis.fetch,
+        'user_id'
+      ).catch(() => undefined);
+    }
+  } catch (err) {
+    handleSyncError(err, 'Account setup');
   }
 }
 
-function startRealtimeSync(uid) {
-  const pushUnsub = (u) => state.unsubs.push(u);
+async function refreshAllFromSupabase({ showErrors = false } = {}) {
+  if (!state.user) return;
+  try {
+    const [feed, workspace] = await Promise.all([
+      fetchSupabaseFeed(SUPABASE_WEB_CONFIG),
+      fetchUserSupabaseWorkspace(SUPABASE_WEB_CONFIG, state.user.uid)
+    ]);
 
-  pushUnsub(onSnapshot(doc(db, 'users', uid), (snap) => {
-    if (snap.exists()) {
-      state.profile = { ...snap.data(), userId: snap.id };
+    if (!feed) {
+      if (showErrors) {
+        state.syncError = 'Unable to load feed from Supabase. Check network connection or run supabase/enable_sync.sql.';
+      }
+      state.isLoadingFeed = false;
       renderAll();
-      maybeConsumePendingDeepLink();
+      return;
     }
-  }, (err) => handleSyncError(err, 'Profile sync')));
 
-  pushUnsub(onSnapshot(doc(db, 'wallets', uid), (snap) => {
-    if (snap.exists()) {
-      state.wallet = snap.data();
-      renderRightRail();
-      if (state.nav === 'wallet') renderMainStage();
-    }
-  }, (err) => handleSyncError(err, 'Wallet sync')));
-
-  pushUnsub(onSnapshot(query(collection(db, 'users'), limit(50)), (snap) => {
-    state.creators = snap.docs.map((d) => ({ ...d.data(), userId: d.id }));
-    renderRightRail();
-    maybeConsumePendingDeepLink();
-    if (state.nav === 'explore' || state.nav === 'create') renderMainStage();
-  }, (err) => handleSyncError(err, 'Creators sync')));
-
-  pushUnsub(onSnapshot(doc(db, 'appConfig', 'monetization'), (snap) => {
-    state.monetizationConfig = snap.exists()
-      ? { ...DEFAULT_MONETIZATION_CONFIG, ...snap.data() }
-      : { ...DEFAULT_MONETIZATION_CONFIG };
-    syncMonetagWebIntegration(state.monetizationConfig);
-    if (state.nav === 'home' || state.nav === 'explore' || state.nav === 'marketplace' || state.nav === 'profile') {
-      renderMainStage();
-    }
-  }, () => undefined));
-
-  pushUnsub(onSnapshot(query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(40)), (snap) => {
-    const raw = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
-    state.posts = sortFeedWithBoostPriority(raw);
-    state.isLoadingFeed = false;
     state.syncError = null;
-    renderMainStage();
-    maybeConsumePendingDeepLink();
-  }, (err) => handleSyncError(err, 'Posts feed sync')));
-
-  pushUnsub(onSnapshot(query(collection(db, 'stories'), orderBy('createdAt', 'desc'), limit(30)), (snap) => {
-    state.stories = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
-    if (state.nav === 'home') renderMainStage();
-  }, (err) => handleSyncError(err, 'Stories sync')));
-
-  pushUnsub(onSnapshot(query(collection(db, 'liveStreams'), where('isLive', '==', true), limit(20)), (snap) => {
-    state.liveStreams = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
-    updateBadges();
-    renderRightRail();
-    if (state.nav === 'home' || state.nav === 'live') renderMainStage();
-  }, () => undefined));
-
-  pushUnsub(onSnapshot(collection(db, 'users', uid, 'likedPosts'), (snap) => {
-    state.likedIds = new Set(snap.docs.map((d) => d.id));
-    renderMainStage();
-  }, () => undefined));
-
-  pushUnsub(onSnapshot(collection(db, 'users', uid, 'bookmarks'), (snap) => {
-    state.bookmarkIds = new Set(snap.docs.map((d) => d.id));
-    renderMainStage();
-  }, () => undefined));
-
-  pushUnsub(onSnapshot(collection(db, 'users', uid, 'seenStories'), (snap) => {
-    state.seenStoryIds = new Set(snap.docs.map((d) => d.id));
-    if (state.nav === 'home') renderMainStage();
-  }, () => undefined));
-
-  pushUnsub(onSnapshot(query(collection(db, 'follows'), where('followerUid', '==', uid)), (snap) => {
-    state.followingUids = new Set(snap.docs.map((d) => d.data().targetUid));
-    renderRightRail();
-    renderMainStage();
-  }));
-
-  pushUnsub(onSnapshot(query(collection(db, 'users', uid, 'notifications'), orderBy('createdAt', 'desc'), limit(35)), (snap) => {
-    const list = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
-    if (state.initialSnapshotsLoaded.notifs) {
-      const fresh = list.find((n) => n.isUnread && !state.seenNotifIds.has(n.id));
-      if (fresh) triggerAlert(`${fresh.actorUsername}: ${fresh.message}`);
-    }
-    list.forEach((n) => state.seenNotifIds.add(n.id));
-    state.initialSnapshotsLoaded.notifs = true;
-    state.notifications = list;
-    updateBadges();
-    if (state.nav === 'notifications') renderMainStage();
-  }));
-
-  pushUnsub(onSnapshot(query(collection(db, 'threads'), where('participantUids', 'array-contains', uid), limit(30)), (snap) => {
-    const list = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
-    if (state.initialSnapshotsLoaded.threads) {
-      const unread = list.find((t) => t.unreadUid === uid && t.unreadCount > 0 && !state.seenMsgKeys.has(`${t.id}:${t.lastMessage}:${t.timeLabel}`));
-      if (unread) triggerAlert(`New message from @${unread.userAId === uid ? unread.userBUsername : unread.userAUsername}: ${unread.lastMessage}`);
-    }
-    list.forEach((t) => state.seenMsgKeys.add(`${t.id}:${t.lastMessage}:${t.timeLabel}`));
-    state.initialSnapshotsLoaded.threads = true;
-    state.threads = list;
-    updateBadges();
-    if (state.nav === 'messages') renderMainStage();
-  }));
-
-  pushUnsub(onSnapshot(query(collection(db, 'marketProducts'), orderBy('createdAt', 'desc'), limit(30)), (snap) => {
-    state.products = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
-    if (state.nav === 'marketplace') renderMainStage();
-  }));
-
-  pushUnsub(onSnapshot(query(collection(db, 'marketOrders'), where('buyerUid', '==', uid), limit(25)), (snap) => {
-    state.orders = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
-    if (state.nav === 'marketplace') renderMainStage();
-  }));
-
-  pushUnsub(onSnapshot(query(collection(db, 'creditTransactions'), where('recipientUid', '==', uid), limit(30)), async (snap) => {
-    const incoming = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
-    for (const tx of incoming) {
-      if (tx.type === 'GIFT' && tx.recipientClaimed === false) {
-        await claimGiftTransaction(uid, tx).catch(() => undefined);
+    if (Array.isArray(feed.profiles)) {
+      const mappedCreators = feed.profiles.map(mapSupabaseProfileToWeb);
+      state.creators = mappedCreators;
+      const mine = mappedCreators.find((p) => p.userId === state.user.uid);
+      if (mine) {
+        state.profile = { ...state.profile, ...mine };
       }
     }
-    state.transactions = incoming;
-    if (state.nav === 'wallet') renderMainStage();
-  }));
+
+    if (Array.isArray(feed.posts)) {
+      state.posts = sortFeedWithBoostPriority(feed.posts.map(mapSupabasePostToWeb));
+    }
+    if (Array.isArray(feed.stories)) {
+      state.stories = feed.stories.map(mapSupabaseStoryToWeb);
+    }
+    if (Array.isArray(feed.products)) {
+      state.products = feed.products.map(mapSupabaseProductToWeb);
+    }
+    if (Array.isArray(feed.merchants)) {
+      state.merchants = feed.merchants.map(mapSupabaseMerchantToWeb);
+    }
+    if (Array.isArray(feed.liveStreams)) {
+      // Show active streams updated within last 15 minutes
+      const cutoff = Date.now() - 15 * 60 * 1000;
+      state.liveStreams = feed.liveStreams
+        .map(mapSupabaseLiveStreamToWeb)
+        .filter((s) => s.isLive && s.updatedAtMs >= cutoff);
+    }
+    if (feed.appConfig) {
+      state.monetizationConfig = mapSupabaseConfigToWeb(feed.appConfig);
+      syncMonetagWebIntegration(state.monetizationConfig);
+    }
+
+    if (workspace) {
+      state.followingUids = new Set(workspace.follows.map((f) => f.target_uid));
+      const likes = new Set();
+      const saves = new Set();
+      const seen = new Set();
+      workspace.interactions.forEach((row) => {
+        if (row.target_type === 'LIKED_POST') likes.add(row.target_id);
+        else if (row.target_type === 'BOOKMARK') saves.add(row.target_id);
+        else if (row.target_type === 'SEEN_STORY') seen.add(row.target_id);
+      });
+      state.likedIds = likes;
+      state.bookmarkIds = saves;
+      state.seenStoryIds = seen;
+
+      const notifs = workspace.notifications.map(mapSupabaseNotificationToWeb);
+      if (state.initialSnapshotsLoaded.notifs) {
+        const fresh = notifs.find((n) => n.isUnread && !state.seenNotifIds.has(n.id));
+        if (fresh) triggerAlert(`${fresh.actorUsername}: ${fresh.message}`);
+      }
+      notifs.forEach((n) => state.seenNotifIds.add(n.id));
+      state.initialSnapshotsLoaded.notifs = true;
+      state.notifications = notifs;
+
+      const threads = workspace.threads.map(mapSupabaseThreadToWeb);
+      if (state.initialSnapshotsLoaded.threads) {
+        const unread = threads.find((t) =>
+          t.unreadUid === state.user.uid &&
+          (t.unreadCount || 0) > 0 &&
+          !state.seenMsgKeys.has(`${t.id}:${t.lastMessage}:${t.timeLabel}`)
+        );
+        if (unread) {
+          const otherName = unread.userAId === state.user.uid ? unread.userBUsername : unread.userAUsername;
+          triggerAlert(`New message from @${otherName}: ${unread.lastMessage}`);
+        }
+      }
+      threads.forEach((t) => state.seenMsgKeys.add(`${t.id}:${t.lastMessage}:${t.timeLabel}`));
+      state.initialSnapshotsLoaded.threads = true;
+      state.threads = threads;
+
+      if (workspace.wallet) {
+        state.wallet = mapSupabaseWalletToWeb(workspace.wallet);
+      }
+      state.transactions = workspace.transactions.map(mapSupabaseTransactionToWeb);
+      state.orders = workspace.orders.map(mapSupabaseOrderToWeb);
+    }
+
+    state.isLoadingFeed = false;
+    maybeConsumePendingDeepLink();
+
+    // Avoid destroying active Create Studio inputs or video playback on background refresh
+    updateBadges();
+    renderRightRail();
+    if (state.nav !== 'create' && state.nav !== 'explore') {
+      renderMainStage();
+    } else if (state.nav === 'explore' && !document.activeElement?.matches('#exploreSearchInput')) {
+      renderMainStage();
+    }
+  } catch (err) {
+    if (showErrors) handleSyncError(err, 'Supabase feed refresh');
+  }
 }
 
-async function claimGiftTransaction(uid, tx) {
-  const walletRef = doc(db, 'wallets', uid);
-  const walletSnap = await getDoc(walletRef);
-  if (!walletSnap.exists()) return;
-  const current = walletSnap.data();
-  const batch = writeBatch(db);
-  batch.update(walletRef, {
-    balance: (current.balance || 0) + tx.creditsAmount,
-    totalEarned: (current.totalEarned || 0) + tx.creditsAmount,
-    lastTxId: tx.txId,
-    updatedAt: serverTimestamp()
-  });
-  batch.update(doc(db, 'creditTransactions', tx.id), {
-    recipientClaimed: true,
-    updatedAt: serverTimestamp()
-  });
-  await batch.commit();
-  triggerAlert(`You received ${tx.creditsAmount} credits (${tx.giftName || 'Gift'}) from @${tx.senderUsername}!`);
+function startSupabasePolling(uid) {
+  const feedTimer = setInterval(() => {
+    if (!document.hidden && state.user?.uid === uid) {
+      refreshAllFromSupabase({ showErrors: false });
+      if (state.nav === 'messages' && state.activeThreadId) {
+        loadMessagesForThread(state.activeThreadId);
+      }
+    }
+  }, 6000);
+  state.pollTimers.push(feedTimer);
 }
 
 function maybeConsumePendingDeepLink() {
@@ -760,13 +790,16 @@ function updateBadges() {
   setBadge('navMsgBadge', unreadMsgs);
   setBadge('navLiveBadge', liveCount);
 
-  document.getElementById('mobileNotifDot').classList.toggle('hidden', unreadNotifs <= 0);
-  document.getElementById('mobileMsgDot').classList.toggle('hidden', unreadMsgs <= 0);
+  document.getElementById('mobileNotifDot')?.classList.toggle('hidden', unreadNotifs <= 0);
+  document.getElementById('mobileMsgDot')?.classList.toggle('hidden', unreadMsgs <= 0);
 }
 
 // Navigation
 document.querySelectorAll('[data-nav]').forEach((btn) => {
-  btn.addEventListener('click', () => navigateTo(btn.dataset.nav));
+  btn.addEventListener('click', () => {
+    closeMobileDrawer();
+    navigateTo(btn.dataset.nav);
+  });
 });
 
 function navigateTo(target, opts = {}) {
@@ -791,7 +824,7 @@ function renderRightRail() {
   const rightAndroidCard = document.getElementById('rightAndroidCard');
   const rightLiveCard = document.getElementById('rightLiveCard');
   const rightCreatorsCard = document.getElementById('rightCreatorsCard');
-  if (!state.profile) return;
+  if (!state.profile || !rightUserCard) return;
 
   const balance = state.wallet?.balance || 0;
   const tier = state.wallet?.accountTier || 'STANDARD';
@@ -822,12 +855,12 @@ function renderRightRail() {
         <span class="desktop-badge">APK</span>
       </div>
       <p class="muted small" style="margin:0 0 10px;">
-        Get the full Android app for mobile camera filters, native sound alerts &amp; Play Billing wallet top-ups.
+        Native mobile camera studio, notifications &amp; Play Billing wallet — synced with Web via Supabase.
       </p>
       <div class="android-promo-actions">
         <a class="btn-primary btn-sm" href="${ANDROID_APK_URL}" target="_blank" rel="noopener noreferrer">Download APK</a>
         <a class="btn-outline btn-sm" href="${ANDROID_RELEASES_URL}" target="_blank" rel="noopener noreferrer">Releases</a>
-        <button type="button" class="btn-ghost btn-sm" id="railCopyAndroidLinkBtn">Copy Link</button>
+        <button type="button" class="btn-ghost btn-sm" id="railCopyAndroidLinkBtn">Copy</button>
       </div>
     `;
     document.getElementById('railCopyAndroidLinkBtn').onclick = async () => {
@@ -843,14 +876,14 @@ function renderRightRail() {
     </div>
     ${
       state.liveStreams.length === 0
-        ? '<p class="muted small" style="margin:0;">No active broadcasts right now. Start one from your desktop webcam!</p>'
+        ? '<p class="muted small" style="margin:0;">No active rooms right now. Start a Live Room anytime!</p>'
         : state.liveStreams.slice(0, 4).map((s) => `
           <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;">
             <div style="display:flex;align-items:center;gap:10px;min-width:0;">
               ${avatarHtml(s, 34)}
               <div style="min-width:0;">
                 <div style="font-weight:700;font-size:0.86rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">@${escapeHtml(s.username)}</div>
-                <div class="muted small">${escapeHtml(s.title || 'Live Broadcast')}</div>
+                <div class="muted small" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.title || 'Live Broadcast')}</div>
               </div>
             </div>
             <button type="button" class="btn-primary btn-sm" data-open-live="${escapeHtml(s.userId)}">Watch</button>
@@ -997,7 +1030,7 @@ function renderGamezopArcadeBannerHtml(placement = 'feed') {
           <span class="muted small">Gamezop Arcade</span>
         </div>
         <div style="font-weight:700;font-size:0.96rem;margin-top:4px;">${escapeHtml(title)}</div>
-        <div class="muted small" style="margin-top:2px;">Instant HTML5 mini-games · Play right in your browser</div>
+        <div class="muted small" style="margin-top:2px;">Instant HTML5 mini-games &middot; Play right in your browser</div>
       </div>
       <a class="btn-primary btn-sm" href="${escapeHtml(gamezopUrl)}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;white-space:nowrap;">
         Play Games &#8599;
@@ -1015,19 +1048,34 @@ function boostBadgeLabelForPost(post) {
   return '';
 }
 
+function getPostFrames(post) {
+  const urls = Array.isArray(post.extraImageUrls) ? post.extraImageUrls : [];
+  const datas = Array.isArray(post.extraImageDatas) ? post.extraImageDatas : [];
+  const frames = [];
+  if (post.imageUrl || post.imageData || post.imageKey) {
+    frames.push({ imageUrl: post.imageUrl, imageData: post.imageData, imageKey: post.imageKey });
+  }
+  const extraCount = Math.max(urls.length, datas.length);
+  for (let i = 0; i < extraCount; i += 1) {
+    frames.push({
+      imageUrl: urls[i] || null,
+      imageData: datas[i] || null,
+      imageKey: post.imageKey
+    });
+  }
+  return frames.length > 0 ? frames : [{ imageKey: post.imageKey || 'img_post_coastal' }];
+}
+
 function renderPostCardHtml(post) {
-  const frames = [
-    ...(post.imageData || post.imageKey ? [{ imageData: post.imageData, imageKey: post.imageKey }] : []),
-    ...(Array.isArray(post.extraImageDatas) ? post.extraImageDatas.map((d) => ({ imageData: d, imageKey: post.imageKey })) : [])
-  ];
+  const frames = getPostFrames(post);
   const idx = Math.min(state.carouselIndex[post.id] || 0, Math.max(0, frames.length - 1));
   const currentFrame = frames[idx] || { imageKey: post.imageKey };
   const isLiked = state.likedIds.has(post.id);
   const isSaved = state.bookmarkIds.has(post.id);
   const isMine = post.userId === state.user?.uid;
   const isFollowing = state.followingUids.has(post.userId);
-  const isVideo = post.mediaType === 'VIDEO' || post.isReel;
-  const cachedVideoUrl = state.videoCache[post.id];
+  const isVideo = post.mediaType === 'VIDEO' || post.isReel || Boolean(post.videoUrl || post.videoData);
+  const videoSrc = resolveVideoSrc(post) || state.videoCache[post.id] || '';
   const ratio = aspectRatioCss(post.aspectRatio);
   const filterCss = filterCssForTag(post.filterTag);
   const boostBadge = boostBadgeLabelForPost(post);
@@ -1040,7 +1088,7 @@ function renderPostCardHtml(post) {
     <article class="post-card" data-post-id="${escapeHtml(post.id)}">
       <header class="post-header">
         <button type="button" class="post-author-btn" data-open-user="${escapeHtml(post.userId)}">
-          ${avatarHtml({ username: post.authorUsername, avatarData: null }, 38)}
+          ${avatarHtml({ userId: post.userId, username: post.authorUsername }, 38)}
           <div class="post-author-meta">
             <span class="post-author-name">
               @${escapeHtml(post.authorUsername)}
@@ -1054,19 +1102,19 @@ function renderPostCardHtml(post) {
           ${isOwnerAdmin() && !post.id.startsWith('showcase_') ? `<button type="button" class="btn-outline btn-sm" data-admin-recommend="${escapeHtml(post.id)}">${isRecommended ? 'Unfeature' : 'Recommend'}</button>` : ''}
           ${isMine && !post.id.startsWith('showcase_') ? `<button type="button" class="btn-outline btn-sm" data-boost-post="${escapeHtml(post.id)}">Boost</button>` : ''}
           ${!isMine ? `<button type="button" class="btn-sm ${isFollowing ? 'btn-outline' : 'btn-primary'}" data-follow-uid="${escapeHtml(post.userId)}" data-follow-name="${escapeHtml(post.authorUsername)}">${isFollowing ? 'Following' : 'Follow'}</button>` : ''}
-          ${isMine ? `<button type="button" class="btn-ghost btn-sm" data-delete-post="${escapeHtml(post.id)}" title="Delete post">Delete</button>` : ''}
+          ${isMine || isOwnerAdmin() ? `<button type="button" class="btn-ghost btn-sm" data-delete-post="${escapeHtml(post.id)}" title="Delete post">Delete</button>` : ''}
         </div>
       </header>
 
       <div class="post-media-wrap" style="aspect-ratio:${ratio};" data-open-post="${escapeHtml(post.id)}">
         ${
-          isVideo && cachedVideoUrl
-            ? `<video class="post-media-video" src="${cachedVideoUrl}" controls playsinline></video>`
+          isVideo && videoSrc
+            ? `<video class="post-media-video" src="${escapeHtml(videoSrc)}" poster="${escapeHtml(resolveImageSrc(currentFrame))}" controls playsinline preload="metadata" data-stop-open="true"></video>`
             : `<img class="post-media-img" src="${resolveImageSrc(currentFrame)}" alt="${escapeHtml(post.caption || 'Momi post')}" style="filter:${filterCss};" loading="lazy" />`
         }
-        ${isVideo && !cachedVideoUrl ? `<span class="media-badge">${post.videoChunksCount ? 'Click to Load Video' : 'Clip'}</span>` : ''}
+        ${isVideo && !videoSrc ? `<span class="media-badge">Clip</span>` : ''}
         ${!isVideo && post.filterTag && post.filterTag !== 'NONE' ? `<span class="media-badge">${escapeHtml(post.filterTag)}</span>` : ''}
-        ${frames.length > 1 ? `
+        ${!isVideo && frames.length > 1 ? `
           <button type="button" class="carousel-btn prev" data-slide="${escapeHtml(post.id)}:-1" aria-label="Previous photo">&lsaquo;</button>
           <button type="button" class="carousel-btn next" data-slide="${escapeHtml(post.id)}:1" aria-label="Next photo">&rsaquo;</button>
           <span class="media-badge" style="top:auto;bottom:12px;">${idx + 1} / ${frames.length}</span>
@@ -1091,6 +1139,7 @@ function renderPostCardHtml(post) {
           </button>
         </div>
 
+        ${post.audioTitle ? `<div class="muted small">&#9835; ${escapeHtml(post.audioTitle)}</div>` : ''}
         <div class="post-caption">${renderRichCaptionHtml(post.caption || '')}</div>
 
         ${(tags.length || tagged.length) ? `
@@ -1120,7 +1169,7 @@ function renderHome() {
       ${state.syncError ? `
         <div class="sync-error-banner" role="alert">
           <div style="flex:1;min-width:220px;">
-            <strong>Could not sync Momi feed</strong>
+            <strong>Cloud feed notice</strong>
             <div class="small muted">${escapeHtml(state.syncError)}</div>
           </div>
           <button type="button" class="btn-outline btn-sm" id="retrySyncBtn">Retry Sync</button>
@@ -1141,7 +1190,7 @@ function renderHome() {
         `).join('')}
         ${state.stories.map((st) => `
           <button type="button" class="story-tile" data-open-story="${escapeHtml(st.id)}">
-            <span class="avatar-ring ${state.seenStoryIds.has(st.id) ? 'seen' : ''}">${avatarHtml(st, 58)}</span>
+            <span class="avatar-ring ${state.seenStoryIds.has(st.id) ? 'seen' : ''}">${avatarHtml({ userId: st.userId, username: st.username }, 58)}</span>
             <span>@${escapeHtml(st.username)}</span>
           </button>
         `).join('')}
@@ -1153,8 +1202,8 @@ function renderHome() {
       ${
         posts.length === 0
           ? `<div class="card-panel" style="text-align:center;padding:36px;">
-              <h3 style="margin:0 0 8px;">${state.isLoadingFeed ? 'Syncing your Momi feed...' : `No posts in ${escapeHtml(state.homeFilter)} yet`}</h3>
-              <p class="muted" style="margin:0 0 16px;">${state.isLoadingFeed ? 'Connecting to real-time Firestore feed across Android and Web.' : 'Create a post in Desktop Studio or follow creators in Explore.'}</p>
+              <h3 style="margin:0 0 8px;">${state.isLoadingFeed ? 'Loading your Momi feed...' : `No posts in ${escapeHtml(state.homeFilter)} yet`}</h3>
+              <p class="muted" style="margin:0 0 16px;">${state.isLoadingFeed ? 'Fetching latest posts, clips & stories from Supabase.' : 'Create a post in Studio or follow creators in Explore.'}</p>
               <button type="button" class="btn-primary" id="emptyCreateBtn">Open Create Studio</button>
             </div>`
           : posts.map(renderPostCardHtml).join('')
@@ -1167,10 +1216,8 @@ function renderHome() {
     retryBtn.onclick = () => {
       state.syncError = null;
       state.isLoadingFeed = true;
-      cleanupSubscriptions();
       renderHome();
-      startRealtimeSync(state.user.uid);
-      ensureUserSeeded(state.user).catch((err) => handleSyncError(err, 'Retry initialization'));
+      refreshAllFromSupabase({ showErrors: true });
     };
   }
   mainStage.querySelectorAll('[data-home-filter]').forEach((b) => {
@@ -1240,9 +1287,13 @@ function renderExplore() {
           ? `<div class="rednote-grid">
               ${filteredPosts.map((p) => {
                 const badge = boostBadgeLabelForPost(p);
+                const isVid = p.mediaType === 'VIDEO' || Boolean(p.videoUrl);
                 return `
                   <article class="rednote-card" data-open-post="${escapeHtml(p.id)}">
-                    <img class="rednote-thumb" src="${resolveImageSrc(p)}" alt="${escapeHtml(p.caption || '')}" style="filter:${filterCssForTag(p.filterTag)};" loading="lazy" />
+                    <div style="position:relative;">
+                      <img class="rednote-thumb" src="${resolveImageSrc(p)}" alt="${escapeHtml(p.caption || '')}" style="filter:${filterCssForTag(p.filterTag)};" loading="lazy" />
+                      ${isVid ? '<span class="media-badge">&#9654; Video</span>' : ''}
+                    </div>
                     <div class="rednote-meta">
                       ${badge ? `<span class="boost-pill ${p.boostTier === 'OWNER_RECOMMENDED' ? 'recommended' : ''}">${escapeHtml(badge)}</span>` : ''}
                       <div class="rednote-title">${escapeHtml(p.caption || 'Visual Note')}</div>
@@ -1282,20 +1333,34 @@ function renderExplore() {
 }
 
 function renderClips() {
-  const clips = state.posts.filter((p) => p.isReel || p.mediaType === 'VIDEO');
+  const clips = state.posts.filter((p) => p.isReel || p.mediaType === 'VIDEO' || Boolean(p.videoUrl || p.videoData));
   mainStage.innerHTML = `
     <div class="stage-column">
       <div class="section-header">
-        <h2>Momi Clips</h2>
-        <span class="muted small">${clips.length} video &amp; featured clips</span>
+        <h2>Momi Clips &amp; Videos</h2>
+        <button type="button" class="btn-primary btn-sm" id="uploadClipQuickBtn">Upload Video Clip</button>
       </div>
       ${
         clips.length === 0
-          ? '<div class="card-panel"><p class="muted" style="margin:0;">No clips published yet. Check "Publish as Clip" in Create Studio or upload from Android.</p></div>'
+          ? `<div class="card-panel" style="text-align:center;padding:32px;">
+              <h3 style="margin:0 0 8px;">No video clips yet</h3>
+              <p class="muted" style="margin:0 0 14px;">Upload any MP4/WebM video in Create Studio or share from Android.</p>
+              <button type="button" class="btn-primary" id="emptyClipCreateBtn">Create Video Clip</button>
+            </div>`
           : clips.map(renderPostCardHtml).join('')
       }
     </div>
   `;
+  document.getElementById('uploadClipQuickBtn').onclick = () => {
+    state.studio.mode = 'CLIP';
+    state.studio.isReel = true;
+    navigateTo('create');
+  };
+  document.getElementById('emptyClipCreateBtn')?.addEventListener('click', () => {
+    state.studio.mode = 'CLIP';
+    state.studio.isReel = true;
+    navigateTo('create');
+  });
   bindFeedInteractions(mainStage);
 }
 
@@ -1303,126 +1368,167 @@ function renderCreateStudio() {
   const s = state.studio;
   const activeSrc = s.uploadedSrc || resolveImageSrc({ imageKey: s.imageKey });
   const otherCreators = state.creators.filter((c) => c.userId !== state.user?.uid);
+  const isClipMode = s.mode === 'CLIP';
+  const isStoryMode = s.mode === 'STORY';
 
   mainStage.innerHTML = `
     <div class="stage-wide">
       <div class="section-header">
-        <h2>Desktop Photo &amp; Post Studio</h2>
-        <span class="muted small">Edits bake directly into uploaded JPEG &amp; sync with Android</span>
+        <div>
+          <h2>Create Studio</h2>
+          <div class="muted small">Upload photos or HD video clips directly to Supabase Storage</div>
+        </div>
+        <div class="chip-row">
+          <button type="button" class="chip ${s.mode === 'POST' ? 'active' : ''}" data-studio-mode="POST">Photo Post</button>
+          <button type="button" class="chip ${s.mode === 'CLIP' ? 'active' : ''}" data-studio-mode="CLIP">Video Clip</button>
+          <button type="button" class="chip ${s.mode === 'STORY' ? 'active' : ''}" data-studio-mode="STORY">24h Story</button>
+        </div>
       </div>
 
       <div class="studio-layout">
         <div class="card-panel">
           <div class="studio-canvas-box">
-            <canvas id="studioCanvas"></canvas>
+            ${
+              s.uploadedVideoUrl
+                ? `<video id="studioVideoPreview" src="${escapeHtml(s.uploadedVideoUrl)}" controls playsinline muted style="max-height:420px;width:100%;"></video>`
+                : `<canvas id="studioCanvas"></canvas>`
+            }
           </div>
 
-          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
-            <label class="btn-primary btn-sm" for="studioFileInput">Upload Photo from Computer</label>
+          <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+            <label class="btn-primary btn-sm" for="studioFileInput">${isClipMode ? 'Choose Cover Photo' : 'Upload Photo'}</label>
             <input id="studioFileInput" type="file" accept="image/*" class="hidden" />
-            <button type="button" class="btn-outline btn-sm" id="studioRotateBtn">Rotate 90&deg;</button>
+            <label class="btn-outline btn-sm" for="studioVideoInput">${s.uploadedVideoUrl ? 'Change Video' : 'Upload Video (.mp4)'}</label>
+            <input id="studioVideoInput" type="file" accept="video/*" class="hidden" />
+            ${!s.uploadedVideoUrl ? '<button type="button" class="btn-outline btn-sm" id="studioRotateBtn">Rotate 90&deg;</button>' : ''}
             <button type="button" class="btn-ghost btn-sm" id="studioResetEditBtn">Reset</button>
           </div>
 
-          <div>
-            <div class="muted small" style="margin-bottom:6px;">Or choose curated preset artwork:</div>
-            <div class="chip-row">
-              ${PRESET_IMAGE_OPTIONS.map((opt) => `
-                <button type="button" class="chip ${!s.uploadedSrc && s.imageKey === opt.key ? 'active' : ''}" data-preset-key="${opt.key}">${escapeHtml(opt.label)}</button>
-              `).join('')}
+          ${!s.uploadedVideoUrl ? `
+            <div>
+              <div class="muted small" style="margin-bottom:6px;">Quick Presets</div>
+              <div class="chip-row">
+                ${PRESET_IMAGE_OPTIONS.map((opt) => `
+                  <button type="button" class="chip ${!s.uploadedSrc && s.imageKey === opt.key ? 'active' : ''}" data-preset-key="${opt.key}">${escapeHtml(opt.label)}</button>
+                `).join('')}
+              </div>
             </div>
-          </div>
 
-          <div>
-            <div class="muted small" style="margin-bottom:6px;">Aspect Ratio</div>
-            <div class="chip-row">
-              ${ASPECT_RATIOS.map((r) => `
-                <button type="button" class="chip ${s.aspectRatio === r ? 'active' : ''}" data-aspect-btn="${r}">${r}</button>
-              `).join('')}
+            <div>
+              <div class="muted small" style="margin-bottom:6px;">Aspect Ratio</div>
+              <div class="chip-row">
+                ${ASPECT_RATIOS.map((r) => `
+                  <button type="button" class="chip ${s.aspectRatio === r ? 'active' : ''}" data-aspect-btn="${r}">${r}</button>
+                `).join('')}
+              </div>
             </div>
-          </div>
 
-          <div>
-            <div class="muted small" style="margin-bottom:6px;">Color Filters</div>
-            <div class="filter-strip">
-              ${FILTER_OPTIONS.map((f) => `
-                <button type="button" class="filter-thumb ${s.filterTag === f.tag ? 'active' : ''}" data-filter-tag="${f.tag}">${escapeHtml(f.label)}</button>
-              `).join('')}
+            <div>
+              <div class="muted small" style="margin-bottom:6px;">Color Filters</div>
+              <div class="filter-strip">
+                ${FILTER_OPTIONS.map((f) => `
+                  <button type="button" class="filter-thumb ${s.filterTag === f.tag ? 'active' : ''}" data-filter-tag="${f.tag}">${escapeHtml(f.label)}</button>
+                `).join('')}
+              </div>
             </div>
-          </div>
 
-          <div style="display:grid;gap:8px;">
-            <label class="small muted">Brightness (<span id="brightVal">${s.brightness}</span>)
-              <input id="brightSlider" type="range" min="-35" max="35" value="${s.brightness}" style="width:100%;" />
-            </label>
-            <label class="small muted">Contrast (<span id="contrastVal">${s.contrast}</span>)
-              <input id="contrastSlider" type="range" min="0.7" max="1.4" step="0.05" value="${s.contrast}" style="width:100%;" />
-            </label>
+            <div class="field-grid-2">
+              <label class="small muted">Brightness (<span id="brightVal">${s.brightness}</span>)
+                <input id="brightSlider" type="range" min="-35" max="35" value="${s.brightness}" style="width:100%;" />
+              </label>
+              <label class="small muted">Contrast (<span id="contrastVal">${s.contrast}</span>)
+                <input id="contrastSlider" type="range" min="0.7" max="1.4" step="0.05" value="${s.contrast}" style="width:100%;" />
+              </label>
+            </div>
             <label class="small muted">Warmth (<span id="warmthVal">${s.warmth}</span>)
               <input id="warmthSlider" type="range" min="-0.3" max="0.45" step="0.05" value="${s.warmth}" style="width:100%;" />
             </label>
-          </div>
+          ` : `
+            <div class="consent-row">
+              <div>
+                <strong>Video Ready for Upload</strong>
+                <div class="muted small">Selected video will stream directly via Supabase Video Storage.</div>
+              </div>
+              <button type="button" class="btn-outline btn-sm" id="clearStudioVideoBtn">Remove Video</button>
+            </div>
+          `}
         </div>
 
         <div class="card-panel">
-          <label class="small muted">Caption (supports #hashtags and @mentions)</label>
-          <textarea id="studioCaption" class="textarea" rows="4" placeholder="Write a caption with #hashtags and @creator tags...">${escapeHtml(s.caption)}</textarea>
+          <div>
+            <label class="small muted" for="studioCaption">${isStoryMode ? 'Story Caption' : 'Caption (supports #hashtags and @mentions)'}</label>
+            <textarea id="studioCaption" class="textarea" rows="4" placeholder="Write what you are sharing today... #momi" style="margin-top:6px;">${escapeHtml(s.caption)}</textarea>
+          </div>
 
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-            <div>
-              <label class="small muted">Location</label>
-              <input id="studioLocation" class="input" placeholder="e.g. Tokyo, Lahore" value="${escapeHtml(s.location)}" />
+          ${!isStoryMode ? `
+            <div class="field-grid-2">
+              <div>
+                <label class="small muted" for="studioLocation">Location</label>
+                <input id="studioLocation" class="input" placeholder="e.g. Tokyo, Lahore" value="${escapeHtml(s.location)}" style="margin-top:6px;" />
+              </div>
+              <div>
+                <label class="small muted" for="studioCategory">Category</label>
+                <select id="studioCategory" class="select" style="margin-top:6px;">
+                  ${EXPLORE_CATEGORIES.filter((c) => c !== 'For You').map((c) => `
+                    <option value="${escapeHtml(c)}" ${s.category === c ? 'selected' : ''}>${escapeHtml(c)}</option>
+                  `).join('')}
+                </select>
+              </div>
             </div>
+
             <div>
-              <label class="small muted">Category</label>
-              <select id="studioCategory" class="select">
-                ${EXPLORE_CATEGORIES.filter((c) => c !== 'For You').map((c) => `
-                  <option value="${escapeHtml(c)}" ${s.category === c ? 'selected' : ''}>${escapeHtml(c)}</option>
+              <label class="small muted">Hashtags</label>
+              <div style="display:flex;gap:8px;margin-top:6px;">
+                <input id="customTagInput" class="input" placeholder="Add #tag" />
+                <button type="button" class="btn-outline btn-sm" id="addCustomTagBtn">Add</button>
+              </div>
+              <div class="chip-row" style="margin-top:10px;">
+                ${TRENDING_HASHTAGS.map((t) => `
+                  <button type="button" class="chip ${s.hashtags.includes(t) ? 'active' : ''}" data-studio-tag="${t}">#${t}</button>
                 `).join('')}
-              </select>
+                ${s.hashtags.filter((t) => !TRENDING_HASHTAGS.includes(t)).map((t) => `
+                  <button type="button" class="chip active" data-studio-tag="${escapeHtml(t)}">#${escapeHtml(t)} &times;</button>
+                `).join('')}
+              </div>
             </div>
-          </div>
 
-          <div>
-            <label class="small muted">Hashtags</label>
-            <div style="display:flex;gap:8px;margin-top:6px;">
-              <input id="customTagInput" class="input" placeholder="Add #tag" />
-              <button type="button" class="btn-outline btn-sm" id="addCustomTagBtn">Add</button>
-            </div>
-            <div class="chip-row" style="margin-top:8px;">
-              ${TRENDING_HASHTAGS.map((t) => `
-                <button type="button" class="chip ${s.hashtags.includes(t) ? 'active' : ''}" data-studio-tag="${t}">#${t}</button>
-              `).join('')}
-              ${s.hashtags.filter((t) => !TRENDING_HASHTAGS.includes(t)).map((t) => `
-                <button type="button" class="chip active" data-studio-tag="${escapeHtml(t)}">#${escapeHtml(t)} &times;</button>
-              `).join('')}
-            </div>
-          </div>
+            ${otherCreators.length > 0 ? `
+              <div>
+                <label class="small muted">Tag Creators</label>
+                <div class="chip-row" style="margin-top:8px;">
+                  ${otherCreators.slice(0, 8).map((c) => `
+                    <button type="button" class="chip ${s.taggedUsernames.includes(c.username) ? 'active' : ''}" data-tag-creator="${escapeHtml(c.username)}">@${escapeHtml(c.username)}</button>
+                  `).join('')}
+                </div>
+              </div>
+            ` : ''}
 
-          <div>
-            <label class="small muted">Tag Creators</label>
-            <div class="chip-row" style="margin-top:6px;">
-              ${otherCreators.slice(0, 8).map((c) => `
-                <button type="button" class="chip ${s.taggedUsernames.includes(c.username) ? 'active' : ''}" data-tag-creator="${escapeHtml(c.username)}">@${escapeHtml(c.username)}</button>
-              `).join('')}
-            </div>
-          </div>
+            <label class="consent-row" style="cursor:pointer;">
+              <span>Feature in Momi Clips</span>
+              <input id="studioIsReel" type="checkbox" ${s.isReel || isClipMode ? 'checked' : ''} />
+            </label>
+          ` : ''}
 
-          <label style="display:flex;align-items:center;gap:8px;font-size:0.9rem;">
-            <input id="studioIsReel" type="checkbox" ${s.isReel ? 'checked' : ''} />
-            Feature in Momi Clips
-          </label>
-
-          <button type="button" class="btn-primary btn-lg" id="publishPostBtn" ${s.publishing ? 'disabled' : ''}>
-            ${s.publishing ? 'Publishing to Momi...' : 'Publish Post'}
+          <button type="button" class="btn-primary btn-lg full-width" id="publishPostBtn" ${s.publishing ? 'disabled' : ''}>
+            ${s.publishing ? 'Uploading & Publishing...' : (isStoryMode ? 'Share 24h Story' : (isClipMode || s.uploadedVideoUrl ? 'Publish Video Clip' : 'Publish Post'))}
           </button>
         </div>
       </div>
     </div>
   `;
 
+  mainStage.querySelectorAll('[data-studio-mode]').forEach((b) => {
+    b.onclick = () => {
+      s.mode = b.dataset.studioMode;
+      s.isReel = s.mode === 'CLIP';
+      renderCreateStudio();
+    };
+  });
+
   const canvas = document.getElementById('studioCanvas');
-  const redraw = () => renderEditedCanvas(canvas, activeSrc, s).catch(() => undefined);
+  const redraw = () => {
+    if (canvas) renderEditedCanvas(canvas, activeSrc, s).catch(() => undefined);
+  };
   redraw();
 
   document.getElementById('studioFileInput').onchange = (e) => {
@@ -1430,21 +1536,55 @@ function renderCreateStudio() {
     if (!file) return;
     if (s.uploadedSrc?.startsWith('blob:')) URL.revokeObjectURL(s.uploadedSrc);
     s.uploadedSrc = URL.createObjectURL(file);
+    s.uploadedFile = file;
     renderCreateStudio();
   };
 
-  document.getElementById('studioRotateBtn').onclick = () => {
-    s.rotationDeg = (s.rotationDeg + 90) % 360;
-    redraw();
+  document.getElementById('studioVideoInput').onchange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (s.uploadedVideoUrl?.startsWith('blob:')) URL.revokeObjectURL(s.uploadedVideoUrl);
+    s.uploadedVideoUrl = URL.createObjectURL(file);
+    s.uploadedVideoFile = file;
+    s.mode = 'CLIP';
+    s.isReel = true;
+    renderCreateStudio();
+    const vidEl = document.getElementById('studioVideoPreview');
+    if (vidEl) {
+      vidEl.onloadedmetadata = () => {
+        s.videoDurationMs = Math.round((vidEl.duration || 0) * 1000);
+      };
+    }
   };
 
+  document.getElementById('clearStudioVideoBtn')?.addEventListener('click', () => {
+    if (s.uploadedVideoUrl?.startsWith('blob:')) URL.revokeObjectURL(s.uploadedVideoUrl);
+    s.uploadedVideoUrl = null;
+    s.uploadedVideoFile = null;
+    s.videoDurationMs = 0;
+    s.mode = 'POST';
+    renderCreateStudio();
+  });
+
+  document.getElementById('studioRotateBtn')?.addEventListener('click', () => {
+    s.rotationDeg = (s.rotationDeg + 90) % 360;
+    redraw();
+  });
+
   document.getElementById('studioResetEditBtn').onclick = () => {
-    Object.assign(s, { filterTag: 'NONE', aspectRatio: '1:1', rotationDeg: 0, brightness: 0, contrast: 1, warmth: 0 });
+    Object.assign(s, {
+      filterTag: 'NONE',
+      aspectRatio: '1:1',
+      rotationDeg: 0,
+      brightness: 0,
+      contrast: 1,
+      warmth: 0
+    });
     renderCreateStudio();
   };
 
   mainStage.querySelectorAll('[data-preset-key]').forEach((b) => {
-    b.onclick = () => { s.uploadedSrc = null; s.imageKey = b.dataset.presetKey; renderCreateStudio(); };
+    b.onclick = () => { s.uploadedSrc = null; s.uploadedFile = null; s.imageKey = b.dataset.presetKey; renderCreateStudio(); };
   });
   mainStage.querySelectorAll('[data-aspect-btn]').forEach((b) => {
     b.onclick = () => { s.aspectRatio = b.dataset.aspectBtn; renderCreateStudio(); };
@@ -1453,22 +1593,25 @@ function renderCreateStudio() {
     b.onclick = () => { s.filterTag = b.dataset.filterTag; renderCreateStudio(); };
   });
 
-  document.getElementById('brightSlider').oninput = (e) => { s.brightness = Number(e.target.value); document.getElementById('brightVal').textContent = s.brightness; redraw(); };
-  document.getElementById('contrastSlider').oninput = (e) => { s.contrast = Number(e.target.value); document.getElementById('contrastVal').textContent = s.contrast; redraw(); };
-  document.getElementById('warmthSlider').oninput = (e) => { s.warmth = Number(e.target.value); document.getElementById('warmthVal').textContent = s.warmth; redraw(); };
+  const brightSlider = document.getElementById('brightSlider');
+  if (brightSlider) brightSlider.oninput = (e) => { s.brightness = Number(e.target.value); document.getElementById('brightVal').textContent = s.brightness; redraw(); };
+  const contrastSlider = document.getElementById('contrastSlider');
+  if (contrastSlider) contrastSlider.oninput = (e) => { s.contrast = Number(e.target.value); document.getElementById('contrastVal').textContent = s.contrast; redraw(); };
+  const warmthSlider = document.getElementById('warmthSlider');
+  if (warmthSlider) warmthSlider.oninput = (e) => { s.warmth = Number(e.target.value); document.getElementById('warmthVal').textContent = s.warmth; redraw(); };
 
   document.getElementById('studioCaption').oninput = (e) => { s.caption = e.target.value; };
-  document.getElementById('studioLocation').oninput = (e) => { s.location = e.target.value; };
-  document.getElementById('studioCategory').onchange = (e) => { s.category = e.target.value; };
-  document.getElementById('studioIsReel').onchange = (e) => { s.isReel = e.target.checked; };
+  document.getElementById('studioLocation')?.addEventListener('input', (e) => { s.location = e.target.value; });
+  document.getElementById('studioCategory')?.addEventListener('change', (e) => { s.category = e.target.value; });
+  document.getElementById('studioIsReel')?.addEventListener('change', (e) => { s.isReel = e.target.checked; });
 
-  document.getElementById('addCustomTagBtn').onclick = () => {
+  document.getElementById('addCustomTagBtn')?.addEventListener('click', () => {
     const val = document.getElementById('customTagInput').value.trim().replace(/^#/, '').toLowerCase().replace(/[^a-z0-9_]/g, '');
     if (val && !s.hashtags.includes(val) && s.hashtags.length < 15) {
       s.hashtags.push(val);
       renderCreateStudio();
     }
-  };
+  });
   mainStage.querySelectorAll('[data-studio-tag]').forEach((b) => {
     b.onclick = () => {
       const t = b.dataset.studioTag;
@@ -1489,42 +1632,120 @@ function renderCreateStudio() {
     s.publishing = true;
     renderCreateStudio();
     try {
-      const hasEdits = Boolean(s.uploadedSrc) || s.filterTag !== 'NONE' || s.aspectRatio !== '1:1' || s.rotationDeg !== 0 || s.brightness !== 0 || s.contrast !== 1 || s.warmth !== 0;
+      await ensureUserSeededInSupabase(state.user);
+
+      let imageUrl = null;
       let imageData = null;
-      if (hasEdits) {
+      let videoUrl = null;
+      const itemId = makeClientId(isStoryMode ? 'story' : 'post');
+
+      // Upload image/cover frame to Supabase Storage
+      const hasCustomOrEditedImage = Boolean(s.uploadedSrc) || s.filterTag !== 'NONE' || s.aspectRatio !== '1:1' || s.rotationDeg !== 0 || s.brightness !== 0 || s.contrast !== 1 || s.warmth !== 0;
+      if (hasCustomOrEditedImage && !s.uploadedVideoFile) {
         const exportCanvas = document.createElement('canvas');
         await renderEditedCanvas(exportCanvas, activeSrc, s);
-        imageData = exportCanvasToBase64Jpeg(exportCanvas, MAX_IMAGE_BASE64_CHARS);
+        const blob = await new Promise((resolve) => exportCanvas.toBlob(resolve, 'image/jpeg', 0.88));
+        if (blob) {
+          imageUrl = await uploadWebFileToStorage(
+            SUPABASE_WEB_CONFIG,
+            'momi-media',
+            `posts/${state.user.uid}/${itemId}.jpg`,
+            blob,
+            'image/jpeg'
+          );
+        }
+        if (!imageUrl) {
+          imageData = exportCanvasToBase64Jpeg(exportCanvas, MAX_IMAGE_BASE64_CHARS);
+        }
       }
-      const postId = makeClientId('post');
-      const finalHashtags = extractHashtags(s.caption, s.hashtags);
-      const finalTags = extractMentions(s.caption, s.taggedUsernames);
-      await setDoc(doc(db, 'posts', postId), {
-        userId: state.user.uid,
-        authorUsername: state.profile.username,
-        authorDisplayName: state.profile.displayName,
-        authorAvatarKey: state.profile.avatarKey || 'avatar_aria',
-        authorVerified: Boolean(state.profile.isVerified),
-        location: s.location.trim().slice(0, 120),
-        imageKey: s.imageKey,
-        imageData,
-        mediaType: 'IMAGE',
-        filterTag: s.filterTag,
-        aspectRatio: s.aspectRatio,
-        taggedUsernames: finalTags,
-        hashtags: finalHashtags,
-        caption: s.caption.trim().slice(0, 1000),
-        likesCount: 0,
-        viewsCount: 0,
-        commentsCount: 0,
-        category: s.category || 'Travel',
-        isReel: Boolean(s.isReel),
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
+
+      // Upload video to Supabase Storage if selected
+      if (s.uploadedVideoFile) {
+        const ext = (s.uploadedVideoFile.name.split('.').pop() || 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp4';
+        videoUrl = await uploadWebFileToStorage(
+          SUPABASE_WEB_CONFIG,
+          'momi-videos',
+          `videos/${state.user.uid}/${itemId}.${ext}`,
+          s.uploadedVideoFile,
+          s.uploadedVideoFile.type || 'video/mp4'
+        );
+        if (!videoUrl) {
+          throw new Error('Could not upload video file to Supabase Storage. Ensure supabase/enable_sync.sql has been run.');
+        }
+      }
+
+      if (isStoryMode) {
+        await upsertSupabaseTable(
+          SUPABASE_WEB_CONFIG,
+          'stories',
+          [{
+            id: itemId,
+            user_id: state.user.uid,
+            username: state.profile.username,
+            avatar_key: state.profile.avatarKey || 'avatar_aria',
+            image_key: s.imageKey,
+            image_url: imageUrl,
+            image_data: imageData,
+            media_type: videoUrl ? 'VIDEO' : 'IMAGE',
+            video_url: videoUrl,
+            video_duration_ms: s.videoDurationMs || 0,
+            caption: s.caption.trim().slice(0, 300)
+          }],
+          '',
+          globalThis.fetch,
+          'id'
+        );
+        showToast('Story published to Momi!');
+      } else {
+        const finalHashtags = extractHashtags(s.caption, s.hashtags);
+        const finalTags = extractMentions(s.caption, s.taggedUsernames);
+        const isVideo = Boolean(videoUrl);
+        await upsertSupabaseTable(
+          SUPABASE_WEB_CONFIG,
+          'posts',
+          [{
+            id: itemId,
+            user_id: state.user.uid,
+            author_username: state.profile.username,
+            author_display_name: state.profile.displayName,
+            author_avatar_key: state.profile.avatarKey || 'avatar_aria',
+            author_verified: Boolean(state.profile.isVerified),
+            location: s.location.trim().slice(0, 120),
+            image_key: s.imageKey,
+            image_url: imageUrl,
+            image_data: imageData,
+            media_type: isVideo ? 'VIDEO' : 'IMAGE',
+            video_url: videoUrl,
+            video_duration_ms: s.videoDurationMs || 0,
+            filter_tag: s.filterTag,
+            aspect_ratio: s.aspectRatio,
+            tagged_usernames: finalTags,
+            hashtags: finalHashtags,
+            caption: s.caption.trim().slice(0, 1000),
+            likes_count: 0,
+            views_count: 0,
+            comments_count: 0,
+            category: s.category || 'Travel',
+            is_reel: Boolean(s.isReel || isVideo)
+          }],
+          '',
+          globalThis.fetch,
+          'id'
+        );
+        showToast('Published to Momi across Web & Android!');
+      }
+
+      if (s.uploadedSrc?.startsWith('blob:')) URL.revokeObjectURL(s.uploadedSrc);
+      if (s.uploadedVideoUrl?.startsWith('blob:')) URL.revokeObjectURL(s.uploadedVideoUrl);
+
       state.studio = {
-        ...state.studio,
+        mode: 'POST',
+        imageKey: 'img_post_coastal',
         uploadedSrc: null,
+        uploadedFile: null,
+        uploadedVideoUrl: null,
+        uploadedVideoFile: null,
+        videoDurationMs: 0,
         filterTag: 'NONE',
         aspectRatio: '1:1',
         rotationDeg: 0,
@@ -1533,11 +1754,13 @@ function renderCreateStudio() {
         warmth: 0,
         caption: '',
         location: '',
+        category: 'Travel',
+        isReel: false,
         hashtags: [],
         taggedUsernames: [],
         publishing: false
       };
-      showToast('Published to Momi across Web & Android!');
+      await refreshAllFromSupabase({ showErrors: false });
       navigateTo('home');
     } catch (err) {
       s.publishing = false;
@@ -1551,25 +1774,29 @@ function renderLiveLobby() {
   mainStage.innerHTML = `
     <div class="stage-wide">
       <div class="section-header">
-        <h2>Momi Live Rooms</h2>
-        <button type="button" class="btn-primary" id="lobbyGoLiveBtn">Start Desktop Webcam Broadcast</button>
+        <div>
+          <h2>Momi Live Rooms</h2>
+          <div class="muted small">Go live with webcam or Live Studio Stage &middot; interactive real-time chat &amp; gifts</div>
+        </div>
+        <button type="button" class="btn-primary" id="lobbyGoLiveBtn">Start Live Studio</button>
       </div>
       ${
         state.liveStreams.length === 0
-          ? `<div class="card-panel" style="text-align:center;padding:36px;">
-              <h3 style="margin:0 0 8px;">No creators are live right now</h3>
-              <p class="muted" style="margin:0 0 16px;">Go live from your computer webcam — Android Momi users can watch and send gifts in real time.</p>
+          ? `<div class="card-panel" style="text-align:center;padding:40px 24px;">
+              <h3 style="margin:0 0 8px;">No broadcasts active right now</h3>
+              <p class="muted" style="margin:0 0 18px;">Start your own live studio room from Web or Android — your audience can chat, send hearts, and send gifts immediately.</p>
               <button type="button" class="btn-primary" id="lobbyEmptyLiveBtn">Go Live Now</button>
             </div>`
           : `<div class="rednote-grid">
               ${state.liveStreams.map((s) => `
-                <article class="card-panel" style="gap:10px;">
+                <article class="card-panel" style="gap:12px;">
                   <div style="display:flex;align-items:center;gap:10px;">
-                    ${avatarHtml(s, 42)}
-                    <div>
+                    ${avatarHtml({ userId: s.userId, username: s.username }, 44)}
+                    <div style="min-width:0;">
                       <div class="post-author-name">@${escapeHtml(s.username)}</div>
-                      <div class="muted small">${formatCount(s.viewerCount || 0)} watching &middot; ${formatCount(s.giftsCredits || 0)} gifts</div>
+                      <div class="muted small">${formatCount(s.viewerCount || 0)} watching &middot; ${formatCount(s.likesCount || 0)} hearts</div>
                     </div>
+                    <span class="badge-pill live">LIVE</span>
                   </div>
                   <div style="font-weight:700;">${escapeHtml(s.title || 'Live Broadcast')}</div>
                   <button type="button" class="btn-primary btn-sm" data-open-live="${escapeHtml(s.userId)}">Join Live Room</button>
@@ -1588,26 +1815,48 @@ function renderLiveLobby() {
 }
 
 function renderMarketplace() {
+  const categories = ['All', 'Collectibles', 'Fashion', 'Tech', 'Art', 'Home', 'Digital'];
+  const filtered = state.marketCategory === 'All'
+    ? state.products
+    : state.products.filter((p) => (p.category || '').toLowerCase() === state.marketCategory.toLowerCase());
+
   mainStage.innerHTML = `
     <div class="stage-wide">
       <div class="section-header">
-        <h2>Momi Marketplace</h2>
-        <span class="muted small">${state.products.length} listings &middot; ${state.orders.length} your orders</span>
+        <div>
+          <h2>Momi Marketplace</h2>
+          <div class="muted small">${state.products.length} listings &middot; ${state.orders.length} orders</div>
+        </div>
+        <div class="chip-row">
+          <button type="button" class="btn-primary btn-sm" id="marketSellBtn">+ Sell Item</button>
+          <button type="button" class="btn-outline btn-sm" id="marketOrdersBtn">Orders (${state.orders.length})</button>
+        </div>
       </div>
+
+      <div class="chip-row">
+        ${categories.map((c) => `
+          <button type="button" class="chip ${state.marketCategory === c ? 'active' : ''}" data-market-cat="${escapeHtml(c)}">${escapeHtml(c)}</button>
+        `).join('')}
+      </div>
+
       ${renderSponsoredPartnerBannerHtml('marketplace')}
+
       <div class="rednote-grid">
         ${
-          state.products.length === 0
-            ? '<div class="card-panel"><p class="muted" style="margin:0;">No marketplace listings available yet.</p></div>'
-            : state.products.map((prod) => `
-              <article class="rednote-card">
-                <img class="rednote-thumb" src="${resolveImageSrc({ imageData: prod.imageData, imageKey: prod.imageKey })}" alt="${escapeHtml(prod.title)}" />
+          filtered.length === 0
+            ? '<div class="card-panel"><p class="muted" style="margin:0;">No marketplace listings in this category yet. Tap "+ Sell Item" to publish one!</p></div>'
+            : filtered.map((prod) => `
+              <article class="rednote-card" data-open-product="${escapeHtml(prod.id)}">
+                <div style="position:relative;">
+                  <img class="rednote-thumb" src="${resolveImageSrc({ imageUrl: prod.imageUrl, imageData: prod.imageData, imageKey: prod.imageKey })}" alt="${escapeHtml(prod.title)}" loading="lazy" />
+                  ${prod.isFeatured ? '<span class="media-badge" style="background:var(--primary);">Featured</span>' : ''}
+                </div>
                 <div class="rednote-meta">
                   <div style="font-weight:700;">${escapeHtml(prod.title)}</div>
                   <div class="muted small">${escapeHtml(prod.storeName)} &middot; ${prod.freeShipping ? 'Free shipping' : 'Standard'}</div>
                   <div class="rednote-footer">
-                    <strong style="color:var(--primary);font-size:0.98rem;">$${Number(prod.priceUsd || 0).toFixed(2)}</strong>
-                    ${prod.sellerUid !== state.user?.uid ? `<button type="button" class="btn-primary btn-sm" data-buy-product="${escapeHtml(prod.id)}">Order</button>` : '<span class="muted small">Your listing</span>'}
+                    <strong style="color:var(--primary);font-size:1rem;">$${Number(prod.priceUsd || 0).toFixed(2)}</strong>
+                    <span class="btn-outline btn-sm">${prod.sellerUid === state.user?.uid ? 'Manage' : 'View'}</span>
                   </div>
                 </div>
               </article>
@@ -1616,29 +1865,17 @@ function renderMarketplace() {
       </div>
     </div>
   `;
-  mainStage.querySelectorAll('[data-buy-product]').forEach((b) => {
-    b.onclick = async () => {
-      const prod = state.products.find((p) => p.id === b.dataset.buyProduct);
-      if (!prod || !state.profile) return;
-      const addr = window.prompt(`Shipping address for "${prod.title}" ($${Number(prod.priceUsd).toFixed(2)}):`);
-      if (!addr || !addr.trim()) return;
-      await setDoc(doc(db, 'marketOrders', makeClientId('order')), {
-        buyerUid: state.user.uid,
-        buyerUsername: state.profile.username,
-        sellerUid: prod.sellerUid,
-        sellerStoreName: prod.storeName,
-        productId: prod.id,
-        productTitle: prod.title,
-        productImageKey: prod.imageKey,
-        productImageData: prod.imageData || null,
-        priceUsd: Number(prod.priceUsd),
-        shippingAddress: addr.trim().slice(0, 300),
-        status: 'PLACED',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
-      showToast('Order placed!');
+
+  mainStage.querySelectorAll('[data-market-cat]').forEach((b) => {
+    b.onclick = () => {
+      state.marketCategory = b.dataset.marketCat;
+      renderMarketplace();
     };
+  });
+  document.getElementById('marketSellBtn').onclick = () => openSellProductModal();
+  document.getElementById('marketOrdersBtn').onclick = () => openOrdersModal();
+  mainStage.querySelectorAll('[data-open-product]').forEach((el) => {
+    el.onclick = () => openProductDetailModal(el.dataset.openProduct);
   });
 }
 
@@ -1653,19 +1890,20 @@ function renderMessages() {
     <div class="stage-wide">
       <div class="section-header">
         <h2>Direct Messages</h2>
-        <span class="muted small">Real-time sync with Momi Android</span>
+        <span class="muted small">Real-time cross-device sync via Supabase</span>
       </div>
       <div class="messages-split">
         <div class="threads-pane">
           ${
             state.threads.length === 0
-              ? '<p class="muted small" style="padding:18px;">No threads yet. Open any creator profile to send a message.</p>'
+              ? '<p class="muted small" style="padding:18px;">No conversations yet. Open any creator profile to send a message.</p>'
               : state.threads.map((t) => {
+                const otherUid = t.userAId === uid ? t.userBId : t.userAId;
                 const otherName = t.userAId === uid ? t.userBUsername : t.userAUsername;
                 const isUnread = t.unreadUid === uid && (t.unreadCount || 0) > 0;
                 return `
                   <button type="button" class="thread-row ${t.id === state.activeThreadId ? 'active' : ''}" data-select-thread="${escapeHtml(t.id)}">
-                    ${avatarHtml({ username: otherName }, 40)}
+                    ${avatarHtml({ userId: otherUid, username: otherName }, 40)}
                     <div style="min-width:0;flex:1;">
                       <div style="font-weight:${isUnread ? '800' : '600'};font-size:0.9rem;">@${escapeHtml(otherName)}</div>
                       <div class="muted small" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(t.lastMessage || 'Start chatting')}</div>
@@ -1683,13 +1921,15 @@ function renderMessages() {
               ? '<div style="margin:auto;padding:24px;" class="muted">Select a conversation on the left.</div>'
               : `
                 <div class="chat-header">
-                  ${avatarHtml({ username: activeThread.userAId === uid ? activeThread.userBUsername : activeThread.userAUsername }, 34)}
+                  ${avatarHtml({ userId: activeThread.userAId === uid ? activeThread.userBId : activeThread.userAId, username: activeThread.userAId === uid ? activeThread.userBUsername : activeThread.userAUsername }, 34)}
                   <strong>@${escapeHtml(activeThread.userAId === uid ? activeThread.userBUsername : activeThread.userAUsername)}</strong>
                 </div>
                 <div id="chatScrollBox" class="chat-messages">
                   ${state.activeMessages.map((m) => `
                     <div class="bubble ${m.senderUid === uid ? 'mine' : ''}">
-                      ${m.imageData ? `<img src="${resolveImageSrc({ imageData: m.imageData })}" alt="Attachment" />` : ''}
+                      ${m.messageType === 'IMAGE' && (m.mediaUrl || m.imageData) ? `<img src="${resolveImageSrc({ imageUrl: m.mediaUrl, imageData: m.imageData })}" alt="Attachment" />` : ''}
+                      ${m.messageType === 'VIDEO' && (m.mediaUrl || m.videoData) ? `<video src="${escapeHtml(resolveVideoSrc(m))}" controls playsinline></video>` : ''}
+                      ${m.messageType === 'AUDIO' && (m.mediaUrl || m.audioData) ? `<audio src="${escapeHtml(m.mediaUrl || `data:audio/mp4;base64,${m.audioData}`)}" controls style="max-width:240px;"></audio>` : ''}
                       <div>${escapeHtml(m.text)}</div>
                     </div>
                   `).join('')}
@@ -1727,55 +1967,86 @@ function renderMessages() {
     document.getElementById('chatPhotoInput').onchange = async (e) => {
       const file = e.target.files?.[0];
       if (!file) return;
-      const b64 = await compressFileToBase64(file, 900, 620000);
-      await sendChatMessage(activeThread, { text: 'Sent a photo', messageType: 'IMAGE', imageData: b64 });
+      const msgId = makeClientId('msg');
+      const uploadedUrl = await uploadWebFileToStorage(
+        SUPABASE_WEB_CONFIG,
+        'momi-media',
+        `chat/${activeThread.id}/${msgId}.jpg`,
+        file,
+        file.type || 'image/jpeg'
+      );
+      const b64 = uploadedUrl ? null : await compressFileToBase64(file, 900, 620000);
+      await sendChatMessage(activeThread, {
+        msgId,
+        text: 'Photo',
+        messageType: 'IMAGE',
+        mediaUrl: uploadedUrl,
+        imageData: b64
+      });
     };
   }
 }
 
+async function loadMessagesForThread(threadId) {
+  if (!threadId) return;
+  const rows = await selectSupabaseTable(
+    SUPABASE_WEB_CONFIG,
+    'chat_messages',
+    `select=*&thread_id=eq.${encodeURIComponent(threadId)}&order=created_at.asc&limit=100`
+  );
+  state.activeMessages = rows.map(mapSupabaseChatMessageToWeb);
+  if (state.nav === 'messages') renderMessages();
+}
+
 function selectThread(threadId) {
   state.activeThreadId = threadId;
-  if (state.msgUnsubs) state.msgUnsubs();
-  state.msgUnsubs = onSnapshot(
-    query(collection(db, 'threads', threadId, 'messages'), orderBy('createdAt', 'asc'), limit(80)),
-    (snap) => {
-      state.activeMessages = snap.docs.map((d) => ({ ...d.data(), id: d.id }));
-      if (state.nav === 'messages') renderMessages();
-    }
-  );
+  loadMessagesForThread(threadId);
   const t = state.threads.find((x) => x.id === threadId);
   if (t && t.unreadUid === state.user?.uid && (t.unreadCount || 0) > 0) {
-    updateDoc(doc(db, 'threads', threadId), {
-      unreadUid: '',
-      unreadCount: 0,
-      updatedAt: serverTimestamp()
-    }).catch(() => undefined);
+    patchSupabaseRows(
+      SUPABASE_WEB_CONFIG,
+      'threads',
+      `id=eq.${encodeURIComponent(threadId)}`,
+      { unread_uid: '', unread_count: 0 }
+    ).catch(() => undefined);
   }
 }
 
-async function sendChatMessage(thread, { text, messageType = 'TEXT', imageData = null }) {
+async function sendChatMessage(thread, { msgId = makeClientId('msg'), text, messageType = 'TEXT', mediaUrl = null, imageData = null }) {
   if (!state.profile) return;
   const uid = state.user.uid;
   const otherUid = thread.userAId === uid ? thread.userBId : thread.userAId;
-  const batch = writeBatch(db);
-  batch.set(doc(db, 'threads', thread.id, 'messages', makeClientId('msg')), {
-    participantUids: thread.participantUids,
-    senderUid: uid,
-    senderUsername: state.profile.username,
-    text: text.slice(0, 1000),
-    messageType,
-    imageData,
-    createdAt: serverTimestamp()
-  });
-  batch.update(doc(db, 'threads', thread.id), {
-    lastMessage: text.slice(0, 500),
-    lastSenderUid: uid,
-    unreadUid: otherUid,
-    unreadCount: (thread.unreadCount || 0) + 1,
-    timeLabel: 'Just now',
-    updatedAt: serverTimestamp()
-  });
-  await batch.commit();
+  await upsertSupabaseTable(
+    SUPABASE_WEB_CONFIG,
+    'chat_messages',
+    [{
+      id: msgId,
+      thread_id: thread.id,
+      participant_uids: thread.participantUids,
+      sender_uid: uid,
+      sender_username: state.profile.username,
+      text: text.slice(0, 1000),
+      message_type: messageType,
+      media_url: mediaUrl,
+      image_data: imageData
+    }],
+    '',
+    globalThis.fetch,
+    'id'
+  );
+  await patchSupabaseRows(
+    SUPABASE_WEB_CONFIG,
+    'threads',
+    `id=eq.${encodeURIComponent(thread.id)}`,
+    {
+      last_message: text.slice(0, 500),
+      last_sender_uid: uid,
+      unread_uid: otherUid,
+      unread_count: (thread.unreadCount || 0) + 1,
+      time_label: 'Just now'
+    }
+  );
+  await loadMessagesForThread(thread.id);
 }
 
 function renderNotifications() {
@@ -1783,7 +2054,7 @@ function renderNotifications() {
   mainStage.innerHTML = `
     <div class="stage-column">
       <div class="section-header">
-        <h2>Activity &amp; Alert Sounds</h2>
+        <h2>Activity &amp; Alerts</h2>
         <div class="chip-row">
           <button type="button" class="btn-outline btn-sm" id="testChimeBtn">Test Sound</button>
           ${desktopPerm === 'default' ? '<button type="button" class="btn-primary btn-sm" id="enableDesktopNotifsBtn">Enable Desktop Popups</button>' : ''}
@@ -1793,11 +2064,11 @@ function renderNotifications() {
 
       ${
         state.notifications.length === 0
-          ? '<div class="card-panel"><p class="muted" style="margin:0;">No notifications yet. Likes, comments, follows, and gift alerts appear here with sound chimes.</p></div>'
+          ? '<div class="card-panel"><p class="muted" style="margin:0;">No notifications yet. Likes, comments, follows, and gift alerts appear here.</p></div>'
           : state.notifications.map((n) => `
             <div class="card-panel" style="flex-direction:row;align-items:center;justify-content:space-between;${n.isUnread ? 'border-color:var(--primary);' : ''}">
               <div style="display:flex;align-items:center;gap:12px;">
-                ${avatarHtml({ username: n.actorUsername }, 40)}
+                ${avatarHtml({ userId: n.actorUid, username: n.actorUsername }, 40)}
                 <div>
                   <div><strong>@${escapeHtml(n.actorUsername)}</strong> ${escapeHtml(n.message)}</div>
                   <div class="muted small">${escapeHtml(n.timeLabel || n.section || 'Recent')}</div>
@@ -1823,13 +2094,15 @@ function renderNotifications() {
     };
   }
   document.getElementById('markAllReadBtn').onclick = async () => {
-    const unread = state.notifications.filter((n) => n.isUnread);
-    for (const n of unread) {
-      await updateDoc(doc(db, 'users', state.user.uid, 'notifications', n.id), {
-        isUnread: false,
-        updatedAt: serverTimestamp()
-      }).catch(() => undefined);
-    }
+    await patchSupabaseRows(
+      SUPABASE_WEB_CONFIG,
+      'notifications',
+      `user_id=eq.${encodeURIComponent(state.user.uid)}&is_unread=eq.true`,
+      { is_unread: false }
+    );
+    state.notifications = state.notifications.map((n) => ({ ...n, isUnread: false }));
+    updateBadges();
+    renderNotifications();
     showToast('Marked notifications as read');
   };
   bindUserAndFollowButtons(mainStage);
@@ -1854,14 +2127,14 @@ function renderWallet() {
           <span>Tier: ${escapeHtml(w.accountTier)}</span>
           <span>Verification: ${escapeHtml(w.verificationTier)}</span>
         </div>
-        <div class="small" style="opacity:0.9;margin-top:4px;">Credit purchases are processed securely via Google Play inside the Momi Android app and sync here immediately.</div>
+        <div class="small" style="opacity:0.9;margin-top:4px;">Credits purchased in the Momi Android app sync here immediately via Supabase.</div>
       </div>
 
       <div class="card-panel">
         <div class="consent-row">
           <div>
             <strong>Creator Growth &amp; Owner Perks Consent</strong>
-            <div class="muted small">Opt in to allow Momi's owner to grant bonus credits, recommended post spotlights, and exclusive perks to your account.</div>
+            <div class="muted small">Opt in to allow Momi's owner to grant bonus credits, recommended post spotlights, and exclusive perks.</div>
           </div>
           <label style="display:flex;align-items:center;gap:8px;font-weight:700;cursor:pointer;">
             <input id="walletConsentToggle" type="checkbox" ${consentOn ? 'checked' : ''} />
@@ -1872,10 +2145,10 @@ function renderWallet() {
 
       <div class="card-panel">
         <h3 style="margin:0;">Boost Your Posts with Credits</h3>
-        <div class="muted small">Elevate your photos &amp; clips higher in For You &amp; Search across Android &amp; Web.</div>
+        <div class="muted small">Elevate your photos &amp; clips higher in For You &amp; Search discovery.</div>
         ${
           myPosts.length === 0
-            ? '<p class="muted small" style="margin:0;">Publish a post first, then boost it right here or from the Home Feed.</p>'
+            ? '<p class="muted small" style="margin:0;">Publish a post first, then boost it right here or from Home Feed.</p>'
             : myPosts.map((p) => {
               const badge = boostBadgeLabelForPost(p);
               return `
@@ -1938,7 +2211,6 @@ function renderWallet() {
   `;
 
   document.getElementById('walletConsentToggle').onchange = (e) => updatePartnerConsent(e.target.checked);
-
   mainStage.querySelectorAll('[data-boost-post]').forEach((b) => {
     b.onclick = () => {
       const target = state.posts.find((p) => p.id === b.dataset.boostPost);
@@ -1955,36 +2227,32 @@ function renderWallet() {
         return;
       }
       const txId = makeClientId('perk');
-      const batch = writeBatch(db);
       const nextPerks = [...new Set([...(w.unlockedPerks || []), perk.key])];
       const nextTier = tierForTotalPurchased(w.totalPurchased || 0, nextPerks);
       const nextVerif = verificationTierForPerks(w.verificationTier || 'NONE', nextPerks);
-      batch.update(doc(db, 'wallets', state.user.uid), {
+      await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'wallets', `user_id=eq.${encodeURIComponent(state.user.uid)}`, {
         balance: w.balance - perk.cost,
-        totalSpent: (w.totalSpent || 0) + perk.cost,
-        accountTier: nextTier,
-        verificationTier: nextVerif,
-        unlockedPerks: nextPerks,
-        lastTxId: txId,
-        updatedAt: serverTimestamp()
+        total_spent: (w.totalSpent || 0) + perk.cost,
+        account_tier: nextTier,
+        verification_tier: nextVerif,
+        unlocked_perks: nextPerks,
+        last_tx_id: txId
       });
-      batch.set(doc(db, 'creditTransactions', txId), {
-        txId,
+      await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'credit_transactions', [{
+        tx_id: txId,
         type: 'PERK_UNLOCK',
-        senderUid: state.user.uid,
-        senderUsername: state.profile.username,
-        recipientUid: state.user.uid,
-        recipientUsername: state.profile.username,
-        creditsAmount: perk.cost,
-        priceUsd: 0,
-        paymentMethod: 'WALLET_CREDITS',
-        perkKey: perk.key,
-        recipientClaimed: true,
-        status: 'COMPLETED',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
-      await batch.commit();
+        sender_uid: state.user.uid,
+        sender_username: state.profile.username,
+        recipient_uid: state.user.uid,
+        recipient_username: state.profile.username,
+        credits_amount: perk.cost,
+        price_usd: 0,
+        payment_method: 'WALLET_CREDITS',
+        perk_key: perk.key,
+        recipient_claimed: true,
+        status: 'COMPLETED'
+      }], '', globalThis.fetch, 'tx_id');
+      await refreshAllFromSupabase({ showErrors: false });
       showToast(`Unlocked ${perk.name}!`);
     };
   });
@@ -2003,10 +2271,11 @@ function renderProfile() {
     );
     if (postWithAuthor) {
       profile = {
-        userId: targetUid,
+        userId: postWithAuthor.userId || targetUid,
         username: postWithAuthor.authorUsername || 'creator',
         displayName: postWithAuthor.authorDisplayName || postWithAuthor.authorUsername || 'Creator',
         avatarKey: postWithAuthor.authorAvatarKey || 'avatar_aria',
+        avatarUrl: null,
         avatarData: null,
         bio: '',
         website: '',
@@ -2019,37 +2288,20 @@ function renderProfile() {
   }
 
   if (!profile) {
-    if (!state.user) {
-      mainStage.innerHTML = `
-        <div class="stage-column">
-          <div class="card-panel" style="text-align:center;padding:36px 20px;">
-            <h2 style="margin:0 0 8px;">Welcome to Momi</h2>
-            <p class="muted" style="margin-bottom:20px;">Sign in with Google to view your profile, manage posts, and access the Owner Studio Console.</p>
-            <button type="button" class="btn-primary" id="profileGuestSignInBtn">Sign In with Google</button>
-          </div>
-        </div>
-      `;
-      const gBtn = document.getElementById('profileGuestSignInBtn');
-      if (gBtn) gBtn.onclick = () => document.getElementById('googleSignInBtn')?.click();
-      return;
-    }
-
     mainStage.innerHTML = `
       <div class="stage-column">
         <div class="card-panel" style="text-align:center;padding:32px 20px;">
-          <h3 style="margin:0 0 8px;">Profile Not Found</h3>
-          <p class="muted" style="margin-bottom:18px;">This creator profile is syncing or unavailable.</p>
+          <h3 style="margin:0 0 8px;">Creator Profile</h3>
+          <p class="muted" style="margin-bottom:18px;">This creator profile is still syncing.</p>
           <div class="chip-row" style="justify-content:center;">
-            <button type="button" class="btn-primary" id="goToMyProfileBtn">Go to My Profile</button>
-            <button type="button" class="btn-outline" id="profileBackToFeedBtn">Back to Feed</button>
+            <button type="button" class="btn-primary" id="goToMyProfileBtn">My Profile</button>
+            <button type="button" class="btn-outline" id="profileBackToFeedBtn">Home Feed</button>
           </div>
         </div>
       </div>
     `;
-    const myBtn = document.getElementById('goToMyProfileBtn');
-    if (myBtn) myBtn.onclick = () => { state.viewedProfileUid = state.user?.uid || null; renderProfile(); };
-    const feedBtn = document.getElementById('profileBackToFeedBtn');
-    if (feedBtn) feedBtn.onclick = () => navigateTo('home');
+    document.getElementById('goToMyProfileBtn')?.addEventListener('click', () => { state.viewedProfileUid = state.user?.uid || null; renderProfile(); });
+    document.getElementById('profileBackToFeedBtn')?.addEventListener('click', () => navigateTo('home'));
     return;
   }
 
@@ -2087,7 +2339,7 @@ function renderProfile() {
           </div>
 
           <div class="chip-row">
-            <button type="button" class="btn-outline" id="shareProfileBtn">Share Profile</button>
+            <button type="button" class="btn-outline" id="shareProfileBtn">Share</button>
             ${
               isOwn
                 ? '<button type="button" class="btn-outline" id="editProfileBtn">Edit Profile</button><button type="button" class="btn-primary" id="profileCreateBtn">New Post</button>'
@@ -2120,13 +2372,13 @@ function renderProfile() {
           <div class="section-header">
             <div>
               <strong>Owner Studio Console (${escapeHtml(ADMIN_OWNER_EMAIL)})</strong>
-              <div class="muted small">Live-manage AdMob, Start.io, Monetag, Consent Grants, Post Recommendations &amp; Starter Activity.</div>
+              <div class="muted small">Live-manage AdMob, Start.io, Monetag, Grants, Post Recommendations &amp; Supabase Cloud.</div>
             </div>
             <div class="chip-row">
               <button type="button" class="chip ${state.ownerConsoleTab === 'monetizers' ? 'active' : ''}" data-owner-tab="monetizers">Monetizers Setup</button>
               <button type="button" class="chip ${state.ownerConsoleTab === 'grants' ? 'active' : ''}" data-owner-tab="grants">Grants (${consentingCreators.length})</button>
               <button type="button" class="chip ${state.ownerConsoleTab === 'recommend' ? 'active' : ''}" data-owner-tab="recommend">Recommend Posts</button>
-              <button type="button" class="chip ${state.ownerConsoleTab === 'supabase' ? 'active' : ''}" data-owner-tab="supabase">Supabase Migration</button>
+              <button type="button" class="chip ${state.ownerConsoleTab === 'supabase' ? 'active' : ''}" data-owner-tab="supabase">Supabase Status</button>
             </div>
           </div>
 
@@ -2163,12 +2415,12 @@ function renderProfile() {
                 </div>
                 <div>
                   <label class="small muted">Monetag Meta Verification Content</label>
-                  <input id="cfgMonetagMeta" class="input" placeholder="content value from Monetag <meta>" value="${escapeHtml(cfg.monetagWebMetaTag || '')}" />
+                  <input id="cfgMonetagMeta" class="input" placeholder="content value" value="${escapeHtml(cfg.monetagWebMetaTag || '')}" />
                 </div>
               </div>
               <div class="owner-form-grid">
                 <div>
-                  <label class="small muted">Gamezop Publisher / Property ID</label>
+                  <label class="small muted">Gamezop Publisher ID</label>
                   <input id="cfgGamezopPubId" class="input" placeholder="e.g. 9012" value="${escapeHtml(cfg.gamezopPublisherId || '')}" />
                 </div>
                 <div>
@@ -2176,8 +2428,8 @@ function renderProfile() {
                   <input id="cfgGamezopPortalUrl" class="input" placeholder="https://www.gamezop.com/?id=..." value="${escapeHtml(cfg.gamezopPortalUrl || '')}" />
                 </div>
                 <div>
-                  <label class="small muted">Gamezop Arcade Card Title</label>
-                  <input id="cfgGamezopTitle" class="input" placeholder="Momi Arcade · Play Instant Games" value="${escapeHtml(cfg.gamezopBannerTitle || '')}" />
+                  <label class="small muted">Gamezop Card Title</label>
+                  <input id="cfgGamezopTitle" class="input" value="${escapeHtml(cfg.gamezopBannerTitle || '')}" />
                 </div>
               </div>
               <div class="owner-form-grid">
@@ -2196,8 +2448,8 @@ function renderProfile() {
               </div>
               <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
                 <button type="submit" class="btn-primary" ${state.adminBusy ? 'disabled' : ''}>Save Live Monetization Config</button>
-                <a class="btn-outline btn-sm" href="https://business.gamezop.com" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Gamezop Business Portal &#8599;</a>
-                <a class="btn-outline btn-sm" href="https://publishers.monetag.com" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Monetag Dashboard &#8599;</a>
+                <a class="btn-outline btn-sm" href="https://business.gamezop.com" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Gamezop &#8599;</a>
+                <a class="btn-outline btn-sm" href="https://publishers.monetag.com" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Monetag &#8599;</a>
               </div>
             </form>
           ` : ''}
@@ -2212,7 +2464,7 @@ function renderProfile() {
                       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
                         <div>
                           <strong>@${escapeHtml(c.username)}</strong> ${c.isVerified ? '<span class="verified-dot">&#10003;</span>' : ''}
-                          <div class="muted small">${escapeHtml(c.displayName)} &middot; Partner Consent Opted In</div>
+                          <div class="muted small">${escapeHtml(c.displayName)} &middot; Opted In</div>
                         </div>
                         <button type="button" class="btn-outline btn-sm" data-grant-open="${escapeHtml(c.userId)}">Grant Credits / Perk</button>
                       </div>
@@ -2249,23 +2501,20 @@ function renderProfile() {
             <div style="display:grid;gap:12px;">
               <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
                 <div>
-                  <strong>Supabase PostgreSQL + RLS Migration (Phase 1)</strong>
+                  <strong>Supabase PostgreSQL &amp; Storage (Primary Backend)</strong>
                   <div class="muted small">${escapeHtml(state.supabaseStatus)}</div>
                 </div>
-                <span class="pill">${isSupabaseClientReady(SUPABASE_WEB_CONFIG) ? 'Configured' : 'Waiting for Keys'}</span>
-              </div>
-              <div class="muted small">
-                Ready tables in <code>supabase/schema.sql</code> (${SUPABASE_SCHEMA_TABLES.length}): ${SUPABASE_SCHEMA_TABLES.map((t) => `<code>${escapeHtml(t)}</code>`).join(' ')}
+                <span class="pill">${isSupabaseClientReady(SUPABASE_WEB_CONFIG) ? 'Configured ✓' : 'Pending'}</span>
               </div>
               <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
                 <button type="button" class="btn-outline btn-sm" id="testSupabaseWebBtn" ${state.supabaseBusy ? 'disabled' : ''}>
-                  ${state.supabaseBusy ? 'Checking...' : 'Test Connection'}
+                  ${state.supabaseBusy ? 'Testing...' : 'Test Connection'}
                 </button>
                 <button type="button" class="btn-primary btn-sm" id="syncSupabaseWebBtn" ${state.supabaseBusy ? 'disabled' : ''}>
-                  ${state.supabaseBusy ? 'Syncing...' : 'Sync Data to Supabase'}
+                  ${state.supabaseBusy ? 'Syncing...' : 'Sync Snapshot'}
                 </button>
                 <button type="button" class="btn-outline btn-sm" id="downloadSupabaseJsonBtn">
-                  Download Snapshot JSON
+                  Export JSON
                 </button>
                 <a class="btn-outline btn-sm" href="https://supabase.com/dashboard/project/qotuvugkapaspowhbsbf/sql/new" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">
                   SQL Editor &#8599;
@@ -2276,30 +2525,19 @@ function renderProfile() {
         </div>
 
         <div class="card-panel">
-          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
             <div>
               <strong>Owner Starter Showcase Accounts (${showcasePostCount} posts &middot; ${showcaseStoryCount} stories)</strong>
-              <div class="muted small">Publish active starter creator posts, stories, likes &amp; comments while growing early users — remove all in 1 click anytime.</div>
+              <div class="muted small">Publish realistic starter creator posts, stories, likes &amp; comments or remove them in 1 click.</div>
             </div>
             <div class="chip-row">
-              <button type="button" class="btn-primary btn-sm" id="showcaseBurstBtn" ${state.showcaseBusy ? 'disabled' : ''}>Publish Activity Burst</button>
-              <button type="button" class="btn-outline btn-sm" id="showcaseEngageBtn" ${state.showcaseBusy ? 'disabled' : ''}>Like &amp; Comment Recent</button>
-              <button type="button" class="btn-danger btn-sm" id="showcaseRemoveBtn" ${state.showcaseBusy ? 'disabled' : ''}>Remove All Starter Accounts</button>
+              <button type="button" class="btn-primary btn-sm" id="showcaseBurstBtn" ${state.showcaseBusy ? 'disabled' : ''}>Publish 4 Starter Posts</button>
+              <button type="button" class="btn-outline btn-sm" id="showcaseEngageBtn" ${state.showcaseBusy ? 'disabled' : ''}>Engage Recent Posts</button>
+              <button type="button" class="btn-danger btn-sm" id="showcaseRemoveBtn" ${state.showcaseBusy ? 'disabled' : ''}>Remove All Starter</button>
             </div>
           </div>
         </div>
       ` : ''}
-
-      <div class="android-promo-card">
-        <div class="android-promo-copy">
-          <strong>Take Momi with you on Android</strong>
-          <span class="muted small">Same account, live camera streaming, sound alerts, and Play Billing wallet in your pocket.</span>
-        </div>
-        <div class="android-promo-actions">
-          <a class="btn-primary btn-sm" href="${ANDROID_APK_URL}" target="_blank" rel="noopener noreferrer">Download Android APK</a>
-          <a class="btn-outline btn-sm" href="${ANDROID_RELEASES_URL}" target="_blank" rel="noopener noreferrer">Release Notes</a>
-        </div>
-      </div>
 
       ${isOwn ? `
         <div class="chip-row">
@@ -2319,8 +2557,7 @@ function renderProfile() {
   `;
 
   document.getElementById('shareProfileBtn').onclick = () => shareProfileExternally(profile);
-  const consentToggle = document.getElementById('profileConsentToggle');
-  if (consentToggle) consentToggle.onchange = (e) => updatePartnerConsent(e.target.checked);
+  document.getElementById('profileConsentToggle')?.addEventListener('change', (e) => updatePartnerConsent(e.target.checked));
   mainStage.querySelectorAll('[data-owner-tab]').forEach((b) => {
     b.onclick = () => { state.ownerConsoleTab = b.dataset.ownerTab; renderProfile(); };
   });
@@ -2337,28 +2574,17 @@ function renderProfile() {
       if (target) openOwnerGrantModal(target);
     };
   });
-  const burstBtn = document.getElementById('showcaseBurstBtn');
-  if (burstBtn) burstBtn.onclick = () => publishShowcaseBurst(state.user.uid);
-  const engageBtn = document.getElementById('showcaseEngageBtn');
-  if (engageBtn) engageBtn.onclick = () => engagePostsWithShowcase(state.user.uid);
-  const removeBtn = document.getElementById('showcaseRemoveBtn');
-  if (removeBtn) removeBtn.onclick = () => removeAllShowcaseContent();
-  const testSupaBtn = document.getElementById('testSupabaseWebBtn');
-  if (testSupaBtn) testSupaBtn.onclick = () => runSupabaseWebHealthCheck();
-  const syncSupaBtn = document.getElementById('syncSupabaseWebBtn');
-  if (syncSupaBtn) syncSupaBtn.onclick = () => syncSupabaseDataFromWeb();
-  const dlSupaBtn = document.getElementById('downloadSupabaseJsonBtn');
-  if (dlSupaBtn) dlSupaBtn.onclick = () => downloadSupabaseMigrationSnapshot();
-  const editBtn = document.getElementById('editProfileBtn');
-  if (editBtn) editBtn.onclick = () => openEditProfileModal();
-  const createBtn = document.getElementById('profileCreateBtn');
-  if (createBtn) createBtn.onclick = () => navigateTo('create');
-  const msgBtn = document.getElementById('messageCreatorBtn');
-  if (msgBtn) msgBtn.onclick = () => openOrCreateDirectThread(profile);
-  const tPosts = document.getElementById('profTabPosts');
-  if (tPosts) tPosts.onclick = () => { state.profileTab = 'posts'; renderProfile(); };
-  const tSaved = document.getElementById('profTabSaved');
-  if (tSaved) tSaved.onclick = () => { state.profileTab = 'saved'; renderProfile(); };
+  document.getElementById('showcaseBurstBtn')?.addEventListener('click', () => publishShowcaseBurst(state.user.uid));
+  document.getElementById('showcaseEngageBtn')?.addEventListener('click', () => engagePostsWithShowcase(state.user.uid));
+  document.getElementById('showcaseRemoveBtn')?.addEventListener('click', () => removeAllShowcaseContent());
+  document.getElementById('testSupabaseWebBtn')?.addEventListener('click', () => runSupabaseWebHealthCheck());
+  document.getElementById('syncSupabaseWebBtn')?.addEventListener('click', () => syncSupabaseDataFromWeb());
+  document.getElementById('downloadSupabaseJsonBtn')?.addEventListener('click', () => downloadSupabaseMigrationSnapshot());
+  document.getElementById('editProfileBtn')?.addEventListener('click', () => openEditProfileModal());
+  document.getElementById('profileCreateBtn')?.addEventListener('click', () => navigateTo('create'));
+  document.getElementById('messageCreatorBtn')?.addEventListener('click', () => openOrCreateDirectThread(profile));
+  document.getElementById('profTabPosts')?.addEventListener('click', () => { state.profileTab = 'posts'; renderProfile(); });
+  document.getElementById('profTabSaved')?.addEventListener('click', () => { state.profileTab = 'saved'; renderProfile(); });
   bindFeedInteractions(mainStage);
 }
 
@@ -2367,58 +2593,64 @@ async function publishShowcaseBurst(uid, { silent = false } = {}) {
   state.showcaseBusy = true;
   if (!silent && state.nav === 'profile') renderProfile();
   try {
-    const batch = writeBatch(db);
     const stamp = Date.now();
     const batchPersonas = [...SHOWCASE_PERSONAS].sort(() => Math.random() - 0.5).slice(0, 4);
+    const postRows = [];
+    const commentRows = [];
+    const storyRows = [];
     batchPersonas.forEach((persona, idx) => {
       const postId = `showcase_${persona.username.replace(/[^a-z0-9]/gi, '_')}_${stamp}_${idx}`;
-      const commentId = `showcase_cmt_${stamp}_${idx}`;
       const commenter = SHOWCASE_PERSONAS[(idx + 2) % SHOWCASE_PERSONAS.length];
       const commentText = SHOWCASE_COMMENTS[(idx + Math.floor(stamp / 1000)) % SHOWCASE_COMMENTS.length];
-      batch.set(doc(db, 'posts', postId), {
-        userId: uid,
-        authorUsername: persona.username,
-        authorDisplayName: persona.displayName,
-        authorAvatarKey: persona.avatarKey,
-        authorVerified: true,
+      postRows.push({
+        id: postId,
+        user_id: uid,
+        author_username: persona.username,
+        author_display_name: persona.displayName,
+        author_avatar_key: persona.avatarKey,
+        author_verified: true,
         location: persona.location,
-        imageKey: persona.imageKey,
-        filterTag: persona.filterTag,
-        aspectRatio: persona.aspectRatio,
+        image_key: persona.imageKey,
+        media_type: 'IMAGE',
+        filter_tag: persona.filterTag,
+        aspect_ratio: persona.aspectRatio,
         hashtags: persona.hashtags,
-        taggedUsernames: extractMentions(persona.caption),
+        tagged_usernames: extractMentions(persona.caption),
         caption: persona.caption,
-        likesCount: 14 + idx * 7,
-        viewsCount: 95 + idx * 32,
-        commentsCount: 1,
+        likes_count: 14 + idx * 7,
+        views_count: 95 + idx * 32,
+        comments_count: 1,
         category: persona.category,
-        isReel: idx % 2 === 0,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
+        is_reel: idx % 2 === 0
       });
-      batch.set(doc(db, 'posts', postId, 'comments', commentId), {
-        userId: uid,
-        authorUsername: commenter.username,
-        authorAvatarKey: commenter.avatarKey,
+      commentRows.push({
+        id: `showcase_cmt_${stamp}_${idx}`,
+        post_id: postId,
+        user_id: uid,
+        author_username: commenter.username,
+        author_avatar_key: commenter.avatarKey,
         text: commentText,
-        likesCount: 2,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
+        likes_count: 2
       });
       if (idx < 2) {
-        batch.set(doc(db, 'stories', `showcase_story_${stamp}_${idx}`), {
-          userId: uid,
+        storyRows.push({
+          id: `showcase_story_${stamp}_${idx}`,
+          user_id: uid,
           username: persona.username,
-          avatarKey: persona.avatarKey,
-          imageKey: persona.imageKey,
-          caption: persona.location,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp()
+          avatar_key: persona.avatarKey,
+          image_key: persona.imageKey,
+          media_type: 'IMAGE',
+          caption: persona.location
         });
       }
     });
-    await batch.commit();
-    if (!silent) showToast('Published 4 starter showcase posts, comments & stories!');
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'posts', postRows, '', globalThis.fetch, 'id');
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'comments', commentRows, '', globalThis.fetch, 'id');
+    if (storyRows.length > 0) {
+      await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'stories', storyRows, '', globalThis.fetch, 'id');
+    }
+    await refreshAllFromSupabase({ showErrors: false });
+    if (!silent) showToast('Published 4 starter showcase posts & stories!');
   } catch (err) {
     if (!silent) showToast(err?.message || 'Could not publish showcase burst');
   } finally {
@@ -2434,37 +2666,31 @@ async function engagePostsWithShowcase(uid) {
   try {
     const targets = state.posts.slice(0, 4);
     if (targets.length === 0) {
-      showToast('No posts available yet — publish a showcase burst first.');
+      showToast('No posts available yet — publish starter posts first.');
       return;
     }
-    const batch = writeBatch(db);
     const stamp = Date.now();
-    targets.forEach((p, idx) => {
+    const commentRows = targets.map((p, idx) => {
       const persona = SHOWCASE_PERSONAS[(idx + Math.floor(stamp / 1000)) % SHOWCASE_PERSONAS.length];
       const commentText = SHOWCASE_COMMENTS[(idx + 1) % SHOWCASE_COMMENTS.length];
-      batch.set(doc(db, 'posts', p.id, 'comments', `showcase_cmt_${stamp}_${idx}`), {
-        userId: uid,
-        authorUsername: persona.username,
-        authorAvatarKey: persona.avatarKey,
+      return {
+        id: `showcase_cmt_${stamp}_${idx}`,
+        post_id: p.id,
+        user_id: uid,
+        author_username: persona.username,
+        author_avatar_key: persona.avatarKey,
         text: commentText,
-        likesCount: 1,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
-      batch.update(doc(db, 'posts', p.id), {
-        commentsCount: increment(1),
-        updatedAt: serverTimestamp()
-      });
+        likes_count: 1
+      };
     });
-    await batch.commit();
-    const likeBatch = writeBatch(db);
-    targets.forEach((p) => {
-      likeBatch.update(doc(db, 'posts', p.id), {
-        likesCount: increment(1),
-        updatedAt: serverTimestamp()
-      });
-    });
-    await likeBatch.commit();
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'comments', commentRows, '', globalThis.fetch, 'id');
+    await Promise.all(targets.map((p) => patchSupabaseRows(
+      SUPABASE_WEB_CONFIG,
+      'posts',
+      `id=eq.${encodeURIComponent(p.id)}`,
+      { likes_count: (p.likesCount || 0) + 1, comments_count: (p.commentsCount || 0) + 1 }
+    )));
+    await refreshAllFromSupabase({ showErrors: false });
     showToast(`Added starter likes & comments to ${targets.length} posts!`);
   } catch (err) {
     showToast(err?.message || 'Could not add showcase engagement');
@@ -2480,25 +2706,10 @@ async function removeAllShowcaseContent() {
   state.showcaseBusy = true;
   if (state.nav === 'profile') renderProfile();
   try {
-    const [postsSnap, storiesSnap] = await Promise.all([
-      getDocs(query(collection(db, 'posts'), limit(120))),
-      getDocs(query(collection(db, 'stories'), limit(60)))
-    ]);
-    const showcasePosts = postsSnap.docs.filter((d) => d.id.startsWith('showcase_'));
-    const showcaseStories = storiesSnap.docs.filter((d) => d.id.startsWith('showcase_'));
-    for (const pDoc of showcasePosts) {
-      const cmts = await getDocs(collection(db, 'posts', pDoc.id, 'comments')).catch(() => null);
-      if (cmts && !cmts.empty) {
-        const cBatch = writeBatch(db);
-        cmts.docs.forEach((c) => cBatch.delete(c.reference));
-        await cBatch.commit().catch(() => undefined);
-      }
-      await deleteDoc(pDoc.reference);
-    }
-    for (const sDoc of showcaseStories) {
-      await deleteDoc(sDoc.reference).catch(() => undefined);
-    }
-    showToast(`Removed ${showcasePosts.length} starter posts & ${showcaseStories.length} stories.`);
+    await deleteSupabaseRows(SUPABASE_WEB_CONFIG, 'posts', 'id=like.showcase_%25');
+    await deleteSupabaseRows(SUPABASE_WEB_CONFIG, 'stories', 'id=like.showcase_%25');
+    await refreshAllFromSupabase({ showErrors: false });
+    showToast('Removed all starter showcase posts and stories.');
   } catch (err) {
     showToast(err?.message || 'Failed removing starter showcase content');
   } finally {
@@ -2530,8 +2741,14 @@ function bindUserAndFollowButtons(container) {
 function bindFeedInteractions(container) {
   bindUserAndFollowButtons(container);
 
+  container.querySelectorAll('[data-stop-open]').forEach((el) => {
+    el.onclick = (e) => e.stopPropagation();
+  });
   container.querySelectorAll('[data-open-post]').forEach((el) => {
-    el.onclick = () => openPostDetailModal(el.dataset.openPost);
+    el.onclick = (e) => {
+      if (e.target.closest('video')) return;
+      openPostDetailModal(el.dataset.openPost);
+    };
   });
   container.querySelectorAll('[data-open-story]').forEach((el) => {
     el.onclick = () => openStoryModal(el.dataset.openStory);
@@ -2540,10 +2757,16 @@ function bindFeedInteractions(container) {
     el.onclick = () => openWatchLiveModal(el.dataset.openLive);
   });
   container.querySelectorAll('[data-like-post]').forEach((b) => {
-    b.onclick = (e) => { e.stopPropagation(); togglePostLike(b.dataset.likePost); };
+    b.onclick = (e) => {
+      e.stopPropagation();
+      togglePostLike(b.dataset.likePost);
+    };
   });
   container.querySelectorAll('[data-bookmark-post]').forEach((b) => {
-    b.onclick = (e) => { e.stopPropagation(); toggleBookmark(b.dataset.bookmarkPost); };
+    b.onclick = (e) => {
+      e.stopPropagation();
+      toggleBookmark(b.dataset.bookmarkPost);
+    };
   });
   container.querySelectorAll('[data-boost-post]').forEach((b) => {
     b.onclick = (e) => {
@@ -2553,17 +2776,21 @@ function bindFeedInteractions(container) {
     };
   });
   container.querySelectorAll('[data-admin-recommend]').forEach((b) => {
-    b.onclick = async (e) => {
+    b.onclick = (e) => {
       e.stopPropagation();
       const post = state.posts.find((p) => p.id === b.dataset.adminRecommend);
-      if (post) await adminToggleRecommendPost(post);
+      if (post) adminToggleRecommendPost(post);
     };
   });
   container.querySelectorAll('[data-delete-post]').forEach((b) => {
     b.onclick = async (e) => {
       e.stopPropagation();
       if (!window.confirm('Delete this post permanently?')) return;
-      await deleteDoc(doc(db, 'posts', b.dataset.deletePost));
+      const pid = b.dataset.deletePost;
+      await deleteSupabaseRows(SUPABASE_WEB_CONFIG, 'posts', `id=eq.${encodeURIComponent(pid)}`);
+      mirrorFirestoreBestEffort(() => deleteDoc(doc(db, 'posts', pid)));
+      state.posts = state.posts.filter((p) => p.id !== pid);
+      renderMainStage();
       showToast('Post deleted');
     };
   });
@@ -2579,7 +2806,7 @@ function bindFeedInteractions(container) {
       e.stopPropagation();
       const [postId, deltaStr] = b.dataset.slide.split(':');
       const post = state.posts.find((p) => p.id === postId);
-      const count = 1 + (Array.isArray(post?.extraImageDatas) ? post.extraImageDatas.length : 0);
+      const count = post ? getPostFrames(post).length : 1;
       const cur = state.carouselIndex[postId] || 0;
       state.carouselIndex[postId] = (cur + Number(deltaStr) + count) % count;
       renderMainStage();
@@ -2616,43 +2843,70 @@ async function togglePostLike(postId) {
   if (!post || !state.profile) return;
   const uid = state.user.uid;
   const already = state.likedIds.has(postId);
-  const markerRef = doc(db, 'users', uid, 'likedPosts', postId);
-  const batch = writeBatch(db);
+  const nextLikes = Math.max(0, (post.likesCount || 0) + (already ? -1 : 1));
+  post.likesCount = nextLikes;
+  if (already) state.likedIds.delete(postId);
+  else state.likedIds.add(postId);
+  renderMainStage();
+
   if (already) {
-    batch.delete(markerRef);
-    batch.update(doc(db, 'posts', postId), { likesCount: increment(-1), updatedAt: serverTimestamp() });
+    await deleteSupabaseRows(
+      SUPABASE_WEB_CONFIG,
+      'user_interactions',
+      `user_id=eq.${encodeURIComponent(uid)}&target_type=eq.LIKED_POST&target_id=eq.${encodeURIComponent(postId)}`
+    );
   } else {
-    batch.set(markerRef, { targetId: postId, createdAt: serverTimestamp() });
-    batch.update(doc(db, 'posts', postId), { likesCount: increment(1), updatedAt: serverTimestamp() });
-    if (post.userId !== uid) {
-      batch.set(doc(db, 'users', post.userId, 'notifications', makeClientId('notif')), {
-        userId: post.userId,
-        actorUid: uid,
-        actorUsername: state.profile.username,
-        actorAvatarKey: state.profile.avatarKey || 'avatar_aria',
+    await upsertSupabaseTable(
+      SUPABASE_WEB_CONFIG,
+      'user_interactions',
+      [{ user_id: uid, target_type: 'LIKED_POST', target_id: postId }],
+      '',
+      globalThis.fetch,
+      'user_id,target_type,target_id'
+    );
+    if (post.userId && post.userId !== uid) {
+      await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'notifications', [{
+        id: makeClientId('notif'),
+        user_id: post.userId,
+        actor_uid: uid,
+        actor_username: state.profile.username,
+        actor_avatar_key: state.profile.avatarKey || 'avatar_aria',
         message: 'liked your post.',
-        timeLabel: 'Just now',
+        time_label: 'Just now',
         section: 'Today',
-        previewImageKey: post.imageKey || 'img_post_coastal',
-        isFollowAction: false,
-        isFollowingBack: false,
-        isUnread: true,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
+        preview_image_key: post.imageKey || 'img_post_coastal',
+        is_follow_action: false,
+        is_following_back: false,
+        is_unread: true
+      }], '', globalThis.fetch, 'id');
     }
   }
-  await batch.commit();
+  await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'posts', `id=eq.${encodeURIComponent(postId)}`, { likes_count: nextLikes });
 }
 
 async function toggleBookmark(postId) {
   const uid = state.user.uid;
-  const ref = doc(db, 'users', uid, 'bookmarks', postId);
-  if (state.bookmarkIds.has(postId)) {
-    await deleteDoc(ref);
+  const already = state.bookmarkIds.has(postId);
+  if (already) {
+    state.bookmarkIds.delete(postId);
+    renderMainStage();
+    await deleteSupabaseRows(
+      SUPABASE_WEB_CONFIG,
+      'user_interactions',
+      `user_id=eq.${encodeURIComponent(uid)}&target_type=eq.BOOKMARK&target_id=eq.${encodeURIComponent(postId)}`
+    );
     showToast('Removed from Saved');
   } else {
-    await setDoc(ref, { targetId: postId, createdAt: serverTimestamp() });
+    state.bookmarkIds.add(postId);
+    renderMainStage();
+    await upsertSupabaseTable(
+      SUPABASE_WEB_CONFIG,
+      'user_interactions',
+      [{ user_id: uid, target_type: 'BOOKMARK', target_id: postId }],
+      '',
+      globalThis.fetch,
+      'user_id,target_type,target_id'
+    );
     showToast('Saved to your profile');
   }
 }
@@ -2661,34 +2915,34 @@ async function toggleFollow(targetUid, targetUsername) {
   const uid = state.user.uid;
   if (!state.profile || !targetUid || targetUid === uid) return;
   const followId = `${uid}_${targetUid}`;
-  const ref = doc(db, 'follows', followId);
   const isFollowing = state.followingUids.has(targetUid);
   if (isFollowing) {
-    await deleteDoc(ref);
+    state.followingUids.delete(targetUid);
+    renderAll();
+    await deleteSupabaseRows(SUPABASE_WEB_CONFIG, 'follows', `id=eq.${encodeURIComponent(followId)}`);
   } else {
-    const batch = writeBatch(db);
-    batch.set(ref, {
-      followerUid: uid,
-      targetUid,
-      followerUsername: state.profile.username,
-      targetUsername,
-      createdAt: serverTimestamp()
-    });
-    batch.set(doc(db, 'users', targetUid, 'notifications', makeClientId('notif')), {
-      userId: targetUid,
-      actorUid: uid,
-      actorUsername: state.profile.username,
-      actorAvatarKey: state.profile.avatarKey || 'avatar_aria',
+    state.followingUids.add(targetUid);
+    renderAll();
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'follows', [{
+      id: followId,
+      follower_uid: uid,
+      target_uid: targetUid,
+      follower_username: state.profile.username,
+      target_username: targetUsername || 'creator'
+    }], '', globalThis.fetch, 'id');
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'notifications', [{
+      id: makeClientId('notif'),
+      user_id: targetUid,
+      actor_uid: uid,
+      actor_username: state.profile.username,
+      actor_avatar_key: state.profile.avatarKey || 'avatar_aria',
       message: 'started following you.',
-      timeLabel: 'Just now',
+      time_label: 'Just now',
       section: 'Today',
-      isFollowAction: true,
-      isFollowingBack: false,
-      isUnread: true,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    });
-    await batch.commit();
+      is_follow_action: true,
+      is_following_back: false,
+      is_unread: true
+    }], '', globalThis.fetch, 'id');
   }
 }
 
@@ -2696,43 +2950,38 @@ async function openOrCreateDirectThread(otherProfile) {
   if (!state.profile || !otherProfile || otherProfile.userId === state.user.uid) return;
   const pair = [state.profile, otherProfile].sort((a, b) => a.userId.localeCompare(b.userId));
   const threadId = `${pair[0].userId}_${pair[1].userId}`;
-  const threadRef = doc(db, 'threads', threadId);
-  const existing = await getDoc(threadRef);
-  if (!existing.exists()) {
-    await setDoc(threadRef, {
-      participantUids: [pair[0].userId, pair[1].userId],
-      userAId: pair[0].userId,
-      userAUsername: pair[0].username,
-      userADisplayName: pair[0].displayName,
-      userAAvatarKey: pair[0].avatarKey || 'avatar_aria',
-      userBId: pair[1].userId,
-      userBUsername: pair[1].username,
-      userBDisplayName: pair[1].displayName,
-      userBAvatarKey: pair[1].avatarKey || 'avatar_aria',
-      lastMessage: '',
-      lastSenderUid: '',
-      unreadUid: '',
-      timeLabel: 'Now',
-      unreadCount: 0,
-      isOnline: true,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    });
+  const existing = state.threads.find((t) => t.id === threadId);
+  if (!existing) {
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'threads', [{
+      id: threadId,
+      participant_uids: [pair[0].userId, pair[1].userId],
+      user_a_id: pair[0].userId,
+      user_a_username: pair[0].username,
+      user_a_display_name: pair[0].displayName,
+      user_a_avatar_key: pair[0].avatarKey || 'avatar_aria',
+      user_b_id: pair[1].userId,
+      user_b_username: pair[1].username,
+      user_b_display_name: pair[1].displayName,
+      user_b_avatar_key: pair[1].avatarKey || 'avatar_aria',
+      last_message: '',
+      last_sender_uid: '',
+      unread_uid: '',
+      time_label: 'Now',
+      unread_count: 0,
+      is_online: true
+    }], '', globalThis.fetch, 'id');
+    await refreshAllFromSupabase({ showErrors: false });
   }
   selectThread(threadId);
   navigateTo('messages');
 }
 
 async function resolveVideoForPost(post) {
+  const direct = resolveVideoSrc(post);
+  if (direct) return direct;
   if (state.videoCache[post.id]) return state.videoCache[post.id];
   if (post.videoData) {
     const url = await assembleVideoChunksToObjectUrl([post.videoData]);
-    state.videoCache[post.id] = url;
-    return url;
-  }
-  if ((post.videoChunksCount || 0) > 0) {
-    const snap = await getDocs(query(collection(db, 'posts', post.id, 'videoChunks'), orderBy('index', 'asc')));
-    const url = await assembleVideoChunksToObjectUrl(snap.docs.map((d) => d.data().data));
     state.videoCache[post.id] = url;
     return url;
   }
@@ -2749,7 +2998,7 @@ async function shareExternalText({ title, text, url, toastMessage }) {
     }
   }
   await navigator.clipboard?.writeText(url).catch(() => undefined);
-  showToast(toastMessage || `Copied working link: ${url}`);
+  showToast(toastMessage || `Copied link: ${url}`);
 }
 
 async function sharePostExternally(post) {
@@ -2762,7 +3011,7 @@ async function sharePostExternally(post) {
     title: `Momi post by @${post.authorUsername || 'momi'}`,
     text: `${body}\n\nOpen post: ${shareUrl}\nGet Momi for Android: ${ANDROID_APK_URL}`,
     url: shareUrl,
-    toastMessage: `Post link copied! Opens directly in Momi (${shareUrl})`
+    toastMessage: `Post link copied! (${shareUrl})`
   });
 }
 
@@ -2779,27 +3028,39 @@ async function shareProfileExternally(profile) {
 async function openPostDetailModal(postId) {
   let post = state.posts.find((p) => p.id === postId);
   if (!post) {
-    const snap = await getDoc(doc(db, 'posts', postId)).catch(() => null);
-    if (snap && snap.exists()) {
-      post = { ...snap.data(), id: snap.id };
-    }
+    const rows = await selectSupabaseTable(
+      SUPABASE_WEB_CONFIG,
+      'posts',
+      `select=*&id=eq.${encodeURIComponent(postId)}&limit=1`
+    );
+    if (rows[0]) post = mapSupabasePostToWeb(rows[0]);
   }
   if (!post) {
-    showToast('Shared post not found or was removed.');
+    showToast('Post not found or was removed.');
     return;
   }
   if (!window.location.search.includes(`post=${encodeURIComponent(postId)}`)) {
     window.history.replaceState({}, '', `${window.location.pathname}?post=${encodeURIComponent(postId)}`);
   }
-  updateDoc(doc(db, 'posts', postId), { viewsCount: increment(1), updatedAt: serverTimestamp() }).catch(() => undefined);
+  patchSupabaseRows(
+    SUPABASE_WEB_CONFIG,
+    'posts',
+    `id=eq.${encodeURIComponent(postId)}`,
+    { views_count: (post.viewsCount || 0) + 1 }
+  ).catch(() => undefined);
 
-  let videoUrl = state.videoCache[postId];
-  if ((post.mediaType === 'VIDEO' || post.isReel) && !videoUrl) {
-    videoUrl = await resolveVideoForPost(post).catch(() => null);
-  }
-
-  const commentsSnap = await getDocs(query(collection(db, 'posts', postId, 'comments'), orderBy('createdAt', 'asc'), limit(50)));
-  const comments = commentsSnap.docs.map((d) => ({ ...d.data(), id: d.id }));
+  const videoUrl = await resolveVideoForPost(post).catch(() => null);
+  const commentRows = await selectSupabaseTable(
+    SUPABASE_WEB_CONFIG,
+    'comments',
+    `select=*&post_id=eq.${encodeURIComponent(postId)}&order=created_at.asc&limit=60`
+  );
+  const comments = commentRows.map((c) => ({
+    id: c.id,
+    userId: c.user_id,
+    authorUsername: c.author_username,
+    text: c.text
+  }));
   const morePosts = state.posts.filter((p) => p.id !== postId).slice(0, 4);
 
   openModal(`
@@ -2814,7 +3075,7 @@ async function openPostDetailModal(postId) {
       <div style="background:#000;border-radius:14px;overflow:hidden;display:grid;place-items:center;">
         ${
           videoUrl
-            ? `<video src="${videoUrl}" controls autoplay playsinline style="width:100%;max-height:70vh;"></video>`
+            ? `<video src="${escapeHtml(videoUrl)}" poster="${escapeHtml(resolveImageSrc(post))}" controls autoplay playsinline style="width:100%;max-height:70vh;"></video>`
             : `<img src="${resolveImageSrc(post)}" alt="${escapeHtml(post.caption || '')}" style="width:100%;max-height:70vh;object-fit:contain;filter:${filterCssForTag(post.filterTag)};" />`
         }
       </div>
@@ -2859,18 +3120,17 @@ async function openPostDetailModal(postId) {
     const text = input.value.trim();
     if (!text || !state.profile) return;
     input.value = '';
-    const batch = writeBatch(db);
-    batch.set(doc(db, 'posts', postId, 'comments', makeClientId('cmt')), {
-      userId: state.user.uid,
-      authorUsername: state.profile.username,
-      authorAvatarKey: state.profile.avatarKey || 'avatar_aria',
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'comments', [{
+      id: makeClientId('cmt'),
+      post_id: postId,
+      user_id: state.user.uid,
+      author_username: state.profile.username,
+      author_avatar_key: state.profile.avatarKey || 'avatar_aria',
       text: text.slice(0, 500),
-      likesCount: 0,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    });
-    batch.update(doc(db, 'posts', postId), { commentsCount: increment(1), updatedAt: serverTimestamp() });
-    await batch.commit();
+      likes_count: 0
+    }], '', globalThis.fetch, 'id');
+    post.commentsCount = (post.commentsCount || 0) + 1;
+    await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'posts', `id=eq.${encodeURIComponent(postId)}`, { comments_count: post.commentsCount });
     openPostDetailModal(postId);
   };
 }
@@ -2878,18 +3138,28 @@ async function openPostDetailModal(postId) {
 function openStoryModal(storyId) {
   const story = state.stories.find((s) => s.id === storyId);
   if (!story) return;
-  setDoc(doc(db, 'users', state.user.uid, 'seenStories', storyId), {
-    targetId: storyId,
-    createdAt: serverTimestamp()
-  }).catch(() => undefined);
+  state.seenStoryIds.add(storyId);
+  upsertSupabaseTable(
+    SUPABASE_WEB_CONFIG,
+    'user_interactions',
+    [{ user_id: state.user.uid, target_type: 'SEEN_STORY', target_id: storyId }],
+    '',
+    globalThis.fetch,
+    'user_id,target_type,target_id'
+  ).catch(() => undefined);
 
+  const videoSrc = resolveVideoSrc(story);
   openModal(`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
       <strong>@${escapeHtml(story.username)} &middot; Story</strong>
       <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
     </div>
     <div style="text-align:center;background:#000;border-radius:16px;overflow:hidden;">
-      <img src="${resolveImageSrc(story)}" alt="${escapeHtml(story.caption || '')}" style="max-height:72vh;width:100%;object-fit:contain;" />
+      ${
+        videoSrc
+          ? `<video src="${escapeHtml(videoSrc)}" poster="${escapeHtml(resolveImageSrc(story))}" controls autoplay playsinline style="max-height:72vh;width:100%;"></video>`
+          : `<img src="${resolveImageSrc(story)}" alt="${escapeHtml(story.caption || '')}" style="max-height:72vh;width:100%;object-fit:contain;" />`
+      }
     </div>
     ${story.caption ? `<p style="margin:12px 0 0;">${escapeHtml(story.caption)}</p>` : ''}
   `);
@@ -2933,25 +3203,86 @@ function openEditProfileModal() {
     </form>
   `);
   document.getElementById('closeModalBtn').onclick = closeModal;
-  let newAvatarData = p.avatarData || null;
-  document.getElementById('editAvatarInput').onchange = async (e) => {
-    const file = e.target.files?.[0];
-    if (file) newAvatarData = await compressFileToBase64(file, 360, 180000);
+  let newAvatarFile = null;
+  document.getElementById('editAvatarInput').onchange = (e) => {
+    newAvatarFile = e.target.files?.[0] || null;
   };
   document.getElementById('editProfileForm').onsubmit = async (e) => {
     e.preventDefault();
-    await updateDoc(doc(db, 'users', state.user.uid), {
-      displayName: document.getElementById('editDisplayName').value.trim().slice(0, 80),
+    let avatarUrl = p.avatarUrl || null;
+    let avatarData = p.avatarData || null;
+    if (newAvatarFile) {
+      const uploaded = await uploadWebFileToStorage(
+        SUPABASE_WEB_CONFIG,
+        'momi-avatars',
+        `avatars/${state.user.uid}.jpg`,
+        newAvatarFile,
+        newAvatarFile.type || 'image/jpeg'
+      );
+      if (uploaded) {
+        avatarUrl = `${uploaded}?t=${Date.now()}`;
+      } else {
+        avatarData = await compressFileToBase64(newAvatarFile, 360, 180000);
+      }
+    }
+    const patch = {
+      display_name: document.getElementById('editDisplayName').value.trim().slice(0, 80),
       username: document.getElementById('editUsername').value.trim().toLowerCase().replace(/[^a-z0-9._]/g, '').slice(0, 50),
       category: document.getElementById('editCategory').value.trim().slice(0, 80),
       bio: document.getElementById('editBio').value.trim().slice(0, 300),
       website: document.getElementById('editWebsite').value.trim().slice(0, 200),
-      avatarData: newAvatarData,
-      updatedAt: serverTimestamp()
-    });
+      avatar_url: avatarUrl,
+      avatar_data: avatarData
+    };
+    await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'profiles', `user_id=eq.${encodeURIComponent(state.user.uid)}`, patch);
+    await refreshAllFromSupabase({ showErrors: false });
     closeModal();
     showToast('Profile updated');
   };
+}
+
+function drawStudioStageFrame(canvas, { username, title, category, cameraOn, micOn, seq, videoEl }) {
+  if (!canvas) return '';
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  if (cameraOn && videoEl && videoEl.readyState >= 2) {
+    ctx.drawImage(videoEl, 0, 0, w, h);
+  } else {
+    const grad = ctx.createLinearGradient(0, 0, w, h);
+    grad.addColorStop(0, '#4c0d29');
+    grad.addColorStop(0.55, '#19142b');
+    grad.addColorStop(1, '#091830');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+
+    // Animated studio pulse rings
+    ctx.strokeStyle = 'rgba(224, 82, 121, 0.35)';
+    ctx.lineWidth = 3;
+    const pulse = 54 + (seq % 6) * 8;
+    ctx.beginPath();
+    ctx.arc(w / 2, h / 2 - 14, pulse, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = '#e05279';
+    ctx.beginPath();
+    ctx.arc(w / 2, h / 2 - 14, 38, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 24px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`@${username}`, w / 2, h / 2 + 52);
+
+    ctx.fillStyle = 'rgba(255,255,255,0.82)';
+    ctx.font = '15px sans-serif';
+    ctx.fillText(title.slice(0, 38), w / 2, h / 2 + 80);
+
+    ctx.fillStyle = 'rgba(255,255,255,0.65)';
+    ctx.font = '12px sans-serif';
+    ctx.fillText(`${category} · ${micOn ? 'Audio Live' : 'Mic Muted'}`, w / 2, h / 2 + 104);
+  }
+  return (canvas.toDataURL('image/jpeg', 0.62).split(',')[1] || '').slice(0, 180000);
 }
 
 function stopLiveBroadcast() {
@@ -2967,103 +3298,263 @@ function stopLiveBroadcast() {
 
 function openGoLiveModal() {
   if (!state.profile) return;
+  state.liveCameraOn = true;
+  state.liveMicOn = true;
+  let isLiveActive = false;
+  let seq = 0;
+
   openModal(`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
-      <h3 style="margin:0;">Go Live from Desktop</h3>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <h3 style="margin:0;">Momi Live Studio</h3>
+        <span id="studioLiveStatusPill" class="pill">Preview Ready</span>
+      </div>
       <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
     </div>
-    <div style="display:grid;gap:12px;">
-      <video id="livePreviewVideo" autoplay muted playsinline style="width:100%;max-height:420px;background:#000;border-radius:16px;"></video>
-      <input id="liveTitleInput" class="input" value="Live from Momi Desktop Studio" placeholder="Stream title..." />
-      <div style="display:flex;gap:10px;">
-        <button type="button" class="btn-primary" id="startLiveBtn">Start Live Broadcast</button>
-        <button type="button" class="btn-danger hidden" id="endLiveBtn">End Broadcast</button>
+    <div class="post-detail-split">
+      <div style="display:grid;gap:12px;">
+        <div class="live-stage-box">
+          <video id="livePreviewVideo" autoplay muted playsinline style="width:100%;height:320px;object-fit:cover;"></video>
+          <canvas id="liveStageFallbackCanvas" width="480" height="360" class="hidden" style="width:100%;height:320px;object-fit:cover;"></canvas>
+          <div class="live-stage-overlay">
+            <span class="badge-pill live" id="studioLiveTag">PREVIEW</span>
+            <span class="pill" id="studioLiveStats" style="background:rgba(0,0,0,0.6);color:#fff;">0 watching &middot; 0 &#9829;</span>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button type="button" class="btn-outline btn-sm" id="toggleLiveCamBtn">Camera: On</button>
+          <button type="button" class="btn-outline btn-sm" id="toggleLiveMicBtn">Mic: On</button>
+        </div>
+        <div class="field-grid-2">
+          <input id="liveTitleInput" class="input" value="Live from Momi Studio" placeholder="Stream title..." />
+          <select id="liveCategorySelect" class="select">
+            <option value="Live">Talk &amp; Chill</option>
+            <option value="Music">Music &amp; Audio</option>
+            <option value="Travel">Travel &amp; Explore</option>
+            <option value="Art">Art &amp; Studio</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <button type="button" class="btn-primary btn-lg" id="startLiveBtn" style="flex:1;">Go Live Now</button>
+          <button type="button" class="btn-danger hidden" id="endLiveBtn" style="flex:1;">End Broadcast</button>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <strong>Live Room Chat</strong>
+        <div id="broadcasterChatBox" style="flex:1;min-height:240px;max-height:340px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;background:var(--surface-alt);border:1px solid var(--border);border-radius:14px;padding:12px;">
+          <div class="muted small">Messages and gifts from viewers appear here as soon as you go live.</div>
+        </div>
+        <form id="broadcasterChatForm" style="display:flex;gap:8px;">
+          <input id="broadcasterChatInput" class="input" placeholder="Send a message to viewers..." />
+          <button type="submit" class="btn-primary btn-sm">Send</button>
+        </form>
       </div>
     </div>
   `);
-  document.getElementById('closeModalBtn').onclick = async () => {
-    await updateDoc(doc(db, 'liveStreams', state.user.uid), { isLive: false, updatedAt: serverTimestamp() }).catch(() => undefined);
-    closeModal();
+
+  const vid = document.getElementById('livePreviewVideo');
+  const fallbackCanvas = document.getElementById('liveStageFallbackCanvas');
+  const snapCanvas = document.createElement('canvas');
+  snapCanvas.width = 480;
+  snapCanvas.height = 360;
+
+  const updateStageVisual = () => {
+    const hasCam = state.liveCameraOn && Boolean(state.liveStreamMedia);
+    if (hasCam) {
+      vid?.classList.remove('hidden');
+      fallbackCanvas?.classList.add('hidden');
+    } else {
+      vid?.classList.add('hidden');
+      fallbackCanvas?.classList.remove('hidden');
+      drawStudioStageFrame(fallbackCanvas, {
+        username: state.profile.username,
+        title: document.getElementById('liveTitleInput')?.value || 'Live Studio',
+        category: document.getElementById('liveCategorySelect')?.value || 'Live',
+        cameraOn: false,
+        micOn: state.liveMicOn,
+        seq,
+        videoEl: null
+      });
+    }
   };
 
   navigator.mediaDevices?.getUserMedia({ video: true, audio: false }).then((stream) => {
     state.liveStreamMedia = stream;
-    const vid = document.getElementById('livePreviewVideo');
     if (vid) vid.srcObject = stream;
-  }).catch(() => showToast('Camera permission denied or unavailable.'));
+    updateStageVisual();
+  }).catch(() => {
+    state.liveCameraOn = false;
+    const camBtn = document.getElementById('toggleLiveCamBtn');
+    if (camBtn) camBtn.textContent = 'Stage Mode (No Camera)';
+    updateStageVisual();
+  });
+
+  document.getElementById('toggleLiveCamBtn').onclick = () => {
+    state.liveCameraOn = !state.liveCameraOn;
+    document.getElementById('toggleLiveCamBtn').textContent = state.liveCameraOn ? 'Camera: On' : 'Camera: Stage Card';
+    updateStageVisual();
+  };
+
+  document.getElementById('toggleLiveMicBtn').onclick = () => {
+    state.liveMicOn = !state.liveMicOn;
+    document.getElementById('toggleLiveMicBtn').textContent = state.liveMicOn ? 'Mic: On' : 'Mic: Muted';
+    updateStageVisual();
+  };
+
+  const endStreamInSupabase = async () => {
+    if (!isLiveActive) return;
+    isLiveActive = false;
+    await patchSupabaseRows(
+      SUPABASE_WEB_CONFIG,
+      'live_streams',
+      `id=eq.${encodeURIComponent(state.user.uid)}`,
+      { is_live: false, viewer_count: 0 }
+    ).catch(() => undefined);
+    await refreshAllFromSupabase({ showErrors: false });
+  };
+
+  document.getElementById('closeModalBtn').onclick = async () => {
+    await endStreamInSupabase();
+    closeModal();
+  };
 
   document.getElementById('startLiveBtn').onclick = async () => {
     const uid = state.user.uid;
-    const title = document.getElementById('liveTitleInput').value.trim() || 'Live Studio Session';
-    await setDoc(doc(db, 'liveStreams', uid), {
-      userId: uid,
+    const title = (document.getElementById('liveTitleInput').value.trim() || 'Live Studio Session').slice(0, 140);
+    const category = document.getElementById('liveCategorySelect').value || 'Live';
+    isLiveActive = true;
+
+    await ensureUserSeededInSupabase(state.user);
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'live_streams', [{
+      id: uid,
+      user_id: uid,
       username: state.profile.username,
-      displayName: state.profile.displayName,
-      avatarKey: state.profile.avatarKey || 'avatar_aria',
-      authorVerified: Boolean(state.profile.isVerified),
-      title: title.slice(0, 140),
-      category: 'Live',
-      isLive: true,
-      viewerCount: 0,
-      likesCount: 0,
-      giftsCredits: 0,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    });
+      display_name: state.profile.displayName,
+      avatar_key: state.profile.avatarKey || 'avatar_aria',
+      author_verified: Boolean(state.profile.isVerified),
+      title,
+      category,
+      is_live: true,
+      viewer_count: 1,
+      likes_count: 0,
+      gifts_credits: 0
+    }], '', globalThis.fetch, 'id');
+
+    const publishFrame = async () => {
+      seq += 1;
+      const b64 = drawStudioStageFrame(snapCanvas, {
+        username: state.profile.username,
+        title: document.getElementById('liveTitleInput')?.value || title,
+        category,
+        cameraOn: state.liveCameraOn,
+        micOn: state.liveMicOn,
+        seq,
+        videoEl: vid
+      });
+      updateStageVisual();
+      await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'live_frames', [{
+        stream_id: uid,
+        user_id: uid,
+        seq,
+        frame_data: b64,
+        camera_enabled: state.liveCameraOn,
+        mic_muted: !state.liveMicOn
+      }], '', globalThis.fetch, 'stream_id').catch(() => undefined);
+      await patchSupabaseRows(
+        SUPABASE_WEB_CONFIG,
+        'live_streams',
+        `id=eq.${encodeURIComponent(uid)}`,
+        { updated_at: new Date().toISOString() }
+      ).catch(() => undefined);
+    };
+
+    // Publish first stage frame immediately so viewers never wait on a blank canvas
+    await publishFrame();
+
     document.getElementById('startLiveBtn').classList.add('hidden');
     document.getElementById('endLiveBtn').classList.remove('hidden');
+    document.getElementById('studioLiveStatusPill').textContent = 'LIVE NOW';
+    document.getElementById('studioLiveTag').textContent = 'LIVE';
 
-    let seq = 0;
-    const snapCanvas = document.createElement('canvas');
-    snapCanvas.width = 480;
-    snapCanvas.height = 360;
-    const vid = document.getElementById('livePreviewVideo');
-    state.liveTimer = setInterval(() => {
-      if (!vid || vid.readyState < 2) return;
-      snapCanvas.getContext('2d').drawImage(vid, 0, 0, snapCanvas.width, snapCanvas.height);
-      const b64 = (snapCanvas.toDataURL('image/jpeg', 0.55).split(',')[1] || '').slice(0, 180000);
-      setDoc(doc(db, 'liveStreams', uid, 'liveFrames', 'latest'), {
-        userId: uid,
-        seq: seq++,
-        frameData: b64,
-        cameraEnabled: true,
-        micMuted: false,
-        updatedAt: serverTimestamp()
-      }).catch(() => undefined);
-    }, 550);
+    state.liveTimer = setInterval(publishFrame, 1500);
+    state.livePollTimer = setInterval(async () => {
+      const [streams, comments] = await Promise.all([
+        selectSupabaseTable(SUPABASE_WEB_CONFIG, 'live_streams', `select=*&id=eq.${encodeURIComponent(uid)}&limit=1`),
+        selectSupabaseTable(SUPABASE_WEB_CONFIG, 'live_comments', `select=*&stream_id=eq.${encodeURIComponent(uid)}&order=created_at.asc&limit=40`)
+      ]);
+      const st = streams[0];
+      const statsEl = document.getElementById('studioLiveStats');
+      if (st && statsEl) {
+        statsEl.textContent = `${formatCount(st.viewer_count || 0)} watching · ${formatCount(st.likes_count || 0)} ♥ · ${formatCount(st.gifts_credits || 0)} cr`;
+      }
+      const chatBox = document.getElementById('broadcasterChatBox');
+      if (chatBox && comments.length > 0) {
+        chatBox.innerHTML = comments.map((c) => `<div><strong>@${escapeHtml(c.username)}</strong> ${escapeHtml(c.text)}</div>`).join('');
+        chatBox.scrollTop = chatBox.scrollHeight;
+      }
+    }, 1800);
+
+    await refreshAllFromSupabase({ showErrors: false });
     showToast('You are LIVE on Momi!');
   };
 
+  document.getElementById('broadcasterChatForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const input = document.getElementById('broadcasterChatInput');
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'live_comments', [{
+      id: makeClientId('lc'),
+      stream_id: state.user.uid,
+      user_id: state.user.uid,
+      username: state.profile.username,
+      avatar_key: state.profile.avatarKey || 'avatar_aria',
+      text: text.slice(0, 300)
+    }], '', globalThis.fetch, 'id');
+  };
+
   document.getElementById('endLiveBtn').onclick = async () => {
-    await updateDoc(doc(db, 'liveStreams', state.user.uid), {
-      isLive: false,
-      viewerCount: 0,
-      updatedAt: serverTimestamp()
-    }).catch(() => undefined);
+    await endStreamInSupabase();
     closeModal();
     showToast('Live broadcast ended');
   };
 }
 
 function openWatchLiveModal(streamId) {
-  const stream = state.liveStreams.find((s) => s.userId === streamId);
+  const stream = state.liveStreams.find((s) => s.userId === streamId || s.id === streamId);
   if (!stream) return;
-  updateDoc(doc(db, 'liveStreams', streamId), { viewerCount: increment(1), updatedAt: serverTimestamp() }).catch(() => undefined);
+
+  patchSupabaseRows(
+    SUPABASE_WEB_CONFIG,
+    'live_streams',
+    `id=eq.${encodeURIComponent(streamId)}`,
+    { viewer_count: (stream.viewerCount || 0) + 1 }
+  ).catch(() => undefined);
 
   openModal(`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
         <strong>@${escapeHtml(stream.username)}</strong>
-        <span class="live-pill-badge" style="margin-left:6px;">LIVE</span>
-        <span class="muted small" style="margin-left:8px;">${escapeHtml(stream.title)}</span>
+        <span class="badge-pill live">LIVE</span>
+        <span class="muted small">${escapeHtml(stream.title)}</span>
       </div>
       <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Leave</button>
     </div>
     <div class="post-detail-split">
       <div>
-        <img id="liveRemoteFrameImg" src="${resolveImageSrc({ imageKey: 'img_post_coastal' })}" alt="Live stream" style="width:100%;max-height:60vh;object-fit:cover;border-radius:16px;background:#000;" />
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
-          <button type="button" class="btn-outline btn-sm" id="liveHeartBtn">&#9829; Heart</button>
+        <div class="live-stage-box">
+          <img id="liveRemoteFrameImg" src="${resolveImageSrc({ imageKey: 'img_post_coastal' })}" alt="Live stream" style="width:100%;height:340px;object-fit:cover;" />
+          <div class="live-stage-overlay">
+            <span class="badge-pill live">LIVE STAGE</span>
+            <span class="pill" id="viewerLiveStatsPill" style="background:rgba(0,0,0,0.65);color:#fff;">
+              ${formatCount(Math.max(1, stream.viewerCount || 1))} watching &middot; ${formatCount(stream.likesCount || 0)} &#9829;
+            </span>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+          <button type="button" class="btn-outline btn-sm" id="liveHeartBtn">&#9829; Send Heart</button>
           ${GIFT_CATALOG.map((g) => `
             <button type="button" class="btn-primary btn-sm" data-send-gift="${g.key}:${g.credits}:${escapeHtml(g.name)}">${escapeHtml(g.name)} (${g.credits})</button>
           `).join('')}
@@ -3071,7 +3562,9 @@ function openWatchLiveModal(streamId) {
       </div>
       <div style="display:flex;flex-direction:column;gap:10px;">
         <strong>Live Chat</strong>
-        <div id="liveChatBox" style="flex:1;max-height:360px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;"></div>
+        <div id="liveChatBox" style="flex:1;min-height:240px;max-height:340px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;background:var(--surface-alt);border:1px solid var(--border);border-radius:14px;padding:12px;">
+          <div class="muted small">Joined @${escapeHtml(stream.username)}'s live room! Say hello below.</div>
+        </div>
         <form id="liveChatForm" style="display:flex;gap:8px;">
           <input id="liveChatInput" class="input" placeholder="Say hello in live chat..." />
           <button type="submit" class="btn-primary btn-sm">Send</button>
@@ -3080,30 +3573,49 @@ function openWatchLiveModal(streamId) {
     </div>
   `);
 
+  const pollRoom = async () => {
+    const [streams, frames, comments] = await Promise.all([
+      selectSupabaseTable(SUPABASE_WEB_CONFIG, 'live_streams', `select=*&id=eq.${encodeURIComponent(streamId)}&limit=1`),
+      selectSupabaseTable(SUPABASE_WEB_CONFIG, 'live_frames', `select=*&stream_id=eq.${encodeURIComponent(streamId)}&limit=1`),
+      selectSupabaseTable(SUPABASE_WEB_CONFIG, 'live_comments', `select=*&stream_id=eq.${encodeURIComponent(streamId)}&order=created_at.asc&limit=50`)
+    ]);
+    const st = streams[0];
+    const statsPill = document.getElementById('viewerLiveStatsPill');
+    if (st && statsPill) {
+      statsPill.textContent = `${formatCount(Math.max(1, st.viewer_count || 1))} watching · ${formatCount(st.likes_count || 0)} ♥`;
+    }
+    const img = document.getElementById('liveRemoteFrameImg');
+    if (frames[0]?.frame_data && img) {
+      img.src = `data:image/jpeg;base64,${frames[0].frame_data}`;
+    }
+    const box = document.getElementById('liveChatBox');
+    if (box && comments.length > 0) {
+      box.innerHTML = comments.map((c) => `<div><strong>@${escapeHtml(c.username)}</strong> ${escapeHtml(c.text)}</div>`).join('');
+      box.scrollTop = box.scrollHeight;
+    }
+  };
+  pollRoom();
+  state.livePollTimer = setInterval(pollRoom, 1600);
+
   document.getElementById('closeModalBtn').onclick = () => {
-    updateDoc(doc(db, 'liveStreams', streamId), { viewerCount: increment(-1), updatedAt: serverTimestamp() }).catch(() => undefined);
+    patchSupabaseRows(
+      SUPABASE_WEB_CONFIG,
+      'live_streams',
+      `id=eq.${encodeURIComponent(streamId)}`,
+      { viewer_count: Math.max(0, stream.viewerCount || 0) }
+    ).catch(() => undefined);
     closeModal();
   };
 
-  state.liveUnsubs.push(onSnapshot(doc(db, 'liveStreams', streamId, 'liveFrames', 'latest'), (snap) => {
-    const img = document.getElementById('liveRemoteFrameImg');
-    if (snap.exists() && img && snap.data().frameData) {
-      img.src = `data:image/jpeg;base64,${snap.data().frameData}`;
-    }
-  }));
-
-  state.liveUnsubs.push(onSnapshot(query(collection(db, 'liveStreams', streamId, 'liveComments'), orderBy('createdAt', 'asc'), limit(50)), (snap) => {
-    const box = document.getElementById('liveChatBox');
-    if (!box) return;
-    box.innerHTML = snap.docs.map((d) => {
-      const c = d.data();
-      return `<div><strong>@${escapeHtml(c.username)}</strong> ${escapeHtml(c.text)}</div>`;
-    }).join('');
-    box.scrollTop = box.scrollHeight;
-  }));
-
-  document.getElementById('liveHeartBtn').onclick = () => {
-    updateDoc(doc(db, 'liveStreams', streamId), { likesCount: increment(1), updatedAt: serverTimestamp() }).catch(() => undefined);
+  document.getElementById('liveHeartBtn').onclick = async () => {
+    stream.likesCount = (stream.likesCount || 0) + 1;
+    await patchSupabaseRows(
+      SUPABASE_WEB_CONFIG,
+      'live_streams',
+      `id=eq.${encodeURIComponent(streamId)}`,
+      { likes_count: stream.likesCount }
+    ).catch(() => undefined);
+    pollRoom();
   };
 
   document.getElementById('liveChatForm').onsubmit = async (e) => {
@@ -3112,13 +3624,15 @@ function openWatchLiveModal(streamId) {
     const text = input.value.trim();
     if (!text || !state.profile) return;
     input.value = '';
-    await setDoc(doc(db, 'liveStreams', streamId, 'liveComments', makeClientId('lc')), {
-      userId: state.user.uid,
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'live_comments', [{
+      id: makeClientId('lc'),
+      stream_id: streamId,
+      user_id: state.user.uid,
       username: state.profile.username,
-      avatarKey: state.profile.avatarKey || 'avatar_aria',
-      text: text.slice(0, 300),
-      createdAt: serverTimestamp()
-    });
+      avatar_key: state.profile.avatarKey || 'avatar_aria',
+      text: text.slice(0, 300)
+    }], '', globalThis.fetch, 'id');
+    pollRoom();
   };
 
   modalContent.querySelectorAll('[data-send-gift]').forEach((b) => {
@@ -3135,48 +3649,256 @@ function openWatchLiveModal(streamId) {
         return;
       }
       const txId = makeClientId('gift');
-      const batch = writeBatch(db);
-      batch.update(doc(db, 'wallets', state.user.uid), {
+      await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'wallets', `user_id=eq.${encodeURIComponent(state.user.uid)}`, {
         balance: w.balance - credits,
-        totalSpent: (w.totalSpent || 0) + credits,
-        lastTxId: txId,
-        updatedAt: serverTimestamp()
+        total_spent: (w.totalSpent || 0) + credits,
+        last_tx_id: txId
       });
-      batch.set(doc(db, 'creditTransactions', txId), {
-        txId,
+      await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'credit_transactions', [{
+        tx_id: txId,
         type: 'GIFT',
-        senderUid: state.user.uid,
-        senderUsername: state.profile.username,
-        recipientUid: stream.userId,
-        recipientUsername: stream.username,
-        creditsAmount: credits,
-        priceUsd: 0,
-        paymentMethod: 'WALLET_CREDITS',
-        giftKey,
-        giftName,
-        streamId,
-        recipientClaimed: false,
-        status: 'COMPLETED',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
-      batch.update(doc(db, 'liveStreams', streamId), {
-        giftsCredits: increment(credits),
-        updatedAt: serverTimestamp()
-      });
-      await batch.commit();
-      showToast(`Sent ${giftName} (${credits} credits) to @${stream.username}!`);
+        sender_uid: state.user.uid,
+        sender_username: state.profile.username,
+        recipient_uid: stream.userId,
+        recipient_username: stream.username,
+        credits_amount: credits,
+        price_usd: 0,
+        payment_method: 'WALLET_CREDITS',
+        gift_key: giftKey,
+        gift_name: giftName,
+        stream_id: streamId,
+        recipient_claimed: false,
+        status: 'COMPLETED'
+      }], '', globalThis.fetch, 'tx_id');
+      await patchSupabaseRows(
+        SUPABASE_WEB_CONFIG,
+        'live_streams',
+        `id=eq.${encodeURIComponent(streamId)}`,
+        { gifts_credits: (stream.giftsCredits || 0) + credits }
+      );
+      await refreshAllFromSupabase({ showErrors: false });
+      showToast(`Sent ${giftName} (${credits} cr) to @${stream.username}!`);
     };
   });
 }
 
+function openProductDetailModal(productId) {
+  const prod = state.products.find((p) => p.id === productId);
+  if (!prod) return;
+  const isOwn = prod.sellerUid === state.user?.uid;
+  const videoUrl = resolveVideoSrc(prod);
+
+  openModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <strong>${escapeHtml(prod.storeName)} &middot; @${escapeHtml(prod.sellerUsername)}</strong>
+      <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+    </div>
+    <div class="post-detail-split">
+      <div style="background:#000;border-radius:14px;overflow:hidden;display:grid;place-items:center;">
+        ${
+          videoUrl
+            ? `<video src="${escapeHtml(videoUrl)}" poster="${escapeHtml(resolveImageSrc(prod))}" controls playsinline style="width:100%;max-height:60vh;"></video>`
+            : `<img src="${resolveImageSrc(prod)}" alt="${escapeHtml(prod.title)}" style="width:100%;max-height:60vh;object-fit:contain;" />`
+        }
+      </div>
+      <div style="display:flex;flex-direction:column;gap:12px;">
+        <h3 style="margin:0;">${escapeHtml(prod.title)}</h3>
+        <div style="font-size:1.5rem;font-weight:800;color:var(--primary);">$${Number(prod.priceUsd || 0).toFixed(2)}</div>
+        <div class="muted small">${escapeHtml(prod.category)} &middot; ${prod.freeShipping ? 'Free Shipping' : 'Standard Shipping'}</div>
+        ${prod.description ? `<p style="margin:0;line-height:1.5;">${escapeHtml(prod.description)}</p>` : ''}
+        ${
+          isOwn
+            ? `<button type="button" class="btn-danger" id="deleteMarketProdBtn">Remove Listing</button>`
+            : `<form id="marketBuyForm" style="display:grid;gap:10px;border-top:1px solid var(--border);padding-top:12px;">
+                <label class="small muted">Delivery Address &amp; Contact</label>
+                <textarea id="marketAddressInput" class="textarea" rows="2" placeholder="Street, city, phone number..." required></textarea>
+                <div style="display:flex;gap:10px;">
+                  <button type="button" class="btn-outline" id="msgSellerBtn">Message Seller</button>
+                  <button type="submit" class="btn-primary" style="flex:1;">Buy Now ($${Number(prod.priceUsd || 0).toFixed(2)})</button>
+                </div>
+              </form>`
+        }
+      </div>
+    </div>
+  `);
+  document.getElementById('closeModalBtn').onclick = closeModal;
+  document.getElementById('deleteMarketProdBtn')?.addEventListener('click', async () => {
+    await deleteSupabaseRows(SUPABASE_WEB_CONFIG, 'market_products', `id=eq.${encodeURIComponent(prod.id)}`);
+    closeModal();
+    await refreshAllFromSupabase({ showErrors: false });
+    showToast('Listing removed');
+  });
+  document.getElementById('msgSellerBtn')?.addEventListener('click', () => {
+    closeModal();
+    openOrCreateDirectThread({
+      userId: prod.sellerUid,
+      username: prod.sellerUsername,
+      displayName: prod.storeName,
+      avatarKey: 'avatar_aria'
+    });
+  });
+  document.getElementById('marketBuyForm')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const addr = document.getElementById('marketAddressInput').value.trim();
+    if (!addr || !state.profile) return;
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'market_orders', [{
+      id: makeClientId('order'),
+      buyer_uid: state.user.uid,
+      buyer_username: state.profile.username,
+      seller_uid: prod.sellerUid,
+      seller_store_name: prod.storeName,
+      product_id: prod.id,
+      product_title: prod.title,
+      product_image_key: prod.imageKey || 'img_post_coastal',
+      product_image_data: prod.imageData || null,
+      price_usd: Number(prod.priceUsd),
+      shipping_address: addr.slice(0, 300),
+      status: 'PLACED'
+    }], '', globalThis.fetch, 'id');
+    closeModal();
+    await refreshAllFromSupabase({ showErrors: false });
+    showToast('Order placed!');
+  });
+}
+
+function openSellProductModal() {
+  const existingMerchant = state.merchants.find((m) => m.userId === state.user?.uid);
+  openModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <h3 style="margin:0;">Sell on Momi Marketplace</h3>
+      <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+    </div>
+    <form id="sellMarketForm" style="display:grid;gap:12px;">
+      <div class="field-grid-2">
+        <div>
+          <label class="small muted">Store Name *</label>
+          <input id="sellStoreName" class="input" value="${escapeHtml(existingMerchant?.storeName || `${state.profile?.displayName || 'Momi'} Shop`)}" required />
+        </div>
+        <div>
+          <label class="small muted">Category</label>
+          <select id="sellCategory" class="select">
+            <option value="Collectibles">Collectibles</option>
+            <option value="Fashion">Fashion</option>
+            <option value="Tech">Tech</option>
+            <option value="Art">Art</option>
+            <option value="Home">Home</option>
+            <option value="Digital">Digital</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label class="small muted">Product Title *</label>
+        <input id="sellTitle" class="input" placeholder="e.g. Vintage Film Camera" required />
+      </div>
+      <div class="field-grid-2">
+        <div>
+          <label class="small muted">Price (USD) *</label>
+          <input id="sellPrice" type="number" step="0.01" min="0.50" class="input" placeholder="29.99" required />
+        </div>
+        <div>
+          <label class="small muted">Product Photo</label>
+          <input id="sellPhotoInput" type="file" accept="image/*" class="input" />
+        </div>
+      </div>
+      <div>
+        <label class="small muted">Description</label>
+        <textarea id="sellDesc" class="textarea" rows="3" placeholder="Condition, sizing, or shipping notes..."></textarea>
+      </div>
+      <label class="consent-row">
+        <span>Free Shipping Badge</span>
+        <input id="sellFreeShip" type="checkbox" checked />
+      </label>
+      <button type="submit" class="btn-primary btn-lg">Publish Listing</button>
+    </form>
+  `);
+  document.getElementById('closeModalBtn').onclick = closeModal;
+  document.getElementById('sellMarketForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const storeName = document.getElementById('sellStoreName').value.trim().slice(0, 80);
+    const category = document.getElementById('sellCategory').value;
+    const title = document.getElementById('sellTitle').value.trim().slice(0, 120);
+    const price = Math.max(0.5, Number(document.getElementById('sellPrice').value) || 1);
+    const desc = document.getElementById('sellDesc').value.trim().slice(0, 1000);
+    const freeShipping = Boolean(document.getElementById('sellFreeShip').checked);
+    const file = document.getElementById('sellPhotoInput').files?.[0];
+    const prodId = makeClientId('prod');
+    let imageUrl = null;
+    if (file) {
+      imageUrl = await uploadWebFileToStorage(
+        SUPABASE_WEB_CONFIG,
+        'momi-media',
+        `market/${state.user.uid}/${prodId}.jpg`,
+        file,
+        file.type || 'image/jpeg'
+      );
+    }
+
+    await ensureUserSeededInSupabase(state.user);
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'merchants', [{
+      user_id: state.user.uid,
+      owner_username: state.profile.username,
+      store_name: storeName,
+      category,
+      is_verified: Boolean(existingMerchant?.isVerified)
+    }], '', globalThis.fetch, 'user_id');
+
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'market_products', [{
+      id: prodId,
+      seller_uid: state.user.uid,
+      seller_username: state.profile.username,
+      store_name: storeName,
+      title,
+      description: desc,
+      category,
+      price_usd: price,
+      original_price_usd: 0,
+      discount_percent: 0,
+      free_shipping: freeShipping,
+      image_key: 'img_post_coastal',
+      image_url: imageUrl,
+      stock_count: 5
+    }], '', globalThis.fetch, 'id');
+
+    closeModal();
+    await refreshAllFromSupabase({ showErrors: false });
+    showToast('Listing published to Momi Marketplace!');
+  };
+}
+
+function openOrdersModal() {
+  openModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <h3 style="margin:0;">Marketplace Orders (${state.orders.length})</h3>
+      <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+    </div>
+    <div style="display:grid;gap:10px;">
+      ${
+        state.orders.length === 0
+          ? '<p class="muted">No orders yet.</p>'
+          : state.orders.map((o) => `
+            <div class="consent-row" style="align-items:flex-start;">
+              <div>
+                <strong>${escapeHtml(o.productTitle)} ($${Number(o.priceUsd || 0).toFixed(2)})</strong>
+                <div class="muted small">Store: ${escapeHtml(o.sellerStoreName)} &middot; Status: ${escapeHtml(o.status)}</div>
+                <div class="muted small">Ship to: ${escapeHtml(o.shippingAddress)}</div>
+              </div>
+            </div>
+          `).join('')
+      }
+    </div>
+  `);
+  document.getElementById('closeModalBtn').onclick = closeModal;
+}
+
 async function updatePartnerConsent(enabled) {
   if (!state.user) return;
-  await updateDoc(doc(db, 'users', state.user.uid), {
-    partnerConsent: Boolean(enabled),
-    consentUpdatedAt: serverTimestamp(),
-    updatedAt: serverTimestamp()
-  });
+  await patchSupabaseRows(
+    SUPABASE_WEB_CONFIG,
+    'profiles',
+    `user_id=eq.${encodeURIComponent(state.user.uid)}`,
+    { partner_consent: Boolean(enabled), consent_updated_at: new Date().toISOString() }
+  );
+  if (state.profile) state.profile.partnerConsent = Boolean(enabled);
   showToast(enabled ? 'Partner Boost & Owner Perks consent enabled' : 'Partner consent turned off');
 }
 
@@ -3211,39 +3933,34 @@ function openPostBoostModal(post) {
         return;
       }
       const txId = makeClientId('boost');
-      const batch = writeBatch(db);
-      batch.update(doc(db, 'wallets', state.user.uid), {
+      await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'wallets', `user_id=eq.${encodeURIComponent(state.user.uid)}`, {
         balance: w.balance - opt.creditsCost,
-        totalSpent: (w.totalSpent || 0) + opt.creditsCost,
-        lastTxId: txId,
-        updatedAt: serverTimestamp()
+        total_spent: (w.totalSpent || 0) + opt.creditsCost,
+        last_tx_id: txId
       });
-      batch.set(doc(db, 'creditTransactions', txId), {
-        txId,
+      await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'credit_transactions', [{
+        tx_id: txId,
         type: 'POST_BOOST',
-        senderUid: state.user.uid,
-        senderUsername: state.profile.username,
-        recipientUid: state.user.uid,
-        recipientUsername: state.profile.username,
-        creditsAmount: opt.creditsCost,
-        priceUsd: 0,
-        paymentMethod: 'WALLET_CREDITS',
-        postId: post.id,
-        recipientClaimed: true,
-        status: 'COMPLETED',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
+        sender_uid: state.user.uid,
+        sender_username: state.profile.username,
+        recipient_uid: state.user.uid,
+        recipient_username: state.profile.username,
+        credits_amount: opt.creditsCost,
+        price_usd: 0,
+        payment_method: 'WALLET_CREDITS',
+        post_id: post.id,
+        recipient_claimed: true,
+        status: 'COMPLETED'
+      }], '', globalThis.fetch, 'tx_id');
+      await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'posts', `id=eq.${encodeURIComponent(post.id)}`, {
+        is_boosted: true,
+        boost_tier: opt.tier,
+        recommended_label: opt.badgeLabel,
+        boosted_by_uid: state.user.uid,
+        boosted_at: new Date().toISOString()
       });
-      batch.update(doc(db, 'posts', post.id), {
-        isBoosted: true,
-        boostTier: opt.tier,
-        recommendedLabel: opt.badgeLabel,
-        boostedByUid: state.user.uid,
-        boostedAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
-      await batch.commit();
       closeModal();
+      await refreshAllFromSupabase({ showErrors: false });
       showToast(`${opt.title} activated across Momi!`);
     };
   });
@@ -3252,44 +3969,40 @@ function openPostBoostModal(post) {
 async function adminToggleRecommendPost(post) {
   if (!isOwnerAdmin() || !state.profile) return;
   const currentlyRecommended = post.boostTier === 'OWNER_RECOMMENDED' || Boolean(post.recommendedLabel);
-  const batch = writeBatch(db);
   if (currentlyRecommended) {
-    batch.update(doc(db, 'posts', post.id), {
-      isBoosted: false,
-      boostTier: '',
-      recommendedLabel: '',
-      boostedByUid: null,
-      boostedAt: null,
-      updatedAt: serverTimestamp()
+    await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'posts', `id=eq.${encodeURIComponent(post.id)}`, {
+      is_boosted: false,
+      boost_tier: '',
+      recommended_label: '',
+      boosted_by_uid: null,
+      boosted_at: null
     });
   } else {
-    batch.update(doc(db, 'posts', post.id), {
-      isBoosted: true,
-      boostTier: 'OWNER_RECOMMENDED',
-      recommendedLabel: 'Recommended by Momi',
-      boostedByUid: state.user.uid,
-      boostedAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
+    await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'posts', `id=eq.${encodeURIComponent(post.id)}`, {
+      is_boosted: true,
+      boost_tier: 'OWNER_RECOMMENDED',
+      recommended_label: 'Recommended by Momi',
+      boosted_by_uid: state.user.uid,
+      boosted_at: new Date().toISOString()
     });
     if (post.userId && post.userId !== state.user.uid) {
-      batch.set(doc(db, 'users', post.userId, 'notifications', makeClientId('notif')), {
-        userId: post.userId,
-        actorUid: state.user.uid,
-        actorUsername: state.profile.username,
-        actorAvatarKey: state.profile.avatarKey || 'avatar_aria',
+      await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'notifications', [{
+        id: makeClientId('notif'),
+        user_id: post.userId,
+        actor_uid: state.user.uid,
+        actor_username: state.profile.username,
+        actor_avatar_key: state.profile.avatarKey || 'avatar_aria',
         message: 'featured your post under Recommended by Momi!',
-        timeLabel: 'Just now',
+        time_label: 'Just now',
         section: 'Today',
-        previewImageKey: post.imageKey || 'img_post_coastal',
-        isFollowAction: false,
-        isFollowingBack: false,
-        isUnread: true,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
+        preview_image_key: post.imageKey || 'img_post_coastal',
+        is_follow_action: false,
+        is_following_back: false,
+        is_unread: true
+      }], '', globalThis.fetch, 'id');
     }
   }
-  await batch.commit();
+  await refreshAllFromSupabase({ showErrors: false });
   showToast(currentlyRecommended ? 'Removed Momi recommendation' : 'Post featured as Recommended by Momi!');
 }
 
@@ -3310,26 +4023,28 @@ async function saveAdMonetizationConfigFromForm() {
   state.adminBusy = true;
   renderProfile();
   try {
-    await setDoc(doc(db, 'appConfig', 'monetization'), {
-      admobEnabled: Boolean(document.getElementById('cfgAdmobEnabled').checked),
-      admobBannerUnitId: document.getElementById('cfgAdmobBanner').value.trim().slice(0, 120),
-      admobMrecUnitId: document.getElementById('cfgAdmobMrec').value.trim().slice(0, 120),
-      admobInterstitialUnitId: document.getElementById('cfgAdmobInterstitial').value.trim().slice(0, 120),
-      startIoEnabled: Boolean(document.getElementById('cfgStartIoEnabled').checked),
-      monetagEnabled: Boolean(document.getElementById('cfgMonetagEnabled').checked),
-      monetagDirectLinkUrl: normalizedDirect,
-      monetagWebZoneId: sanitizeMonetagZoneId(document.getElementById('cfgMonetagZoneId').value),
-      monetagWebMetaTag: document.getElementById('cfgMonetagMeta').value.trim().slice(0, 120),
-      partnerPromoTitle: (document.getElementById('cfgPromoTitle').value.trim() || DEFAULT_MONETIZATION_CONFIG.partnerPromoTitle).slice(0, 80),
-      partnerPromoSubtitle: (document.getElementById('cfgPromoSubtitle').value.trim() || DEFAULT_MONETIZATION_CONFIG.partnerPromoSubtitle).slice(0, 180),
-      partnerPromoCta: (document.getElementById('cfgPromoCta').value.trim() || DEFAULT_MONETIZATION_CONFIG.partnerPromoCta).slice(0, 40),
-      gamezopEnabled: Boolean(document.getElementById('cfgGamezopEnabled').checked),
-      gamezopPortalUrl: normalizedGamezop,
-      gamezopPublisherId: sanitizeGamezopPublisherId(document.getElementById('cfgGamezopPubId').value),
-      gamezopBannerTitle: (document.getElementById('cfgGamezopTitle').value.trim() || DEFAULT_MONETIZATION_CONFIG.gamezopBannerTitle).slice(0, 80),
-      updatedByEmail: ADMIN_OWNER_EMAIL,
-      updatedAt: serverTimestamp()
-    });
+    const row = {
+      id: 'monetization',
+      admob_enabled: Boolean(document.getElementById('cfgAdmobEnabled').checked),
+      admob_banner_unit_id: document.getElementById('cfgAdmobBanner').value.trim().slice(0, 120),
+      admob_mrec_unit_id: document.getElementById('cfgAdmobMrec').value.trim().slice(0, 120),
+      admob_interstitial_unit_id: document.getElementById('cfgAdmobInterstitial').value.trim().slice(0, 120),
+      start_io_enabled: Boolean(document.getElementById('cfgStartIoEnabled').checked),
+      monetag_enabled: Boolean(document.getElementById('cfgMonetagEnabled').checked),
+      monetag_direct_link_url: normalizedDirect,
+      monetag_web_zone_id: sanitizeMonetagZoneId(document.getElementById('cfgMonetagZoneId').value),
+      monetag_web_meta_tag: document.getElementById('cfgMonetagMeta').value.trim().slice(0, 120),
+      partner_promo_title: (document.getElementById('cfgPromoTitle').value.trim() || DEFAULT_MONETIZATION_CONFIG.partnerPromoTitle).slice(0, 80),
+      partner_promo_subtitle: (document.getElementById('cfgPromoSubtitle').value.trim() || DEFAULT_MONETIZATION_CONFIG.partnerPromoSubtitle).slice(0, 180),
+      partner_promo_cta: (document.getElementById('cfgPromoCta').value.trim() || DEFAULT_MONETIZATION_CONFIG.partnerPromoCta).slice(0, 40),
+      gamezop_enabled: Boolean(document.getElementById('cfgGamezopEnabled').checked),
+      gamezop_portal_url: normalizedGamezop,
+      gamezop_publisher_id: sanitizeGamezopPublisherId(document.getElementById('cfgGamezopPubId').value),
+      gamezop_banner_title: (document.getElementById('cfgGamezopTitle').value.trim() || DEFAULT_MONETIZATION_CONFIG.gamezopBannerTitle).slice(0, 80),
+      updated_by_email: ADMIN_OWNER_EMAIL
+    };
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'app_config', [row], '', globalThis.fetch, 'id');
+    await refreshAllFromSupabase({ showErrors: false });
     showToast('Live Monetization config saved across Android & Web!');
   } catch (err) {
     showToast(err?.message || 'Failed saving monetization config');
@@ -3376,81 +4091,61 @@ function openOwnerGrantModal(creator) {
       showToast('Select credits, a perk, or verified status to grant.');
       return;
     }
-    const walletRef = doc(db, 'wallets', creator.userId);
-    const walletSnap = await getDoc(walletRef);
-    const existingWallet = walletSnap.exists() ? walletSnap.data() : null;
+    const existingRows = await selectSupabaseTable(SUPABASE_WEB_CONFIG, 'wallets', `select=*&user_id=eq.${encodeURIComponent(creator.userId)}&limit=1`);
+    const existingWallet = existingRows[0] ? mapSupabaseWalletToWeb(existingRows[0]) : null;
     const txId = makeClientId('grant');
     const prevPerks = existingWallet?.unlockedPerks || [];
     const nextPerks = perkKey ? [...new Set([...prevPerks, perkKey])] : prevPerks;
     const nextTier = tierForTotalPurchased(existingWallet?.totalPurchased || 0, nextPerks);
     const nextVerif = verificationTierForPerks(grantVerified ? 'VERIFIED' : (existingWallet?.verificationTier || 'NONE'), nextPerks);
 
-    const batch = writeBatch(db);
-    if (!walletSnap.exists()) {
-      batch.set(walletRef, {
-        userId: creator.userId,
-        balance: credits,
-        totalEarned: credits,
-        totalSpent: 0,
-        totalPurchased: 0,
-        accountTier: nextTier,
-        verificationTier: nextVerif,
-        unlockedPerks: nextPerks,
-        lastTxId: txId,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
-    } else {
-      batch.update(walletRef, {
-        balance: (existingWallet.balance || 0) + credits,
-        totalEarned: (existingWallet.totalEarned || 0) + credits,
-        accountTier: nextTier,
-        verificationTier: nextVerif,
-        unlockedPerks: nextPerks,
-        lastTxId: txId,
-        updatedAt: serverTimestamp()
-      });
-    }
-    batch.set(doc(db, 'creditTransactions', txId), {
-      txId,
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'wallets', [{
+      user_id: creator.userId,
+      balance: (existingWallet?.balance || 0) + credits,
+      total_earned: (existingWallet?.totalEarned || 0) + credits,
+      total_spent: existingWallet?.totalSpent || 0,
+      total_purchased: existingWallet?.totalPurchased || 0,
+      account_tier: nextTier,
+      verification_tier: nextVerif,
+      unlocked_perks: nextPerks,
+      last_tx_id: txId
+    }], '', globalThis.fetch, 'user_id');
+
+    await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'credit_transactions', [{
+      tx_id: txId,
       type: 'OWNER_GRANT',
-      senderUid: state.user.uid,
-      senderUsername: state.profile.username,
-      recipientUid: creator.userId,
-      recipientUsername: creator.username,
-      creditsAmount: credits,
-      priceUsd: 0,
-      paymentMethod: 'OWNER_ADMIN',
-      perkKey,
-      recipientClaimed: true,
-      status: 'COMPLETED',
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    });
+      sender_uid: state.user.uid,
+      sender_username: state.profile.username,
+      recipient_uid: creator.userId,
+      recipient_username: creator.username,
+      credits_amount: credits,
+      price_usd: 0,
+      payment_method: 'OWNER_ADMIN',
+      perk_key: perkKey,
+      recipient_claimed: true,
+      status: 'COMPLETED'
+    }], '', globalThis.fetch, 'tx_id');
+
     if (grantVerified && !creator.isVerified) {
-      batch.update(doc(db, 'users', creator.userId), {
-        isVerified: true,
-        updatedAt: serverTimestamp()
-      });
+      await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'profiles', `user_id=eq.${encodeURIComponent(creator.userId)}`, { is_verified: true });
     }
     if (creator.userId !== state.user.uid) {
-      batch.set(doc(db, 'users', creator.userId, 'notifications', makeClientId('notif')), {
-        userId: creator.userId,
-        actorUid: state.user.uid,
-        actorUsername: state.profile.username,
-        actorAvatarKey: state.profile.avatarKey || 'avatar_aria',
+      await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'notifications', [{
+        id: makeClientId('notif'),
+        user_id: creator.userId,
+        actor_uid: state.user.uid,
+        actor_username: state.profile.username,
+        actor_avatar_key: state.profile.avatarKey || 'avatar_aria',
         message: 'granted you an official Momi Creator Perk & Bonus!',
-        timeLabel: 'Just now',
+        time_label: 'Just now',
         section: 'Today',
-        isFollowAction: false,
-        isFollowingBack: false,
-        isUnread: true,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
+        is_follow_action: false,
+        is_following_back: false,
+        is_unread: true
+      }], '', globalThis.fetch, 'id');
     }
-    await batch.commit();
     closeModal();
+    await refreshAllFromSupabase({ showErrors: false });
     showToast(`Sent Owner Grant to @${creator.username}!`);
   };
 }
@@ -3480,7 +4175,7 @@ async function syncSupabaseDataFromWeb() {
       creators: state.creators,
       posts: state.posts,
       stories: state.stories,
-      merchants: [],
+      merchants: state.merchants,
       products: state.products,
       monetizationConfig: state.monetizationConfig,
       wallet: state.wallet
@@ -3504,7 +4199,7 @@ function downloadSupabaseMigrationSnapshot() {
     creators: state.creators,
     posts: state.posts,
     stories: state.stories,
-    merchants: [],
+    merchants: state.merchants,
     products: state.products,
     monetizationConfig: state.monetizationConfig,
     wallet: state.wallet
@@ -3520,4 +4215,3 @@ function downloadSupabaseMigrationSnapshot() {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   showToast('Downloaded Supabase migration JSON snapshot!');
 }
-

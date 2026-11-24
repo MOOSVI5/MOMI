@@ -578,13 +578,6 @@ private fun LumaApp(
         LumaRoutes.PROFILE
     )
 
-    val showAssistantFab = currentRoute in listOf(
-        LumaRoutes.HOME,
-        LumaRoutes.EXPLORE,
-        LumaRoutes.PROFILE,
-        LumaRoutes.MARKETPLACE
-    )
-
     fun sharePostExternally(post: Post) {
         shareText(
             context = context,
@@ -683,6 +676,7 @@ private fun LumaApp(
                                             username = profile?.username ?: "momi",
                                             avatarKey = profile?.avatarKey ?: "avatar_aria",
                                             avatarData = profile?.avatarData,
+                                            avatarUrl = profile?.avatarUrl,
                                             size = 26.dp,
                                             hasActiveStory = selected
                                         )
@@ -764,6 +758,7 @@ private fun LumaApp(
                                 unreadMessageCount = unreadMessages,
                                 onOpenSearch = { navigatePrimaryTab(LumaRoutes.EXPLORE) },
                                 onOpenMarketplace = { navController.navigate(LumaRoutes.MARKETPLACE) },
+                                onOpenAiAssistant = { showAiAssistantSheet = true },
                                 onOpenNotifications = { navController.navigate(LumaRoutes.NOTIFICATIONS) },
                                 onOpenMessages = { navController.navigate(LumaRoutes.messagesRoute()) },
                                 onOpenStory = { story -> navController.navigate(LumaRoutes.storyRoute(story.id)) },
@@ -859,6 +854,7 @@ private fun LumaApp(
                                         navController.navigate(LumaRoutes.messagesRoute(thread.id))
                                     }
                                 },
+                                onOpenAiAssistant = { showAiAssistantSheet = true },
                                 monetizationConfig = monetizationConfig
                             )
                         }
@@ -1001,6 +997,7 @@ private fun LumaApp(
                                 onColorSchemeChange = { viewModel.setColorScheme(context, it) },
                                 onCreateClick = { navController.navigate(LumaRoutes.createRoute(false)) },
                                 onOpenWallet = { navController.navigate(LumaRoutes.WALLET) },
+                                onOpenAiAssistant = { showAiAssistantSheet = true },
                                 onPostClick = { post ->
                                     navController.navigate(LumaRoutes.postDetailRoute(post.id))
                                 },
@@ -1204,6 +1201,7 @@ private fun LumaApp(
                                         previewText = product.title
                                     )
                                 },
+                                onOpenAiAssistant = { showAiAssistantSheet = true },
                                 monetizationConfig = monetizationConfig,
                                 modifier = Modifier.navigationBarsPadding()
                             )
@@ -1471,16 +1469,6 @@ private fun LumaApp(
                                 onClose = { navController.popBackStack() }
                             )
                         }
-                    }
-
-                    if (showAssistantFab) {
-                        FloatingMomiAssistantButton(
-                            onClick = { showAiAssistantSheet = true },
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .then(if (currentRoute == LumaRoutes.MARKETPLACE) Modifier.navigationBarsPadding() else Modifier)
-                                .padding(end = 16.dp, bottom = 16.dp)
-                        )
                     }
                 }
             }

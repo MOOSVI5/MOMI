@@ -157,10 +157,12 @@ fun GoLiveScreen(
     var commentDraft by remember { mutableStateOf("") }
     var elapsedSeconds by remember { mutableLongStateOf(0L) }
     var cameraError by remember { mutableStateOf<String?>(null) }
+    var lastCapturedFrameData by remember { mutableStateOf("") }
 
     val currentIsLive by rememberUpdatedState(isLive)
     val currentCameraEnabled by rememberUpdatedState(cameraEnabled)
     val currentMicMuted by rememberUpdatedState(isMicMuted)
+    val currentLastFrame by rememberUpdatedState(lastCapturedFrameData)
     val latestOnEndLive by rememberUpdatedState(onEndLive)
     val latestOnPublishFrame by rememberUpdatedState(onPublishFrame)
 
@@ -193,11 +195,25 @@ fun GoLiveScreen(
         }
     }
 
-    // Immediately broadcast paused-camera or mic state so viewers update without waiting
+    // Periodically broadcast frame/stage heartbeat so viewers stay synced even without hardware camera
     LaunchedEffect(isLive, cameraEnabled, isMicMuted) {
-        if (isLive && (!cameraEnabled || isMicMuted)) {
-            val seq = seqRef.incrementAndGet()
-            latestOnPublishFrame(seq, "", cameraEnabled, isMicMuted)
+        if (!isLive) return@LaunchedEffect
+        val immediateSeq = seqRef.incrementAndGet()
+        latestOnPublishFrame(
+            immediateSeq,
+            if (cameraEnabled) currentLastFrame else "",
+            cameraEnabled,
+            isMicMuted
+        )
+        while (isLive) {
+            delay(3_000L)
+            val heartbeatSeq = seqRef.incrementAndGet()
+            latestOnPublishFrame(
+                heartbeatSeq,
+                if (currentCameraEnabled) currentLastFrame else "",
+                currentCameraEnabled,
+                currentMicMuted
+            )
         }
     }
 
@@ -317,6 +333,7 @@ fun GoLiveScreen(
                                             val nextSeq = seqRef.incrementAndGet()
                                             val mic = currentMicMuted
                                             mainExecutor.execute {
+                                                lastCapturedFrameData = encoded
                                                 if (currentIsLive && currentCameraEnabled) {
                                                     latestOnPublishFrame(nextSeq, encoded, true, mic)
                                                 }
@@ -502,6 +519,7 @@ fun GoLiveScreen(
                     username = profile?.username ?: "creator",
                     avatarKey = profile?.avatarKey ?: "avatar_aria",
                     avatarData = profile?.avatarData,
+                    avatarUrl = profile?.avatarUrl,
                     size = 38.dp,
                     hasActiveStory = isLive
                 )

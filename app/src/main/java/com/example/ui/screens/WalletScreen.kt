@@ -311,34 +311,36 @@ fun WalletScreen(
                         Triple(3, "History", Icons.Filled.History)
                     ).forEach { (idx, label, icon) ->
                         val active = selectedTab == idx
-                        Row(
+                        Column(
                             modifier = Modifier
                                 .weight(1f)
-                                .heightIn(min = 44.dp)
+                                .heightIn(min = 52.dp)
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(
                                     if (active) MaterialTheme.colorScheme.primary
                                     else MaterialTheme.colorScheme.surfaceVariant
                                 )
                                 .clickable { selectedTab = idx }
-                                .padding(horizontal = 6.dp, vertical = 8.dp)
+                                .padding(horizontal = 4.dp, vertical = 7.dp)
                                 .testTag("wallet_tab_$idx"),
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
                         ) {
                             Icon(
                                 imageVector = icon,
                                 contentDescription = label,
                                 tint = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(18.dp)
                             )
-                            Spacer(modifier = Modifier.width(4.dp))
+                            Spacer(modifier = Modifier.height(3.dp))
                             Text(
                                 text = label,
-                                style = MaterialTheme.typography.labelMedium,
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
                                 fontWeight = FontWeight.Bold,
                                 color = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
@@ -411,6 +413,7 @@ fun WalletScreen(
                                         username = creator.username,
                                         avatarKey = creator.avatarKey,
                                         avatarData = creator.avatarData,
+                                        avatarUrl = creator.avatarUrl,
                                         size = 44.dp
                                     )
                                     Spacer(modifier = Modifier.width(12.dp))

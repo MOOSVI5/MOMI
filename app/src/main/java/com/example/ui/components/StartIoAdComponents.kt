@@ -396,11 +396,36 @@ private class MomiSafeWebViewClientWrapper(
 private fun wrapSingleWebViewClient(webView: WebView?, onRendererGone: () -> Unit) {
     if (webView == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
     runCatching {
+        webView.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         val current = webView.webViewClient
         if (current !is MomiSafeWebViewClientWrapper) {
             webView.webViewClient = MomiSafeWebViewClientWrapper(current, onRendererGone)
         }
     }
+}
+
+private fun hasRenderedAdWebContent(view: View?): Boolean {
+    if (view == null) return false
+    var foundWebView = false
+    var hasRenderedContent = false
+    fun inspect(node: View) {
+        when (node) {
+            is WebView -> {
+                foundWebView = true
+                val url = node.url.orEmpty()
+                if (node.contentHeight > 0 && url != "about:blank") {
+                    hasRenderedContent = true
+                }
+            }
+            is ViewGroup -> {
+                for (i in 0 until node.childCount) {
+                    inspect(node.getChildAt(i))
+                }
+            }
+        }
+    }
+    inspect(view)
+    return if (foundWebView) hasRenderedContent else (view.width > 0 && view.height > 0)
 }
 
 internal fun wrapDescendantWebViews(view: View?, onRendererGone: () -> Unit) {
@@ -1120,14 +1145,22 @@ private fun StartIoMrecSponsoredCard(
                                     }
                                     val mrec = Mrec(hostActivity, object : BannerListener {
                                         override fun onReceiveAd(banner: View) {
-                                            MomiStartIoSession.updateMrec("Loaded (300x250)")
                                             mainHandler.post {
                                                 (banner as? BannerStandard)?.let {
                                                     protectBannerStandardWebViews(it, onRendererGone)
                                                 }
-                                                mrecFailed = false
-                                                mrecLoaded = true
                                                 runCatching { (banner as? Mrec)?.showBanner() }
+                                                mainHandler.postDelayed({
+                                                    if (hasRenderedAdWebContent(banner)) {
+                                                        MomiStartIoSession.updateMrec("Loaded (300x250)")
+                                                        mrecFailed = false
+                                                        mrecLoaded = true
+                                                    } else {
+                                                        MomiStartIoSession.updateMrec("Blank MREC — falling back")
+                                                        mrecLoaded = false
+                                                        mrecFailed = true
+                                                    }
+                                                }, 700L)
                                             }
                                         }
 
@@ -1142,6 +1175,7 @@ private fun StartIoMrecSponsoredCard(
                                         override fun onImpression(banner: View?) = Unit
                                         override fun onClick(banner: View?) = Unit
                                     })
+                                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
                                     attachBannerWebViewProtector(mrec, mainHandler, onRendererGone)
                                     addView(
                                         mrec,
@@ -1238,13 +1272,21 @@ private fun StartIoStandardFeedBannerCard(
                                     val hostCtx = ctx.findActivity() ?: ctx
                                     val banner = Banner(hostCtx, object : BannerListener {
                                         override fun onReceiveAd(banner: View) {
-                                            MomiStartIoSession.updateBanner("Loaded (Feed 320x50)")
                                             mainHandler.post {
                                                 (banner as? BannerStandard)?.let {
                                                     protectBannerStandardWebViews(it, onRendererGone)
                                                 }
-                                                bannerLoaded = true
                                                 runCatching { (banner as? Banner)?.showBanner() }
+                                                mainHandler.postDelayed({
+                                                    if (hasRenderedAdWebContent(banner)) {
+                                                        MomiStartIoSession.updateBanner("Loaded (Feed 320x50)")
+                                                        bannerLoaded = true
+                                                    } else {
+                                                        MomiStartIoSession.updateBanner("Blank banner — falling back")
+                                                        bannerLoaded = false
+                                                        onFailed()
+                                                    }
+                                                }, 700L)
                                             }
                                         }
 
@@ -1259,6 +1301,7 @@ private fun StartIoStandardFeedBannerCard(
                                         override fun onImpression(banner: View?) = Unit
                                         override fun onClick(banner: View?) = Unit
                                     })
+                                    setBackgroundColor(android.graphics.Color.TRANSPARENT)
                                     attachBannerWebViewProtector(banner, mainHandler, onRendererGone)
                                     addView(
                                         banner,
@@ -1687,13 +1730,21 @@ private fun StartIoAnchoredStrip(
                             val hostCtx = ctx.findActivity() ?: ctx
                             val banner = Banner(hostCtx, object : BannerListener {
                                 override fun onReceiveAd(banner: View) {
-                                    MomiStartIoSession.updateBanner("Loaded ($statusLabel)")
                                     mainHandler.post {
                                         (banner as? BannerStandard)?.let {
                                             protectBannerStandardWebViews(it, onRendererGone)
                                         }
-                                        isLoaded = true
                                         runCatching { (banner as? Banner)?.showBanner() }
+                                        mainHandler.postDelayed({
+                                            if (hasRenderedAdWebContent(banner)) {
+                                                MomiStartIoSession.updateBanner("Loaded ($statusLabel)")
+                                                isLoaded = true
+                                            } else {
+                                                MomiStartIoSession.updateBanner("Blank banner ($statusLabel)")
+                                                isLoaded = false
+                                                onFailedToFill()
+                                            }
+                                        }, 700L)
                                     }
                                 }
 
@@ -1708,6 +1759,7 @@ private fun StartIoAnchoredStrip(
                                 override fun onImpression(banner: View?) = Unit
                                 override fun onClick(banner: View?) = Unit
                             })
+                            setBackgroundColor(android.graphics.Color.TRANSPARENT)
                             attachBannerWebViewProtector(banner, mainHandler, onRendererGone)
                             addView(
                                 banner,

@@ -128,13 +128,20 @@ object StudioMusicCatalog {
         localAudioPath: String?,
         audioTitle: String,
         audioData: String? = null,
-        cacheKey: String = ""
+        cacheKey: String = "",
+        audioUrl: String? = null
     ): Uri? {
         if (!localAudioPath.isNullOrBlank()) {
             val file = File(localAudioPath)
             if (file.exists() && file.length() > 0L) {
                 return Uri.fromFile(file)
             }
+        }
+        val cleanUrl = audioUrl?.trim().orEmpty()
+        if (cleanUrl.startsWith("https://", ignoreCase = true) ||
+            cleanUrl.startsWith("http://", ignoreCase = true)
+        ) {
+            return Uri.parse(cleanUrl)
         }
         if (!audioData.isNullOrBlank()) {
             decodeAudioBase64ToCacheUri(context, cacheKey.ifBlank { audioData.hashCode().toString() }, audioData)
@@ -143,6 +150,16 @@ object StudioMusicCatalog {
         val preset = findByAudioTitle(audioTitle) ?: return null
         val wavFile = ensurePresetWavFile(context, preset)
         return if (wavFile.exists() && wavFile.length() > 44L) Uri.fromFile(wavFile) else null
+    }
+
+    suspend fun readAudioUploadBytes(
+        localAudioPath: String?,
+        maxBytes: Long = 8_000_000L
+    ): ByteArray? = withContext(Dispatchers.IO) {
+        if (localAudioPath.isNullOrBlank()) return@withContext null
+        val file = File(localAudioPath)
+        if (!file.exists() || file.length() <= 0L || file.length() > maxBytes) return@withContext null
+        runCatching { file.readBytes() }.getOrNull()
     }
 
     fun decodeAudioBase64ToCacheUri(context: Context, key: String, audioData: String?): Uri? {

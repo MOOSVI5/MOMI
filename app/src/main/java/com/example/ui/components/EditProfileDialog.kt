@@ -121,6 +121,7 @@ fun EditProfileDialog(
                         username = username.ifBlank { profile.username },
                         avatarKey = profile.avatarKey,
                         avatarData = if (removeAvatar) null else previewAvatarData,
+                        avatarUrl = if (removeAvatar || pickedAvatarPath != null) null else profile.avatarUrl,
                         size = 64.dp,
                         hasActiveStory = false
                     )
@@ -151,7 +152,7 @@ fun EditProfileDialog(
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("Change photo")
                         }
-                        if (!removeAvatar && previewAvatarData != null) {
+                        if (!removeAvatar && (previewAvatarData != null || !profile.avatarUrl.isNullOrBlank())) {
                             TextButton(
                                 onClick = {
                                     removeAvatar = true

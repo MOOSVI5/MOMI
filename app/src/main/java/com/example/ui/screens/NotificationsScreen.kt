@@ -145,11 +145,12 @@ fun NotificationsScreen(
                                 .padding(horizontal = 16.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            val actorAvatarData = allCreators.firstOrNull { it.userId == notification.actorUid }?.avatarData
+                            val actorProfile = allCreators.firstOrNull { it.userId == notification.actorUid }
                             LumaAvatar(
                                 username = notification.actorUsername,
                                 avatarKey = notification.actorAvatarKey,
-                                avatarData = actorAvatarData,
+                                avatarData = actorProfile?.avatarData,
+                                avatarUrl = actorProfile?.avatarUrl,
                                 size = 44.dp,
                                 hasActiveStory = true
                             )

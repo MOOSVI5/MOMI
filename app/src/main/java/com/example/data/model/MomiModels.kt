@@ -10,7 +10,8 @@ import com.google.firebase.firestore.ServerTimestamp
 data class MediaFrame(
     val imageKey: String = "img_post_coastal",
     val localImagePath: String? = null,
-    val imageData: String? = null
+    val imageData: String? = null,
+    val imageUrl: String? = null
 )
 
 object MomiRoles {
@@ -72,6 +73,7 @@ data class UserProfile(
     val bio: String = "",
     val website: String = "",
     val avatarKey: String = "avatar_aria",
+    val avatarUrl: String? = null,
     val avatarData: String? = null,
     val followersCount: Long = 0L,
     val followingCount: Long = 0L,
@@ -92,16 +94,20 @@ data class Post(
     val authorUsername: String = "",
     val authorDisplayName: String = "",
     val authorAvatarKey: String = "avatar_aria",
+    val authorAvatarUrl: String? = null,
     @get:Exclude val authorAvatarData: String? = null,
     val authorVerified: Boolean = false,
     val location: String = "",
     val imageKey: String = "img_post_coastal",
     val localImagePath: String? = null,
+    val imageUrl: String? = null,
     val imageData: String? = null,
     val localExtraImagePaths: List<String> = emptyList(),
+    val extraImageUrls: List<String> = emptyList(),
     val extraImageDatas: List<String> = emptyList(),
     val mediaType: String = "IMAGE",
     val localVideoPath: String? = null,
+    val videoUrl: String? = null,
     val videoData: String? = null,
     val videoChunksCount: Long = 0L,
     val videoDurationMs: Long = 0L,
@@ -120,6 +126,7 @@ data class Post(
     @get:PropertyName("isReel") val isReel: Boolean = false,
     val audioTitle: String = "",
     val localAudioPath: String? = null,
+    val audioUrl: String? = null,
     val audioData: String? = null,
     @get:PropertyName("isBoosted") val isBoosted: Boolean = false,
     val boostTier: String = "",
@@ -130,7 +137,7 @@ data class Post(
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     val isVideoPost: Boolean
-        get() = mediaType == "VIDEO" || !localVideoPath.isNullOrBlank() || !videoData.isNullOrBlank() || videoChunksCount > 0L
+        get() = mediaType == "VIDEO" || !localVideoPath.isNullOrBlank() || !videoUrl.isNullOrBlank() || !videoData.isNullOrBlank() || videoChunksCount > 0L
 
     @get:Exclude
     val numericAspectRatio: Float
@@ -174,19 +181,22 @@ data class Post(
                 MediaFrame(
                     imageKey = imageKey,
                     localImagePath = localImagePath,
-                    imageData = imageData
+                    imageData = imageData,
+                    imageUrl = imageUrl
                 )
             )
-            val extraCount = maxOf(localExtraImagePaths.size, extraImageDatas.size)
+            val extraCount = maxOf(localExtraImagePaths.size, extraImageDatas.size, extraImageUrls.size)
             for (i in 0 until extraCount) {
                 val path = localExtraImagePaths.getOrNull(i)
                 val data = extraImageDatas.getOrNull(i)
-                if (!path.isNullOrBlank() || !data.isNullOrBlank()) {
+                val url = extraImageUrls.getOrNull(i)
+                if (!path.isNullOrBlank() || !data.isNullOrBlank() || !url.isNullOrBlank()) {
                     frames.add(
                         MediaFrame(
                             imageKey = imageKey,
                             localImagePath = path,
-                            imageData = data
+                            imageData = data,
+                            imageUrl = url
                         )
                     )
                 }
@@ -201,6 +211,7 @@ data class Comment(
     val userId: String = "",
     val authorUsername: String = "",
     val authorAvatarKey: String = "avatar_aria",
+    val authorAvatarUrl: String? = null,
     @get:Exclude val authorAvatarData: String? = null,
     val text: String = "",
     val likesCount: Long = 0L,
@@ -215,17 +226,21 @@ data class Story(
     val userId: String = "",
     val username: String = "",
     val avatarKey: String = "avatar_aria",
+    val avatarUrl: String? = null,
     @get:Exclude val avatarData: String? = null,
     val imageKey: String = "img_post_coastal",
     val localImagePath: String? = null,
+    val imageUrl: String? = null,
     val imageData: String? = null,
     val mediaType: String = "IMAGE",
     val localVideoPath: String? = null,
+    val videoUrl: String? = null,
     val videoData: String? = null,
     val videoChunksCount: Long = 0L,
     val videoDurationMs: Long = 0L,
     val audioTitle: String = "",
     val localAudioPath: String? = null,
+    val audioUrl: String? = null,
     val audioData: String? = null,
     val caption: String = "",
     @get:PropertyName("isSeen") val isSeen: Boolean = false,
@@ -234,7 +249,7 @@ data class Story(
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     val isVideoStory: Boolean
-        get() = mediaType == "VIDEO" || !localVideoPath.isNullOrBlank() || !videoData.isNullOrBlank() || videoChunksCount > 0L
+        get() = mediaType == "VIDEO" || !localVideoPath.isNullOrBlank() || !videoUrl.isNullOrBlank() || !videoData.isNullOrBlank() || videoChunksCount > 0L
 }
 
 @IgnoreExtraProperties
@@ -318,6 +333,7 @@ data class ChatMessage(
     val senderUsername: String = "",
     val text: String = "",
     val messageType: String = "TEXT",
+    val mediaUrl: String? = null,
     val imageData: String? = null,
     val videoData: String? = null,
     val videoDurationMs: Long = 0L,
@@ -333,6 +349,7 @@ data class LiveStream(
     val username: String = "",
     val displayName: String = "",
     val avatarKey: String = "avatar_aria",
+    val avatarUrl: String? = null,
     @get:Exclude val avatarData: String? = null,
     @get:PropertyName("authorVerified") val authorVerified: Boolean = false,
     val title: String = "",
@@ -640,6 +657,7 @@ data class MerchantAccount(
     val category: String = "Collectibles",
     val location: String = "",
     val avatarKey: String = "avatar_aria",
+    val avatarUrl: String? = null,
     val avatarData: String? = null,
     @get:PropertyName("isVerified") val isVerified: Boolean = false,
     val verifiedByEmail: String? = null,
@@ -663,8 +681,11 @@ data class MarketProduct(
     val discountPercent: Long = 0L,
     @get:PropertyName("freeShipping") val freeShipping: Boolean = true,
     val imageKey: String = "img_post_coastal",
+    val imageUrl: String? = null,
     val imageData: String? = null,
+    val extraImageUrls: List<String> = emptyList(),
     val extraImageDatas: List<String> = emptyList(),
+    val videoUrl: String? = null,
     val videoData: String? = null,
     val videoChunksCount: Long = 0L,
     val videoDurationMs: Long = 0L,
@@ -674,15 +695,18 @@ data class MarketProduct(
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     val isVideoProduct: Boolean
-        get() = !videoData.isNullOrBlank() || videoChunksCount > 0L
+        get() = !videoUrl.isNullOrBlank() || !videoData.isNullOrBlank() || videoChunksCount > 0L
 
     @get:Exclude
     val allProductFrames: List<MediaFrame>
         get() {
-            val frames = mutableListOf(MediaFrame(imageKey = imageKey, imageData = imageData))
-            extraImageDatas.forEach { data ->
-                if (data.isNotBlank()) {
-                    frames.add(MediaFrame(imageKey = imageKey, imageData = data))
+            val frames = mutableListOf(MediaFrame(imageKey = imageKey, imageData = imageData, imageUrl = imageUrl))
+            val extraCount = maxOf(extraImageDatas.size, extraImageUrls.size)
+            for (i in 0 until extraCount) {
+                val data = extraImageDatas.getOrNull(i)
+                val url = extraImageUrls.getOrNull(i)
+                if (!data.isNullOrBlank() || !url.isNullOrBlank()) {
+                    frames.add(MediaFrame(imageKey = imageKey, imageData = data, imageUrl = url))
                 }
             }
             return frames
@@ -699,6 +723,7 @@ data class MarketOrder(
     val productId: String = "",
     val productTitle: String = "",
     val productImageKey: String = "img_post_coastal",
+    val productImageUrl: String? = null,
     val productImageData: String? = null,
     val priceUsd: Double = 0.0,
     val shippingAddress: String = "",

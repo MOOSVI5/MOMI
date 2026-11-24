@@ -333,6 +333,7 @@ fun TeamRolesManagementSheet(
                                     username = member.username,
                                     avatarKey = member.avatarKey,
                                     avatarData = member.avatarData,
+                                    avatarUrl = member.avatarUrl,
                                     size = 42.dp
                                 )
                                 Spacer(modifier = Modifier.width(10.dp))
