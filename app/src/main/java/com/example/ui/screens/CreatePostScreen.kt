@@ -568,21 +568,54 @@ fun CreatePostScreen(
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize()
                     )
-                    if (videoDurationMs > 300_000L) {
+                    if (videoDurationMs > 30_000L) {
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopCenter)
-                                .padding(10.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color.Black.copy(alpha = 0.72f))
-                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                                .padding(12.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color.Black.copy(alpha = 0.85f))
+                                .padding(horizontal = 14.dp, vertical = 10.dp)
                         ) {
-                            Text(
-                                text = "Long video (${MediaAssets.formatDuration(videoDurationMs)}) — Cover thumbnail applied automatically",
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Crop,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = "Long video (${MediaAssets.formatDuration(videoDurationMs)}) detected",
+                                        color = Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                Text(
+                                    text = "Auto-trim to the first 30 seconds for optimal story performance",
+                                    color = Color.White.copy(alpha = 0.85f),
+                                    fontSize = 11.sp
+                                )
+                                Button(
+                                    onClick = {
+                                        videoDurationMs = 30_000L
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = MaterialTheme.colorScheme.primary
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp).testTag("auto_trim_button")
+                                ) {
+                                    Text("Auto-Trim to 30s", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
                         }
                     }
                 } else if (!isStoryMode && allSelectedPhotoPaths.size > 1) {
