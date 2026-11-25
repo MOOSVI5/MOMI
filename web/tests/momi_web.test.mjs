@@ -45,6 +45,8 @@ import {
   SUPABASE_SCHEMA_TABLES,
   buildSupabaseAuthHeaders,
   buildSupabaseGoogleOAuthUrl,
+  buildSupabaseRealtimeJoinMessage,
+  buildSupabaseRealtimeWsUrl,
   checkSupabaseHealth,
   isSafeSupabaseAnonKey,
   isSupabaseClientReady,
@@ -60,6 +62,7 @@ import {
   mapSupabaseStoryToWeb,
   normalizeSupabaseUrl,
   parseSupabaseOAuthCallback,
+  parseSupabaseRealtimeMessage,
   syncBundleToSupabase
 } from '../supabase-client.js';
 
@@ -185,12 +188,16 @@ test('starter showcase personas and Firestore Web sync resilience are configured
   }
 
   const appJs = fs.readFileSync(path.join(REPO_ROOT, 'web', 'app.js'), 'utf8');
-  assert.ok(appJs.includes('experimentalAutoDetectLongPolling: true'));
+  assert.equal(appJs.includes('firebase-app.js'), false);
+  assert.equal(appJs.includes('firebase-firestore.js'), false);
+  assert.equal(appJs.includes('firebase-auth.js'), false);
+  assert.equal(appJs.includes('initializeFirestore'), false);
+  assert.equal(appJs.includes('mirrorFirestoreBestEffort'), false);
+  assert.ok(appJs.includes('createSupabaseRealtimeClient'));
   assert.ok(appJs.includes('handleSyncError'));
   assert.ok(appJs.includes('removeAllShowcaseContent'));
   assert.ok(appJs.includes('publishShowcaseBurst'));
   assert.ok(appJs.includes('syncMonetagWebIntegration'));
-  assert.equal(appJs.includes('firebase-auth.js'), false);
   assert.ok(appJs.includes('supabaseSignInWithPassword'));
   assert.ok(appJs.includes('supabaseSignUpWithEmail'));
   assert.ok(appJs.includes('buildSupabaseGoogleOAuthUrl'));
@@ -198,7 +205,7 @@ test('starter showcase personas and Firestore Web sync resilience are configured
   assert.ok(appJs.includes('saveSupabaseAuthSession'));
 
   const swJs = fs.readFileSync(path.join(REPO_ROOT, 'web', 'sw.js'), 'utf8');
-  assert.ok(swJs.includes('momi-web-v7'));
+  assert.ok(swJs.includes('momi-web-v8'));
 });
 
 test('monetization config defaults, URL sanitization, boost sorting, and web perks align with Firestore rules', () => {
@@ -421,5 +428,58 @@ test('Owner admin email helper, Pages & Groups, Showcase Starters, Announcements
   for (const rel of webFiles) {
     const content = fs.readFileSync(path.join(REPO_ROOT, 'web', rel), 'utf8');
     assert.equal(/\b(instagram|facebook|rednote|tiktok)\b/i.test(content), false, `Competitor mention found in web/${rel}`);
+  }
+});
+
+test('Supabase Realtime CDC WebSocket helpers and SQL publication cover all 24 public tables', () => {
+  const wsUrl = buildSupabaseRealtimeWsUrl({
+    url: 'https://qotuvugkapaspowhbsbf.supabase.co',
+    anonKey: 'sb_publishable_LbrQBbU_4qH18qjopmNwIg_ALsMhlln'
+  });
+  assert.equal(
+    wsUrl,
+    'wss://qotuvugkapaspowhbsbf.supabase.co/realtime/v1/websocket?apikey=sb_publishable_LbrQBbU_4qH18qjopmNwIg_ALsMhlln&vsn=1.0.0'
+  );
+
+  const joinMsg = buildSupabaseRealtimeJoinMessage('7', 'user_jwt_123');
+  assert.equal(joinMsg.topic, 'realtime:public');
+  assert.equal(joinMsg.event, 'phx_join');
+  assert.equal(joinMsg.ref, '7');
+  assert.equal(joinMsg.payload.access_token, 'user_jwt_123');
+  assert.deepEqual(joinMsg.payload.config.postgres_changes, [{ event: '*', schema: 'public' }]);
+
+  const parsedChange = parseSupabaseRealtimeMessage(JSON.stringify({
+    topic: 'realtime:public',
+    event: 'postgres_changes',
+    payload: {
+      data: {
+        schema: 'public',
+        table: 'posts',
+        type: 'INSERT',
+        record: { id: 'post_99' }
+      }
+    }
+  }));
+  assert.equal(parsedChange.kind, 'postgres_changes');
+  assert.equal(parsedChange.table, 'posts');
+  assert.equal(parsedChange.eventType, 'INSERT');
+  assert.equal(parsedChange.record.id, 'post_99');
+
+  const parsedReply = parseSupabaseRealtimeMessage(JSON.stringify({
+    topic: 'realtime:public',
+    event: 'phx_reply',
+    payload: { status: 'ok' },
+    ref: '7'
+  }));
+  assert.equal(parsedReply.kind, 'phx_reply');
+  assert.equal(parsedReply.status, 'ok');
+
+  for (const sqlRel of ['supabase/enable_sync.sql', 'supabase/schema.sql']) {
+    const sqlText = fs.readFileSync(path.join(REPO_ROOT, sqlRel), 'utf8');
+    assert.ok(sqlText.includes('supabase_realtime'), `Missing supabase_realtime publication in ${sqlRel}`);
+    assert.ok(sqlText.includes('REPLICA IDENTITY FULL'), `Missing REPLICA IDENTITY FULL in ${sqlRel}`);
+    for (const tbl of SUPABASE_SCHEMA_TABLES) {
+      assert.ok(sqlText.includes(`'${tbl}'`), `Missing Realtime table entry '${tbl}' in ${sqlRel}`);
+    }
   }
 });

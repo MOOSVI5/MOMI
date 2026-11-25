@@ -34,16 +34,16 @@ import com.example.data.model.NotificationItem
 import com.example.data.model.Post
 import com.example.data.model.PostBoostOption
 import com.example.data.model.ShowcaseAccount
+import com.example.data.model.ShowcaseCatalog
 import com.example.data.model.Story
 import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
 import com.example.data.model.sortFeedWithBoostPriority
-import com.example.data.repository.MarketplaceRepository
-import com.example.data.repository.MomiFirestoreRepository
-import com.example.data.repository.WalletRepository
 import com.example.data.supabase.MomiSupabaseClient
 import com.example.data.supabase.MomiSupabaseSchema
 import com.example.data.supabase.SupabasePrimaryBackend
+import com.example.data.supabase.SupabaseRealtimeClient
+import com.example.data.supabase.SupabaseRealtimeConnectionState
 import com.example.ui.components.AiAssistantTurn
 import com.example.ui.components.AiAssistantUiState
 import com.example.ui.theme.AppColorScheme
@@ -53,15 +53,12 @@ import com.example.util.AppUpdateChecker
 import com.example.util.AvailableAppUpdate
 import com.example.util.MediaAssets
 import com.example.util.StudioMusicCatalog
-import com.google.firebase.Firebase
 import com.google.firebase.Timestamp
-import com.google.firebase.auth.auth
-import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.async
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -72,12 +69,9 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
@@ -91,9 +85,6 @@ sealed interface StreamUiState<out T> {
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MomiViewModel(
-    private val repository: MomiFirestoreRepository,
-    private val marketplaceRepository: MarketplaceRepository,
-    private val walletRepository: WalletRepository,
     val currentUserId: String,
     private val initialDisplayName: String?,
     private val initialEmail: String?,
@@ -171,6 +162,7 @@ class MomiViewModel(
 
     private val supabaseClient = MomiSupabaseClient()
     private val supabaseBackend = SupabasePrimaryBackend(supabaseClient)
+    private val realtimeClient = SupabaseRealtimeClient()
 
     private val supaHasLoadedFeed = MutableStateFlow(false)
     private val supaFollows = MutableStateFlow<List<FollowEdge>>(emptyList())
@@ -205,7 +197,7 @@ class MomiViewModel(
 
     private val _supabaseStatus = MutableStateFlow<String?>(
         if (supabaseClient.isConfigured()) {
-            "Supabase Cloud Sync active — Postgres & Storage primary."
+            "Connecting Supabase Realtime WebSocket..."
         } else {
             "Waiting for SUPABASE_URL & SUPABASE_ANON_KEY in AI Studio Secrets."
         }
@@ -218,14 +210,15 @@ class MomiViewModel(
     val isSupabaseConfigured: Boolean
         get() = supabaseClient.isConfigured()
 
-    @Volatile private var hasNotifiedQuotaError = false
-    @Volatile private var quotaCooldownUntilMs = 0L
     @Volatile private var hasAutoCheckedUpdatesInSession = false
     @Volatile private var hasProbedAiStatusInSession = false
     @Volatile private var knownPlayStoreInstall = false
     @Volatile private var cachedAppContext: Context? = null
+    @Volatile private var activeChatThreadId: String? = null
+    @Volatile private var activeLiveRoomId: String? = null
+    private var realtimeRefreshJob: Job? = null
 
-    // Optimistic UI overlays + 12s pending mutation protection so background polls NEVER revert recent edits
+    // Optimistic UI overlays + 12s pending mutation protection so background sync NEVER reverts recent edits
     private val optimisticPostLikes = MutableStateFlow<Map<String, Boolean>>(emptyMap())
     private val optimisticBookmarks = MutableStateFlow<Map<String, Boolean>>(emptyMap())
     private val optimisticFollows = MutableStateFlow<Map<String, Pair<Boolean, String>>>(emptyMap())
@@ -239,110 +232,120 @@ class MomiViewModel(
     private val pendingCreatedPosts = ConcurrentHashMap<String, Pair<Post, Long>>()
     private val pendingDeletedPostIds = ConcurrentHashMap<String, Long>()
     @Volatile private var pendingProfileOverride: Pair<UserProfile, Long>? = null
-    private val videoDownloadMutex = Mutex()
-    private val inFlightVideoDownloads = mutableMapOf<String, Deferred<Uri?>>()
     private val recordedPostViewIds = mutableSetOf<String>()
 
     init {
         viewModelScope.launch {
             if (supabaseClient.isConfigured()) {
-                // Supabase is primary; seed/sync silently without surfacing Spark quota banners
                 refreshFromSupabase(forceEnsureProfile = true)
+                realtimeClient.connect(viewModelScope) { MomiSupabaseClient.activeSession?.accessToken }
+
+                launch {
+                    realtimeClient.connectionState.collect { rtStatus ->
+                        _supabaseStatus.value = when (rtStatus.state) {
+                            SupabaseRealtimeConnectionState.CONNECTED ->
+                                "Supabase Realtime Live (WebSocket) • Postgres & Storage primary."
+                            SupabaseRealtimeConnectionState.CONNECTING ->
+                                "Connecting Supabase Realtime WebSocket..."
+                            SupabaseRealtimeConnectionState.RECONNECTING ->
+                                rtStatus.detail
+                            SupabaseRealtimeConnectionState.DISCONNECTED ->
+                                "Supabase Cloud Sync active — Postgres & Storage primary."
+                        }
+                    }
+                }
+
+                launch {
+                    realtimeClient.events.collect { event ->
+                        handleRealtimeEvent(event.table)
+                    }
+                }
+
                 launch {
                     while (true) {
-                        kotlinx.coroutines.delay(4_000L)
+                        val intervalMs = if (
+                            realtimeClient.connectionState.value.state == SupabaseRealtimeConnectionState.CONNECTED
+                        ) {
+                            15_000L
+                        } else {
+                            5_000L
+                        }
+                        delay(intervalMs)
                         refreshFromSupabase(forceEnsureProfile = false)
                     }
                 }
             }
-            if (com.google.firebase.Firebase.auth.currentUser != null) {
-                repository.ensureUserSeeded(
-                    displayNameHint = initialDisplayName,
-                    emailHint = initialEmail
-                ).onFailure { error ->
-                    if (!supabaseClient.isConfigured()) {
-                        if (isQuotaExceeded(error)) {
-                            quotaCooldownUntilMs = System.currentTimeMillis() + QUOTA_RETRY_COOLDOWN_MS
-                            if (!hasNotifiedQuotaError) {
-                                hasNotifiedQuotaError = true
-                                _statusNotice.value = QUOTA_FRIENDLY_MESSAGE
-                            }
-                        } else {
-                            _errorMessage.value = unwrapErrorMessage(error, "Failed to initialize Momi profile")
+        }
+    }
+
+    private fun handleRealtimeEvent(table: String) {
+        when (table) {
+            "comments" -> {
+                val postId = _activeCommentPostId.value
+                if (!postId.isNullOrBlank()) {
+                    viewModelScope.launch {
+                        supabaseClient.fetchComments(postId).onSuccess { remote ->
+                            supaCommentsByPost.update { it + (postId to remote) }
                         }
+                    }
+                }
+            }
+            "chat_messages" -> {
+                val threadId = activeChatThreadId
+                if (!threadId.isNullOrBlank()) {
+                    viewModelScope.launch {
+                        supabaseClient.fetchChatMessages(threadId).onSuccess { list ->
+                            supaChatMessagesByThread.update { it + (threadId to list) }
+                        }
+                    }
+                }
+            }
+            "live_frames", "live_comments", "live_streams" -> {
+                val streamId = activeLiveRoomId
+                if (!streamId.isNullOrBlank()) {
+                    viewModelScope.launch {
+                        refreshLiveRoomSnapshot(streamId)
+                    }
+                }
+            }
+        }
+        if (table != "live_frames") {
+            triggerDebouncedSupabaseRefresh()
+        }
+    }
+
+    private fun triggerDebouncedSupabaseRefresh() {
+        realtimeRefreshJob?.cancel()
+        realtimeRefreshJob = viewModelScope.launch {
+            delay(250L)
+            refreshFromSupabase(forceEnsureProfile = false)
+        }
+    }
+
+    private suspend fun refreshLiveRoomSnapshot(streamId: String) {
+        supabaseClient.fetchLiveRoomState(streamId).onSuccess { state ->
+            state.second?.let { f -> supaLiveFrameByStream.update { it + (streamId to f) } }
+            supaLiveCommentsByStream.update { it + (streamId to state.third) }
+            state.first?.let { s ->
+                supaLiveStreams.update { current ->
+                    if (current.any { it.id == s.id }) {
+                        current.map { if (it.id == s.id) s else it }
                     } else {
-                        Log.w(TAG, "Background Firestore profile seed skipped", error)
+                        current + s
                     }
-                }
-                walletRepository.ensureWalletInitialized().onFailure { error ->
-                    Log.w(TAG, "Wallet initialization deferred", error)
                 }
             }
         }
-        viewModelScope.launch {
-            if (com.google.firebase.Firebase.auth.currentUser == null) return@launch
-            walletRepository.observeUnclaimedGifts(currentUserId)
-                .catch { error ->
-                    val root = unwrapOrRethrowCancellation(error)
-                    if (isQuotaExceeded(root)) {
-                        quotaCooldownUntilMs = System.currentTimeMillis() + QUOTA_RETRY_COOLDOWN_MS
-                    }
-                    Log.w(TAG, "Error observing unclaimed gifts", root)
-                }
-                .collect { pendingGifts ->
-                    pendingGifts.forEach { giftTx ->
-                        walletRepository.claimGift(giftTx).onSuccess { claimedCredits ->
-                            if (claimedCredits > 0L) {
-                                _statusNotice.value =
-                                    "Received +$claimedCredits credits from @${giftTx.senderUsername}!"
-                            }
-                        }.onFailure { err ->
-                            Log.w(TAG, "Failed claiming gift ${giftTx.txId}", err)
-                        }
-                    }
-                }
-        }
     }
 
-    private fun <T> Flow<T>.resilientWithCache(
-        cache: MutableStateFlow<T>,
-        label: String,
-        surfaceQuotaError: Boolean = false
-    ): Flow<T> = this
-        .onEach { value -> cache.value = value }
-        .catch { error ->
-            val root = unwrapOrRethrowCancellation(error)
-            Log.w(TAG, "Error observing $label", root)
-            if (isQuotaExceeded(root)) {
-                quotaCooldownUntilMs = System.currentTimeMillis() + QUOTA_RETRY_COOLDOWN_MS
-                viewModelScope.launch { refreshFromSupabase(forceEnsureProfile = false) }
-                if (surfaceQuotaError && !hasNotifiedQuotaError && !supabaseClient.isConfigured()) {
-                    hasNotifiedQuotaError = true
-                    _statusNotice.value = QUOTA_FRIENDLY_MESSAGE
-                }
-            }
-            emit(cache.value)
-        }
-
-    private fun <T> Flow<T>.preferSupabase(
-        supaFlow: StateFlow<T>,
-        isReady: StateFlow<Boolean> = supaHasLoadedFeed,
-        hasData: (T) -> Boolean = { true }
-    ): Flow<T> = combine(this, supaFlow, isReady) { firestoreVal, supaVal, loaded ->
-        if (supabaseClient.isConfigured() && (loaded || hasData(supaVal))) {
-            supaVal
-        } else {
-            firestoreVal
-        }
+    override fun onCleared() {
+        super.onCleared()
+        realtimeRefreshJob?.cancel()
+        realtimeClient.disconnect()
     }
-
-    private val rawFollows: StateFlow<List<FollowEdge>> = repository.observeFollows(currentUserId)
-        .resilientWithCache(cachedFollows, "follows")
-        .preferSupabase(supaFollows) { it.isNotEmpty() }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val follows: StateFlow<List<FollowEdge>> = combine(
-        rawFollows,
+        supaFollows,
         optimisticFollows
     ) { remoteFollows, overrides ->
         if (overrides.isEmpty()) {
@@ -378,9 +381,7 @@ class MomiViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
 
     val allProfiles: StateFlow<List<UserProfile>> = combine(
-        repository.observeAllProfiles(currentUserId)
-            .resilientWithCache(cachedProfiles, "creators")
-            .preferSupabase(supaProfiles) { it.isNotEmpty() },
+        supaProfiles,
         follows
     ) { profiles, allFollows ->
         profiles.map { p ->
@@ -393,18 +394,17 @@ class MomiViewModel(
         .catch { error ->
             val root = unwrapOrRethrowCancellation(error)
             Log.w(TAG, "Error combining creators", root)
-            emit(if (supabaseClient.isConfigured() && supaProfiles.value.isNotEmpty()) supaProfiles.value else cachedProfiles.value)
+            emit(cachedProfiles.value)
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val profileState: StateFlow<StreamUiState<UserProfile?>> = combine(
-        repository.observeProfile(currentUserId)
-            .resilientWithCache(cachedProfile, "profile"),
         supaProfiles,
         follows
-    ) { rawProfile, sProfiles, allFollows ->
-        val supaSelf = if (supabaseClient.isConfigured()) sProfiles.firstOrNull { it.userId == currentUserId } else null
-        val resolved = supaSelf ?: rawProfile ?: cachedProfile.value ?: fallbackProfileBase()
+    ) { sProfiles, allFollows ->
+        val resolved = sProfiles.firstOrNull { it.userId == currentUserId }
+            ?: cachedProfile.value
+            ?: fallbackProfileBase()
         val hydrated = resolved.copy(
             followersCount = allFollows.count { it.targetUid == currentUserId }.toLong(),
             followingCount = allFollows.count { it.followerUid == currentUserId }.toLong()
@@ -480,13 +480,7 @@ class MomiViewModel(
 
     val contentReports: StateFlow<List<ContentReport>> = canAccessModerationQueue
         .flatMapLatest { canView ->
-            if (!canView) {
-                flowOf(emptyList())
-            } else {
-                repository.observeContentReports(currentUserId)
-                    .resilientWithCache(cachedContentReports, "contentReports")
-                    .preferSupabase(supaContentReports) { it.isNotEmpty() }
-            }
+            if (!canView) flowOf(emptyList()) else supaContentReports
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
@@ -500,30 +494,13 @@ class MomiViewModel(
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), 0)
 
-    private val likedPostIds: StateFlow<Set<String>> = repository.observeLikedPostIds(currentUserId)
-        .resilientWithCache(cachedLikedPostIds, "likedPosts")
-        .preferSupabase(supaLikedPostIds) { it.isNotEmpty() }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
-
-    private val bookmarkedPostIds: StateFlow<Set<String>> = repository.observeBookmarkedPostIds(currentUserId)
-        .resilientWithCache(cachedBookmarkedPostIds, "bookmarks")
-        .preferSupabase(supaBookmarkedPostIds) { it.isNotEmpty() }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
-
-    private val seenStoryIds: StateFlow<Set<String>> = repository.observeSeenStoryIds(currentUserId)
-        .resilientWithCache(cachedSeenStoryIds, "seenStories")
-        .preferSupabase(supaSeenStoryIds) { it.isNotEmpty() }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
-
-    private val likedCommentIds: StateFlow<Set<String>> = repository.observeLikedCommentIds(currentUserId)
-        .resilientWithCache(cachedLikedCommentIds, "likedComments")
-        .preferSupabase(supaLikedCommentIds) { it.isNotEmpty() }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
+    private val likedPostIds: StateFlow<Set<String>> = supaLikedPostIds
+    private val bookmarkedPostIds: StateFlow<Set<String>> = supaBookmarkedPostIds
+    private val seenStoryIds: StateFlow<Set<String>> = supaSeenStoryIds
+    private val likedCommentIds: StateFlow<Set<String>> = supaLikedCommentIds
 
     private val postBaseStreams = combine(
-        repository.observeAllPosts(currentUserId)
-            .resilientWithCache(cachedRawPosts, "posts", surfaceQuotaError = true)
-            .preferSupabase(supaPosts) { it.isNotEmpty() },
+        supaPosts,
         allProfiles,
         likedPostIds,
         bookmarkedPostIds,
@@ -542,8 +519,12 @@ class MomiViewModel(
 
     val allPostsState: StateFlow<StreamUiState<List<Post>>> = combine(
         postBaseStreams,
-        optimisticPostInputs
-    ) { base, (likeOverrides, bookmarkOverrides, pendingComments) ->
+        optimisticPostInputs,
+        supaHasLoadedFeed
+    ) { base, (likeOverrides, bookmarkOverrides, pendingComments), hasLoaded ->
+        if (!hasLoaded && base.posts.isEmpty()) {
+            return@combine StreamUiState.Loading
+        }
         val profilesByUid = base.profiles.associateBy { it.userId }
         val enriched = base.posts.map { post ->
             val authorProfile = profilesByUid[post.userId]
@@ -577,22 +558,11 @@ class MomiViewModel(
         .catch { error ->
             val root = unwrapOrRethrowCancellation(error)
             Log.w(TAG, "Error observing posts", root)
-            val fallbackMsg = unwrapErrorMessage(root, "Failed to observe posts")
-            if (isQuotaExceeded(root)) {
-                quotaCooldownUntilMs = System.currentTimeMillis() + QUOTA_RETRY_COOLDOWN_MS
-                viewModelScope.launch { refreshFromSupabase(forceEnsureProfile = false) }
-                if (!hasNotifiedQuotaError && !supabaseClient.isConfigured()) {
-                    hasNotifiedQuotaError = true
-                    _statusNotice.value = QUOTA_FRIENDLY_MESSAGE
-                }
-            } else if (!supabaseClient.isConfigured()) {
-                _errorMessage.value = fallbackMsg
-            }
             val cached = lastKnownEnrichedPosts.value
             if (cached.isNotEmpty()) {
                 emit(StreamUiState.Success(cached))
             } else {
-                emit(StreamUiState.Error(fallbackMsg))
+                emit(StreamUiState.Error(unwrapErrorMessage(root, "Failed to sync Supabase feed")))
             }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), StreamUiState.Loading)
@@ -611,9 +581,7 @@ class MomiViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val stories: StateFlow<List<Story>> = combine(
-        repository.observeStories(currentUserId)
-            .resilientWithCache(cachedStories, "stories")
-            .preferSupabase(supaStories) { it.isNotEmpty() },
+        supaStories,
         allProfiles,
         seenStoryIds
     ) { rawStories, profiles, seen ->
@@ -651,9 +619,7 @@ class MomiViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), 0)
 
     val activeLiveStreams: StateFlow<List<LiveStream>> = combine(
-        repository.observeActiveLiveStreams(currentUserId)
-            .resilientWithCache(cachedLiveStreams, "liveStreams")
-            .preferSupabase(supaLiveStreams) { it.isNotEmpty() },
+        supaLiveStreams,
         allProfiles
     ) { streams, profiles ->
         val profilesByUid = profiles.associateBy { it.userId }
@@ -674,9 +640,7 @@ class MomiViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val notifications: StateFlow<List<NotificationItem>> = combine(
-        repository.observeNotifications(currentUserId)
-            .resilientWithCache(cachedNotifications, "notifications")
-            .preferSupabase(supaNotifications) { it.isNotEmpty() },
+        supaNotifications,
         followingUids,
         supaMonetizationConfig,
         cachedMonetizationConfig
@@ -688,7 +652,7 @@ class MomiViewModel(
                 item
             }
         }
-        val cfg = if (supabaseClient.isConfigured() && supaCfg != null) supaCfg else cachedCfg
+        val cfg = supaCfg ?: cachedCfg
         val annTitle = cfg.announcementTitle.trim()
         val annBody = cfg.announcementBody.trim()
         val annId = cfg.announcementId.ifBlank { "ann_${annTitle.hashCode()}" }
@@ -744,7 +708,7 @@ class MomiViewModel(
     val showcaseAccounts: StateFlow<List<ShowcaseAccount>> = supaShowcaseAccounts
         .map { remote ->
             val remoteByUsername = remote.associateBy { it.username.lowercase() }
-            MomiFirestoreRepository.SHOWCASE_PERSONAS.map { persona ->
+            ShowcaseCatalog.PERSONAS.map { persona ->
                 val saved = remoteByUsername[persona.username.lowercase()]
                 ShowcaseAccount(
                     username = persona.username,
@@ -761,7 +725,7 @@ class MomiViewModel(
         .stateIn(
             viewModelScope,
             SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
-            MomiFirestoreRepository.SHOWCASE_PERSONAS.map {
+            ShowcaseCatalog.PERSONAS.map {
                 ShowcaseAccount(
                     username = it.username,
                     displayName = it.displayName,
@@ -774,10 +738,7 @@ class MomiViewModel(
             }
         )
 
-    val messageThreads: StateFlow<List<MessageThread>> = repository.observeMessageThreads(currentUserId)
-        .resilientWithCache(cachedThreads, "messageThreads")
-        .preferSupabase(supaThreads) { it.isNotEmpty() }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
+    val messageThreads: StateFlow<List<MessageThread>> = supaThreads
 
     val unreadMessageCount: StateFlow<Int> = messageThreads
         .map { list ->
@@ -785,15 +746,10 @@ class MomiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), 0)
 
-    val merchants: StateFlow<List<MerchantAccount>> = marketplaceRepository.observeMerchants(currentUserId)
-        .resilientWithCache(cachedMerchants, "merchants")
-        .preferSupabase(supaMerchants) { it.isNotEmpty() }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
+    val merchants: StateFlow<List<MerchantAccount>> = supaMerchants
 
     val marketProducts: StateFlow<List<MarketProduct>> = combine(
-        marketplaceRepository.observeProducts(currentUserId)
-            .resilientWithCache(cachedProducts, "marketProducts")
-            .preferSupabase(supaProducts) { it.isNotEmpty() },
+        supaProducts,
         merchants
     ) { products, merchantList ->
         val merchantByUid = merchantList.associateBy { it.userId }
@@ -809,32 +765,14 @@ class MomiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
-    val marketOrders: StateFlow<List<MarketOrder>> = marketplaceRepository.observeOrdersForUser(currentUserId)
-        .resilientWithCache(cachedOrders, "marketOrders")
-        .preferSupabase(supaOrders) { it.isNotEmpty() }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
+    val marketOrders: StateFlow<List<MarketOrder>> = supaOrders
 
-    val wallet: StateFlow<UserWallet?> = combine(
-        walletRepository.observeWallet(currentUserId)
-            .resilientWithCache(cachedWallet, "wallet"),
-        supaWallet
-    ) { fsWallet, sWallet ->
-        if (supabaseClient.isConfigured() && sWallet != null) sWallet else fsWallet
-    }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), null)
+    val wallet: StateFlow<UserWallet?> = supaWallet
 
-    val creditTransactions: StateFlow<List<CreditTransaction>> = walletRepository.observeTransactions(currentUserId)
-        .resilientWithCache(cachedCreditTransactions, "creditTransactions")
-        .preferSupabase(supaCreditTransactions) { it.isNotEmpty() }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
+    val creditTransactions: StateFlow<List<CreditTransaction>> = supaCreditTransactions
 
-    val monetizationConfig: StateFlow<AdMonetizationConfig> = combine(
-        repository.observeAdMonetizationConfig(currentUserId)
-            .resilientWithCache(cachedMonetizationConfig, "monetizationConfig"),
-        supaMonetizationConfig
-    ) { fsCfg, sCfg ->
-        if (supabaseClient.isConfigured() && sCfg != null) sCfg else fsCfg
-    }
+    val monetizationConfig: StateFlow<AdMonetizationConfig> = supaMonetizationConfig
+        .map { it ?: cachedMonetizationConfig.value }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), AdMonetizationConfig())
 
     private val _themePreference = MutableStateFlow(ThemePreference.SYSTEM)
@@ -895,7 +833,12 @@ class MomiViewModel(
                 supaCommentsByPost.update { it + (postId to remote) }
             }
             emit(supaCommentsByPost.value[postId].orEmpty())
-            kotlinx.coroutines.delay(1_800L)
+            val waitMs = if (realtimeClient.connectionState.value.state == SupabaseRealtimeConnectionState.CONNECTED) {
+                8_000L
+            } else {
+                2_000L
+            }
+            delay(waitMs)
         }
     }
 
@@ -905,22 +848,23 @@ class MomiViewModel(
                 flowOf(emptyList())
             } else {
                 combine(
-                    combine(
-                        repository.observeComments(currentUserId, postId).catch { emit(emptyList()) },
-                        observeSupabaseCommentsFlow(postId),
-                        supaCommentsByPost.map { it[postId].orEmpty() }
-                    ) { fsComments, _, supaMapComments ->
-                        if (supabaseClient.isConfigured()) {
-                            supaMapComments.ifEmpty { fsComments }
-                        } else {
-                            fsComments
-                        }
-                    },
+                    observeSupabaseCommentsFlow(postId),
+                    supaCommentsByPost.map { it[postId].orEmpty() },
                     allProfiles,
                     likedCommentIds,
                     optimisticCommentLikes,
                     optimisticCommentsByPost
-                ) { comments, profiles, liked, likeOverrides, pendingMap ->
+                ) { values ->
+                    @Suppress("UNCHECKED_CAST")
+                    val comments = (values[1] as List<Comment>).ifEmpty { values[0] as List<Comment> }
+                    @Suppress("UNCHECKED_CAST")
+                    val profiles = values[2] as List<UserProfile>
+                    @Suppress("UNCHECKED_CAST")
+                    val liked = values[3] as Set<String>
+                    @Suppress("UNCHECKED_CAST")
+                    val likeOverrides = values[4] as Map<String, Boolean>
+                    @Suppress("UNCHECKED_CAST")
+                    val pendingMap = values[5] as Map<String, List<Comment>>
                     val profilesByUid = profiles.associateBy { it.userId }
                     val pending = pendingMap[postId].orEmpty()
                     val filteredPending = pending.filter { opt ->
@@ -953,65 +897,12 @@ class MomiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
-    fun observePost(postId: String): Flow<Post?> = combine(
-        allPosts,
-        repository.observePost(currentUserId, postId).catch { emit(null) },
-        allProfiles,
-        likedPostIds,
-        bookmarkedPostIds,
-        followingUids,
-        optimisticPostInputs
-    ) { values ->
-        @Suppress("UNCHECKED_CAST")
-        val enrichedList = values[0] as List<Post>
-        val matchFromFeed = enrichedList.firstOrNull { it.id == postId }
-        if (matchFromFeed != null) {
-            return@combine matchFromFeed
-        }
-        val rawPost = values[1] as Post?
-        @Suppress("UNCHECKED_CAST")
-        val profiles = values[2] as List<UserProfile>
-        @Suppress("UNCHECKED_CAST")
-        val liked = values[3] as Set<String>
-        @Suppress("UNCHECKED_CAST")
-        val bookmarked = values[4] as Set<String>
-        @Suppress("UNCHECKED_CAST")
-        val following = values[5] as Set<String>
-        @Suppress("UNCHECKED_CAST")
-        val overrides = values[6] as Triple<Map<String, Boolean>, Map<String, Boolean>, Map<String, List<Comment>>>
-
-        rawPost?.let { post ->
-            val authorProfile = profiles.firstOrNull { it.userId == post.userId }
-            val isShowcase = post.id.startsWith("showcase_")
-            val serverLiked = liked.contains(post.id)
-            val desiredLiked = overrides.first[post.id] ?: serverLiked
-            val likeDelta = when {
-                desiredLiked && !serverLiked -> 1L
-                !desiredLiked && serverLiked -> -1L
-                else -> 0L
-            }
-            val serverBookmarked = bookmarked.contains(post.id)
-            val desiredBookmarked = overrides.second[post.id] ?: serverBookmarked
-            val pendingCount = overrides.third[post.id]?.size?.toLong() ?: 0L
-
-            post.copy(
-                authorAvatarUrl = if (isShowcase) null else (authorProfile?.avatarUrl ?: post.authorAvatarUrl),
-                authorAvatarData = if (isShowcase) null else authorProfile?.avatarData,
-                authorVerified = if (isShowcase) post.authorVerified else (authorProfile?.isVerified ?: post.authorVerified),
-                isLiked = desiredLiked,
-                likesCount = (post.likesCount + likeDelta).coerceAtLeast(0L),
-                commentsCount = (post.commentsCount + pendingCount).coerceAtLeast(0L),
-                isBookmarked = desiredBookmarked,
-                isFollowingAuthor = post.userId == currentUserId || following.contains(post.userId)
-            )
-        }
-    }.catch { error ->
-        val root = unwrapOrRethrowCancellation(error)
-        Log.w(TAG, "Error observing post $postId", root)
-        emit(null)
+    fun observePost(postId: String): Flow<Post?> = allPosts.map { list ->
+        list.firstOrNull { it.id == postId }
     }
 
     fun observeChatMessages(threadId: String): Flow<List<ChatMessage>> {
+        activeChatThreadId = threadId
         val supaPoller = kotlinx.coroutines.flow.flow {
             if (!supabaseClient.isConfigured()) {
                 emit(emptyList())
@@ -1022,19 +913,19 @@ class MomiViewModel(
                     supaChatMessagesByThread.update { it + (threadId to list) }
                 }
                 emit(supaChatMessagesByThread.value[threadId].orEmpty())
-                kotlinx.coroutines.delay(1_500L)
+                val waitMs = if (realtimeClient.connectionState.value.state == SupabaseRealtimeConnectionState.CONNECTED) {
+                    8_000L
+                } else {
+                    2_000L
+                }
+                delay(waitMs)
             }
         }
         return combine(
-            repository.observeChatMessages(currentUserId, threadId).catch { emit(emptyList()) },
             supaPoller,
             supaChatMessagesByThread.map { it[threadId].orEmpty() }
-        ) { fsMessages, _, supaMessages ->
-            if (supabaseClient.isConfigured()) {
-                supaMessages.ifEmpty { fsMessages }
-            } else {
-                fsMessages
-            }
+        ) { _, supaMessages ->
+            supaMessages
         }.catch { error ->
             val root = unwrapOrRethrowCancellation(error)
             Log.w(TAG, "Error observing chat messages for $threadId", root)
@@ -1045,6 +936,7 @@ class MomiViewModel(
     private val activeLivePollStreams = mutableMapOf<String, StateFlow<Triple<LiveStream?, LiveFrame?, List<LiveComment>>>>()
 
     private fun liveRoomStateFlow(streamId: String): StateFlow<Triple<LiveStream?, LiveFrame?, List<LiveComment>>> {
+        activeLiveRoomId = streamId
         return activeLivePollStreams.getOrPut(streamId) {
             kotlinx.coroutines.flow.flow {
                 if (!supabaseClient.isConfigured()) {
@@ -1052,37 +944,28 @@ class MomiViewModel(
                     return@flow
                 }
                 while (true) {
-                    supabaseClient.fetchLiveRoomState(streamId).onSuccess { state ->
-                        state.second?.let { f -> supaLiveFrameByStream.update { it + (streamId to f) } }
-                        supaLiveCommentsByStream.update { it + (streamId to state.third) }
-                        state.first?.let { s ->
-                            supaLiveStreams.update { current ->
-                                if (current.any { it.id == s.id }) {
-                                    current.map { if (it.id == s.id) s else it }
-                                } else {
-                                    current + s
-                                }
-                            }
-                        }
-                        emit(state)
+                    refreshLiveRoomSnapshot(streamId)
+                    val curStream = supaLiveStreams.value.firstOrNull { it.id == streamId }
+                    val curFrame = supaLiveFrameByStream.value[streamId]
+                    val curComments = supaLiveCommentsByStream.value[streamId].orEmpty()
+                    emit(Triple(curStream, curFrame, curComments))
+                    val waitMs = if (realtimeClient.connectionState.value.state == SupabaseRealtimeConnectionState.CONNECTED) {
+                        1_800L
+                    } else {
+                        1_200L
                     }
-                    kotlinx.coroutines.delay(1_200L)
+                    delay(waitMs)
                 }
             }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), Triple(null, null, emptyList()))
         }
     }
 
     fun observeLiveStream(streamId: String): Flow<LiveStream?> = combine(
-        repository.observeLiveStream(currentUserId, streamId).catch { emit(null) },
         liveRoomStateFlow(streamId),
         supaLiveStreams,
         allProfiles
-    ) { fsStream, roomTriple, sStreams, profiles ->
-        val raw = if (supabaseClient.isConfigured()) {
-            roomTriple.first ?: sStreams.firstOrNull { it.id == streamId } ?: fsStream
-        } else {
-            fsStream
-        }
+    ) { roomTriple, sStreams, profiles ->
+        val raw = roomTriple.first ?: sStreams.firstOrNull { it.id == streamId }
         raw?.let { s ->
             val p = profiles.firstOrNull { it.userId == s.userId }
             s.copy(
@@ -1098,17 +981,10 @@ class MomiViewModel(
     }
 
     fun observeLiveComments(streamId: String): Flow<List<LiveComment>> = combine(
-        repository.observeLiveComments(currentUserId, streamId).catch { emit(emptyList()) },
         liveRoomStateFlow(streamId),
         supaLiveCommentsByStream.map { it[streamId].orEmpty() }
-    ) { fsComments, roomTriple, cachedSupa ->
-        if (supabaseClient.isConfigured()) {
-            val fromRoom = roomTriple.third
-            val merged = (fromRoom + cachedSupa).distinctBy { it.id }
-            merged.ifEmpty { fsComments }
-        } else {
-            fsComments
-        }
+    ) { roomTriple, cachedSupa ->
+        (roomTriple.third + cachedSupa).distinctBy { it.id }
     }.catch { error ->
         val root = unwrapOrRethrowCancellation(error)
         Log.w(TAG, "Error observing live comments for $streamId", root)
@@ -1116,19 +992,14 @@ class MomiViewModel(
     }
 
     fun observeLiveFrame(streamId: String): Flow<LiveFrame?> = combine(
-        repository.observeLiveFrame(currentUserId, streamId).catch { emit(null) },
         liveRoomStateFlow(streamId),
         supaLiveFrameByStream.map { it[streamId] }
-    ) { fsFrame, roomTriple, cachedFrame ->
-        if (supabaseClient.isConfigured()) {
-            val supaFrame = cachedFrame ?: roomTriple.second
-            if (roomTriple.second != null && (cachedFrame == null || roomTriple.second!!.seq >= cachedFrame.seq)) {
-                roomTriple.second
-            } else {
-                supaFrame ?: fsFrame
-            }
+    ) { roomTriple, cachedFrame ->
+        val roomFrame = roomTriple.second
+        if (roomFrame != null && (cachedFrame == null || roomFrame.seq >= cachedFrame.seq)) {
+            roomFrame
         } else {
-            fsFrame
+            cachedFrame ?: roomFrame
         }
     }.catch { error ->
         val root = unwrapOrRethrowCancellation(error)
@@ -1339,88 +1210,57 @@ class MomiViewModel(
         pendingMinLikes[post.id] = targetCount to expiresAt
         optimisticPostLikes.update { it + (post.id to nextLiked) }
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                supaLikedPostIds.update { if (nextLiked) it + post.id else it - post.id }
-                supaPosts.update { list -> list.map { if (it.id == post.id) it.copy(likesCount = targetCount) else it } }
-                val res = supabaseBackend.setInteraction(currentUserId, "LIKED_POST", post.id, nextLiked)
-                    .mapCatching { supabaseBackend.updatePostCounts(post.id, likesCount = targetCount).getOrThrow() }
-                res.onSuccess {
-                    if (nextLiked && post.userId != currentUserId && !post.id.startsWith("showcase_")) {
-                        val notif = NotificationItem(
-                            id = "like_${post.id}_$currentUserId",
-                            userId = post.userId,
-                            actorUid = currentUserId,
-                            actorUsername = currentProfile.username,
-                            actorAvatarKey = currentProfile.avatarKey,
-                            message = "liked your post",
-                            timeLabel = "Just now",
-                            section = "Today",
-                            previewImageKey = post.imageKey,
-                            isUnread = true,
-                            createdAt = Timestamp.now()
-                        )
-                        supabaseBackend.sendNotification(notif)
-                    }
-                    optimisticPostLikes.update { it - post.id }
-                }.onFailure { err ->
-                    pendingLikes.remove(post.id)
-                    pendingMinLikes.remove(post.id)
-                    optimisticPostLikes.update { it - post.id }
-                    _errorMessage.value = unwrapErrorMessage(err, "Could not update like")
+            supaLikedPostIds.update { if (nextLiked) it + post.id else it - post.id }
+            supaPosts.update { list -> list.map { if (it.id == post.id) it.copy(likesCount = targetCount) else it } }
+            val res = supabaseBackend.setInteraction(currentUserId, "LIKED_POST", post.id, nextLiked)
+                .mapCatching { supabaseBackend.updatePostCounts(post.id, likesCount = targetCount).getOrThrow() }
+            res.onSuccess {
+                if (nextLiked && post.userId != currentUserId && !post.id.startsWith("showcase_")) {
+                    val notif = NotificationItem(
+                        id = "like_${post.id}_$currentUserId",
+                        userId = post.userId,
+                        actorUid = currentUserId,
+                        actorUsername = currentProfile.username,
+                        actorAvatarKey = currentProfile.avatarKey,
+                        message = "liked your post",
+                        timeLabel = "Just now",
+                        section = "Today",
+                        previewImageKey = post.imageKey,
+                        isUnread = true,
+                        createdAt = Timestamp.now()
+                    )
+                    supabaseBackend.sendNotification(notif)
                 }
-                launch { runCatching { repository.toggleLike(post, currentProfile) } }
-                return@launch
+                optimisticPostLikes.update { it - post.id }
+            }.onFailure { err ->
+                pendingLikes.remove(post.id)
+                pendingMinLikes.remove(post.id)
+                optimisticPostLikes.update { it - post.id }
+                _errorMessage.value = unwrapErrorMessage(err, "Could not update like")
             }
-
-            repository.toggleLike(post, currentProfile)
-                .onSuccess {
-                    optimisticPostLikes.update { it - post.id }
-                }
-                .onFailure { error ->
-                    pendingLikes.remove(post.id)
-                    pendingMinLikes.remove(post.id)
-                    optimisticPostLikes.update { it - post.id }
-                    _errorMessage.value = unwrapErrorMessage(error, "Could not update like")
-                }
         }
     }
 
     fun doubleTapLike(post: Post) {
         if (post.isLiked) return
-        val currentProfile = fallbackProfile()
         val targetCount = post.likesCount + 1L
         val expiresAt = System.currentTimeMillis() + MUTATION_PROTECTION_MS
         pendingLikes[post.id] = true to expiresAt
         pendingMinLikes[post.id] = targetCount to expiresAt
         optimisticPostLikes.update { it + (post.id to true) }
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                supaLikedPostIds.update { it + post.id }
-                supaPosts.update { list -> list.map { if (it.id == post.id) it.copy(likesCount = targetCount) else it } }
-                val res = supabaseBackend.setInteraction(currentUserId, "LIKED_POST", post.id, true)
-                    .mapCatching { supabaseBackend.updatePostCounts(post.id, likesCount = targetCount).getOrThrow() }
-                res.onSuccess {
-                    optimisticPostLikes.update { it - post.id }
-                }.onFailure { err ->
-                    pendingLikes.remove(post.id)
-                    pendingMinLikes.remove(post.id)
-                    optimisticPostLikes.update { it - post.id }
-                    _errorMessage.value = unwrapErrorMessage(err, "Could not like post")
-                }
-                launch { runCatching { repository.setLiked(post, currentProfile) } }
-                return@launch
+            supaLikedPostIds.update { it + post.id }
+            supaPosts.update { list -> list.map { if (it.id == post.id) it.copy(likesCount = targetCount) else it } }
+            val res = supabaseBackend.setInteraction(currentUserId, "LIKED_POST", post.id, true)
+                .mapCatching { supabaseBackend.updatePostCounts(post.id, likesCount = targetCount).getOrThrow() }
+            res.onSuccess {
+                optimisticPostLikes.update { it - post.id }
+            }.onFailure { err ->
+                pendingLikes.remove(post.id)
+                pendingMinLikes.remove(post.id)
+                optimisticPostLikes.update { it - post.id }
+                _errorMessage.value = unwrapErrorMessage(err, "Could not like post")
             }
-
-            repository.setLiked(post, currentProfile)
-                .onSuccess {
-                    optimisticPostLikes.update { it - post.id }
-                }
-                .onFailure { error ->
-                    pendingLikes.remove(post.id)
-                    pendingMinLikes.remove(post.id)
-                    optimisticPostLikes.update { it - post.id }
-                    _errorMessage.value = unwrapErrorMessage(error, "Could not like post")
-                }
         }
     }
 
@@ -1429,29 +1269,15 @@ class MomiViewModel(
         pendingBookmarks[post.id] = nextBookmarked to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
         optimisticBookmarks.update { it + (post.id to nextBookmarked) }
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                supaBookmarkedPostIds.update { if (nextBookmarked) it + post.id else it - post.id }
-                supabaseBackend.setInteraction(currentUserId, "BOOKMARK", post.id, nextBookmarked)
-                    .onSuccess {
-                        optimisticBookmarks.update { it - post.id }
-                    }
-                    .onFailure { err ->
-                        pendingBookmarks.remove(post.id)
-                        optimisticBookmarks.update { it - post.id }
-                        _errorMessage.value = unwrapErrorMessage(err, "Could not update bookmark")
-                    }
-                launch { runCatching { repository.toggleBookmark(post) } }
-                return@launch
-            }
-
-            repository.toggleBookmark(post)
+            supaBookmarkedPostIds.update { if (nextBookmarked) it + post.id else it - post.id }
+            supabaseBackend.setInteraction(currentUserId, "BOOKMARK", post.id, nextBookmarked)
                 .onSuccess {
                     optimisticBookmarks.update { it - post.id }
                 }
-                .onFailure { error ->
+                .onFailure { err ->
                     pendingBookmarks.remove(post.id)
                     optimisticBookmarks.update { it - post.id }
-                    _errorMessage.value = unwrapErrorMessage(error, "Could not update bookmark")
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not update bookmark")
                 }
         }
     }
@@ -1476,52 +1302,38 @@ class MomiViewModel(
         pendingFollowStates[edgeId] = pendingEdge to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
         optimisticFollows.update { it + (targetUid to (nextFollowing to targetUsername)) }
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                supaFollows.update { current ->
-                    if (currentlyFollowing) {
-                        current.filterNot { it.id == edgeId || (it.followerUid == currentUserId && it.targetUid == targetUid) }
-                    } else {
-                        current.filterNot { it.id == edgeId } + pendingEdge!!
-                    }
+            supaFollows.update { current ->
+                if (currentlyFollowing) {
+                    current.filterNot { it.id == edgeId || (it.followerUid == currentUserId && it.targetUid == targetUid) }
+                } else {
+                    current.filterNot { it.id == edgeId } + pendingEdge!!
                 }
-                supabaseBackend.toggleFollow(currentProfile, targetUid, targetUsername, currentlyFollowing)
-                    .onSuccess {
-                        if (!currentlyFollowing && !targetUid.startsWith("showcase_")) {
-                            supabaseBackend.sendNotification(
-                                NotificationItem(
-                                    id = "follow_${currentUserId}_$targetUid",
-                                    userId = targetUid,
-                                    actorUid = currentUserId,
-                                    actorUsername = currentProfile.username,
-                                    actorAvatarKey = currentProfile.avatarKey,
-                                    message = "started following you",
-                                    timeLabel = "Just now",
-                                    section = "Today",
-                                    isFollowAction = true,
-                                    isUnread = true,
-                                    createdAt = Timestamp.now()
-                                )
-                            )
-                        }
-                        optimisticFollows.update { it - targetUid }
-                    }
-                    .onFailure { err ->
-                        pendingFollowStates.remove(edgeId)
-                        optimisticFollows.update { it - targetUid }
-                        _errorMessage.value = unwrapErrorMessage(err, "Could not update follow state")
-                    }
-                launch { runCatching { repository.toggleFollow(currentProfile, targetUid, targetUsername, currentlyFollowing) } }
-                return@launch
             }
-
-            repository.toggleFollow(currentProfile, targetUid, targetUsername, currentlyFollowing)
+            supabaseBackend.toggleFollow(currentProfile, targetUid, targetUsername, currentlyFollowing)
                 .onSuccess {
+                    if (!currentlyFollowing && !targetUid.startsWith("showcase_")) {
+                        supabaseBackend.sendNotification(
+                            NotificationItem(
+                                id = "follow_${currentUserId}_$targetUid",
+                                userId = targetUid,
+                                actorUid = currentUserId,
+                                actorUsername = currentProfile.username,
+                                actorAvatarKey = currentProfile.avatarKey,
+                                message = "started following you",
+                                timeLabel = "Just now",
+                                section = "Today",
+                                isFollowAction = true,
+                                isUnread = true,
+                                createdAt = Timestamp.now()
+                            )
+                        )
+                    }
                     optimisticFollows.update { it - targetUid }
                 }
-                .onFailure { error ->
+                .onFailure { err ->
                     pendingFollowStates.remove(edgeId)
                     optimisticFollows.update { it - targetUid }
-                    _errorMessage.value = unwrapErrorMessage(error, "Could not update follow state")
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not update follow state")
                 }
         }
     }
@@ -1560,69 +1372,50 @@ class MomiViewModel(
         }
 
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val comment = Comment(
-                    id = "cmt_${UUID.randomUUID()}",
-                    userId = currentUserId,
-                    authorUsername = currentProfile.username,
-                    authorAvatarKey = currentProfile.avatarKey,
-                    authorAvatarUrl = currentProfile.avatarUrl,
-                    text = trimmed.take(500),
-                    likesCount = 0L,
-                    isLiked = false,
-                    createdAt = Timestamp.now()
-                )
-                val nextCount = post.commentsCount + 1L
-                supabaseBackend.addComment(postId, currentProfile, comment, nextCount)
-                    .onSuccess {
-                        supaCommentsByPost.update { map -> map + (postId to (map[postId].orEmpty() + comment)) }
-                        supaPosts.update { list -> list.map { if (it.id == postId) it.copy(commentsCount = nextCount) else it } }
-                        if (post.userId != currentUserId && !post.id.startsWith("showcase_")) {
-                            supabaseBackend.sendNotification(
-                                NotificationItem(
-                                    id = "cmt_${comment.id}",
-                                    userId = post.userId,
-                                    actorUid = currentUserId,
-                                    actorUsername = currentProfile.username,
-                                    actorAvatarKey = currentProfile.avatarKey,
-                                    message = "commented: ${trimmed.take(80)}",
-                                    timeLabel = "Just now",
-                                    section = "Today",
-                                    previewImageKey = post.imageKey,
-                                    isUnread = true,
-                                    createdAt = Timestamp.now()
-                                )
-                            )
-                        }
-                        optimisticCommentsByPost.update { map ->
-                            val remaining = map[postId].orEmpty().filterNot { it.id == tempComment.id }
-                            if (remaining.isEmpty()) map - postId else map + (postId to remaining)
-                        }
-                    }
-                    .onFailure { err ->
-                        optimisticCommentsByPost.update { map ->
-                            val remaining = map[postId].orEmpty().filterNot { it.id == tempComment.id }
-                            if (remaining.isEmpty()) map - postId else map + (postId to remaining)
-                        }
-                        _errorMessage.value = unwrapErrorMessage(err, "Could not post comment")
-                    }
-                launch { runCatching { repository.addComment(post, currentProfile, trimmed) } }
-                return@launch
-            }
-
-            repository.addComment(post, currentProfile, trimmed)
+            val comment = Comment(
+                id = "cmt_${UUID.randomUUID()}",
+                userId = currentUserId,
+                authorUsername = currentProfile.username,
+                authorAvatarKey = currentProfile.avatarKey,
+                authorAvatarUrl = currentProfile.avatarUrl,
+                text = trimmed.take(500),
+                likesCount = 0L,
+                isLiked = false,
+                createdAt = Timestamp.now()
+            )
+            val nextCount = post.commentsCount + 1L
+            supabaseBackend.addComment(postId, currentProfile, comment, nextCount)
                 .onSuccess {
+                    supaCommentsByPost.update { map -> map + (postId to (map[postId].orEmpty() + comment)) }
+                    supaPosts.update { list -> list.map { if (it.id == postId) it.copy(commentsCount = nextCount) else it } }
+                    if (post.userId != currentUserId && !post.id.startsWith("showcase_")) {
+                        supabaseBackend.sendNotification(
+                            NotificationItem(
+                                id = "cmt_${comment.id}",
+                                userId = post.userId,
+                                actorUid = currentUserId,
+                                actorUsername = currentProfile.username,
+                                actorAvatarKey = currentProfile.avatarKey,
+                                message = "commented: ${trimmed.take(80)}",
+                                timeLabel = "Just now",
+                                section = "Today",
+                                previewImageKey = post.imageKey,
+                                isUnread = true,
+                                createdAt = Timestamp.now()
+                            )
+                        )
+                    }
                     optimisticCommentsByPost.update { map ->
                         val remaining = map[postId].orEmpty().filterNot { it.id == tempComment.id }
                         if (remaining.isEmpty()) map - postId else map + (postId to remaining)
                     }
                 }
-                .onFailure { error ->
+                .onFailure { err ->
                     optimisticCommentsByPost.update { map ->
                         val remaining = map[postId].orEmpty().filterNot { it.id == tempComment.id }
                         if (remaining.isEmpty()) map - postId else map + (postId to remaining)
                     }
-                    _errorMessage.value = unwrapErrorMessage(error, "Could not post comment")
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not post comment")
                 }
         }
     }
@@ -1633,39 +1426,27 @@ class MomiViewModel(
         val nextLiked = !comment.isLiked
         optimisticCommentLikes.update { it + (comment.id to nextLiked) }
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val targetCount = (comment.likesCount + if (nextLiked) 1L else -1L).coerceAtLeast(0L)
-                supabaseBackend.setInteraction(currentUserId, "LIKED_COMMENT", comment.id, nextLiked)
-                    .mapCatching { supabaseBackend.setCommentLikes(comment.id, targetCount).getOrThrow() }
-                    .onSuccess {
-                        supaLikedCommentIds.update { if (nextLiked) it + comment.id else it - comment.id }
-                        supaCommentsByPost.update { map ->
-                            val list = map[postId].orEmpty().map {
-                                if (it.id == comment.id) it.copy(likesCount = targetCount) else it
-                            }
-                            map + (postId to list)
-                        }
-                        optimisticCommentLikes.update { it - comment.id }
-                    }
-                    .onFailure { err ->
-                        optimisticCommentLikes.update { it - comment.id }
-                        _errorMessage.value = unwrapErrorMessage(err, "Could not update comment like")
-                    }
-                launch { runCatching { repository.toggleCommentLike(postId, comment) } }
-                return@launch
-            }
-
-            repository.toggleCommentLike(postId, comment)
+            val targetCount = (comment.likesCount + if (nextLiked) 1L else -1L).coerceAtLeast(0L)
+            supabaseBackend.setInteraction(currentUserId, "LIKED_COMMENT", comment.id, nextLiked)
+                .mapCatching { supabaseBackend.setCommentLikes(comment.id, targetCount).getOrThrow() }
                 .onSuccess {
+                    supaLikedCommentIds.update { if (nextLiked) it + comment.id else it - comment.id }
+                    supaCommentsByPost.update { map ->
+                        val list = map[postId].orEmpty().map {
+                            if (it.id == comment.id) it.copy(likesCount = targetCount) else it
+                        }
+                        map + (postId to list)
+                    }
                     optimisticCommentLikes.update { it - comment.id }
                 }
-                .onFailure { error ->
+                .onFailure { err ->
                     optimisticCommentLikes.update { it - comment.id }
-                    _errorMessage.value = unwrapErrorMessage(error, "Could not update comment like")
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not update comment like")
                 }
         }
     }
 
+    @Suppress("UNUSED_PARAMETER")
     suspend fun resolveRemoteVideoUri(
         context: android.content.Context,
         collectionName: String,
@@ -1673,33 +1454,7 @@ class MomiViewModel(
         expectedChunksCount: Long
     ): Uri? {
         if (mediaId.isBlank() || mediaId.startsWith("showcase_")) return null
-        val appContext = context.applicationContext
-        MediaAssets.resolveCachedVideoUri(appContext, mediaId)?.let { return it }
-
-        val key = "${collectionName}_$mediaId"
-        val deferred = videoDownloadMutex.withLock {
-            inFlightVideoDownloads[key] ?: viewModelScope.async(Dispatchers.IO) {
-                try {
-                    val chunks = repository.fetchVideoChunks(
-                        collectionName = collectionName,
-                        mediaId = mediaId,
-                        expectedCount = expectedChunksCount
-                    )
-                    if (chunks.isEmpty()) {
-                        null
-                    } else {
-                        MediaAssets.assembleChunksToCacheFile(appContext, mediaId, chunks)
-                    }
-                } finally {
-                    videoDownloadMutex.withLock {
-                        inFlightVideoDownloads.remove(key)
-                    }
-                }
-            }.also { created ->
-                inFlightVideoDownloads[key] = created
-            }
-        }
-        return deferred.await()
+        return MediaAssets.resolveCachedVideoUri(context.applicationContext, mediaId)
     }
 
     fun createPost(
@@ -1730,131 +1485,72 @@ class MomiViewModel(
         val mergedHashtags = MediaAssets.extractHashtags(caption, hashtags)
         val mergedTags = MediaAssets.extractMentions(caption, taggedUsernames)
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val postId = "post_${UUID.randomUUID()}"
-                val uploaded = supabaseBackend.prepareAndUploadPostMedia(
-                    context = context.applicationContext,
-                    mediaId = postId,
-                    localImagePath = localImagePath,
-                    localExtraImagePaths = extraPaths,
-                    mediaType = mediaType,
-                    localVideoPath = localVideoPath,
-                    localAudioPath = localAudioPath
-                )
-                if (uploaded.failureReason != null ||
-                    (mediaType == "VIDEO" && uploaded.videoUrl == null && uploaded.videoDataFallback == null && uploaded.videoChunksFallback.isEmpty())
-                ) {
-                    _errorMessage.value = uploaded.failureReason ?: "Could not upload video clip. Please try a shorter clip."
-                    onComplete(false)
-                    return@launch
-                }
-                val newPost = Post(
-                    id = postId,
-                    userId = currentUserId,
-                    authorUsername = currentProfile.username,
-                    authorDisplayName = currentProfile.displayName,
-                    authorAvatarKey = currentProfile.avatarKey,
-                    authorAvatarUrl = currentProfile.avatarUrl,
-                    authorVerified = currentProfile.isVerified,
-                    location = location.trim().take(80),
-                    imageKey = imageKey,
-                    imageUrl = uploaded.imageUrl,
-                    imageData = uploaded.imageDataFallback,
-                    extraImageUrls = uploaded.extraImageUrls,
-                    extraImageDatas = uploaded.extraImageDatasFallback,
-                    mediaType = mediaType,
-                    videoUrl = uploaded.videoUrl,
-                    videoData = uploaded.videoDataFallback,
-                    videoChunksCount = uploaded.videoChunksFallback.size.toLong(),
-                    videoDurationMs = videoDurationMs,
-                    filterTag = filterTag,
-                    aspectRatio = aspectRatio,
-                    taggedUsernames = mergedTags,
-                    hashtags = mergedHashtags,
-                    caption = caption.trim().take(2000),
-                    likesCount = 0L,
-                    viewsCount = 0L,
-                    commentsCount = 0L,
-                    category = category,
-                    isReel = isReel,
-                    audioTitle = audioTitle.trim().take(80),
-                    audioUrl = uploaded.audioUrl,
-                    audioData = uploaded.audioDataFallback,
-                    pageId = pageId,
-                    groupId = groupId,
-                    communityName = communityName.trim().take(80),
-                    createdAt = Timestamp.now()
-                )
-                pendingCreatedPosts[postId] = newPost to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
-                supaPosts.update { current -> listOf(newPost) + current.filterNot { it.id == newPost.id } }
-                supabaseBackend.createPost(currentProfile, newPost)
-                    .onSuccess {
-                        onComplete(true)
-                    }
-                    .onFailure { err ->
-                        pendingCreatedPosts.remove(postId)
-                        supaPosts.update { current -> current.filterNot { it.id == newPost.id } }
-                        _errorMessage.value = unwrapErrorMessage(err, "Could not publish post")
-                        onComplete(false)
-                    }
-                return@launch
-            }
-
-            val encodedImage = withContext(Dispatchers.IO) {
-                MediaAssets.encodePrimaryPostImage(localImagePath, hasExtraSlides = extraPaths.isNotEmpty())
-            }
-            val encodedExtras = if (mediaType == "IMAGE" && extraPaths.isNotEmpty()) {
-                withContext(Dispatchers.IO) {
-                    extraPaths.mapNotNull { MediaAssets.encodeCarouselImageToBase64(it) }
-                }
-            } else {
-                emptyList()
-            }
-            val encodedAudio = if (!localAudioPath.isNullOrBlank()) {
-                StudioMusicCatalog.encodeAudioForFirestore(context.applicationContext, localAudioPath)
-            } else {
-                null
-            }
-            val videoPayload = if (mediaType == "VIDEO" && !localVideoPath.isNullOrBlank()) {
-                MediaAssets.prepareVideoPayloadForFirestore(context.applicationContext, localVideoPath)
-            } else {
-                null
-            }
-            if (mediaType == "VIDEO" && (videoPayload == null || !videoPayload.isReady)) {
-                _errorMessage.value = videoPayload?.failureReason
-                    ?: "Could not prepare video for cloud sync. Please try a shorter clip."
+            val postId = "post_${UUID.randomUUID()}"
+            val uploaded = supabaseBackend.prepareAndUploadPostMedia(
+                context = context.applicationContext,
+                mediaId = postId,
+                localImagePath = localImagePath,
+                localExtraImagePaths = extraPaths,
+                mediaType = mediaType,
+                localVideoPath = localVideoPath,
+                localAudioPath = localAudioPath
+            )
+            if (uploaded.failureReason != null ||
+                (mediaType == "VIDEO" && uploaded.videoUrl == null && uploaded.videoDataFallback == null && uploaded.videoChunksFallback.isEmpty())
+            ) {
+                _errorMessage.value = uploaded.failureReason ?: "Could not upload video clip. Please try a shorter clip."
                 onComplete(false)
                 return@launch
             }
-            repository.createPost(
-                profile = currentProfile,
+            val newPost = Post(
+                id = postId,
+                userId = currentUserId,
+                authorUsername = currentProfile.username,
+                authorDisplayName = currentProfile.displayName,
+                authorAvatarKey = currentProfile.avatarKey,
+                authorAvatarUrl = currentProfile.avatarUrl,
+                authorVerified = currentProfile.isVerified,
+                location = location.trim().take(80),
                 imageKey = imageKey,
-                localImagePath = localImagePath,
-                imageData = encodedImage,
-                localExtraImagePaths = extraPaths,
-                extraImageDatas = encodedExtras,
+                imageUrl = uploaded.imageUrl,
+                imageData = uploaded.imageDataFallback,
+                extraImageUrls = uploaded.extraImageUrls,
+                extraImageDatas = uploaded.extraImageDatasFallback,
                 mediaType = mediaType,
-                localVideoPath = localVideoPath,
-                videoData = videoPayload?.inlineVideoData,
-                videoChunks = videoPayload?.videoChunks.orEmpty(),
+                videoUrl = uploaded.videoUrl,
+                videoData = uploaded.videoDataFallback,
+                videoChunksCount = uploaded.videoChunksFallback.size.toLong(),
                 videoDurationMs = videoDurationMs,
-                audioTitle = audioTitle,
-                localAudioPath = localAudioPath,
-                audioData = encodedAudio,
                 filterTag = filterTag,
                 aspectRatio = aspectRatio,
                 taggedUsernames = mergedTags,
                 hashtags = mergedHashtags,
-                caption = caption,
-                location = location,
+                caption = caption.trim().take(2000),
+                likesCount = 0L,
+                viewsCount = 0L,
+                commentsCount = 0L,
                 category = category,
-                isReel = isReel
-            ).onSuccess {
-                onComplete(true)
-            }.onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not publish post")
-                onComplete(false)
-            }
+                isReel = isReel,
+                audioTitle = audioTitle.trim().take(80),
+                audioUrl = uploaded.audioUrl,
+                audioData = uploaded.audioDataFallback,
+                pageId = pageId,
+                groupId = groupId,
+                communityName = communityName.trim().take(80),
+                createdAt = Timestamp.now()
+            )
+            pendingCreatedPosts[postId] = newPost to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
+            supaPosts.update { current -> listOf(newPost) + current.filterNot { it.id == newPost.id } }
+            supabaseBackend.createPost(currentProfile, newPost)
+                .onSuccess {
+                    onComplete(true)
+                }
+                .onFailure { err ->
+                    pendingCreatedPosts.remove(postId)
+                    supaPosts.update { current -> current.filterNot { it.id == newPost.id } }
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not publish post")
+                    onComplete(false)
+                }
         }
     }
 
@@ -1872,128 +1568,73 @@ class MomiViewModel(
     ) {
         val currentProfile = fallbackProfile()
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val storyId = "story_${UUID.randomUUID()}"
-                val uploaded = supabaseBackend.prepareAndUploadPostMedia(
-                    context = context.applicationContext,
-                    mediaId = storyId,
-                    localImagePath = localImagePath,
-                    localExtraImagePaths = emptyList(),
-                    mediaType = mediaType,
-                    localVideoPath = localVideoPath,
-                    localAudioPath = localAudioPath
-                )
-                if (uploaded.failureReason != null ||
-                    (mediaType == "VIDEO" && uploaded.videoUrl == null && uploaded.videoDataFallback == null)
-                ) {
-                    _errorMessage.value = uploaded.failureReason ?: "Could not upload story clip."
-                    onComplete(false)
-                    return@launch
-                }
-                val newStory = Story(
-                    id = storyId,
-                    userId = currentUserId,
-                    username = currentProfile.username,
-                    avatarKey = currentProfile.avatarKey,
-                    avatarUrl = currentProfile.avatarUrl,
-                    imageKey = imageKey,
-                    imageUrl = uploaded.imageUrl,
-                    imageData = uploaded.imageDataFallback,
-                    mediaType = mediaType,
-                    videoUrl = uploaded.videoUrl,
-                    videoData = uploaded.videoDataFallback,
-                    videoDurationMs = videoDurationMs,
-                    audioTitle = audioTitle.trim().take(80),
-                    audioUrl = uploaded.audioUrl,
-                    audioData = uploaded.audioDataFallback,
-                    caption = caption.trim().take(240),
-                    createdAt = Timestamp.now(),
-                    isOwnStory = true,
-                    isSeen = false
-                )
-                supabaseBackend.createStory(currentProfile, newStory)
-                    .onSuccess {
-                        supaStories.update { current -> listOf(newStory) + current.filterNot { it.id == newStory.id } }
-                        onComplete(true)
-                    }
-                    .onFailure { err ->
-                        _errorMessage.value = unwrapErrorMessage(err, "Could not share story")
-                        onComplete(false)
-                    }
-                return@launch
-            }
-
-            val encodedImage = withContext(Dispatchers.IO) {
-                MediaAssets.encodeImageFileToBase64(localImagePath)
-            }
-            val encodedAudio = if (!localAudioPath.isNullOrBlank()) {
-                StudioMusicCatalog.encodeAudioForFirestore(context.applicationContext, localAudioPath)
-            } else {
-                null
-            }
-            val videoPayload = if (mediaType == "VIDEO" && !localVideoPath.isNullOrBlank()) {
-                MediaAssets.prepareVideoPayloadForFirestore(context.applicationContext, localVideoPath)
-            } else {
-                null
-            }
-            if (mediaType == "VIDEO" && (videoPayload == null || !videoPayload.isReady)) {
-                _errorMessage.value = videoPayload?.failureReason
-                    ?: "Could not prepare story video for cloud sync. Please try a shorter clip."
-                onComplete(false)
-                return@launch
-            }
-            repository.createStory(
-                profile = currentProfile,
-                imageKey = imageKey,
+            val storyId = "story_${UUID.randomUUID()}"
+            val uploaded = supabaseBackend.prepareAndUploadPostMedia(
+                context = context.applicationContext,
+                mediaId = storyId,
                 localImagePath = localImagePath,
-                imageData = encodedImage,
+                localExtraImagePaths = emptyList(),
                 mediaType = mediaType,
                 localVideoPath = localVideoPath,
-                videoData = videoPayload?.inlineVideoData,
-                videoChunks = videoPayload?.videoChunks.orEmpty(),
-                videoDurationMs = videoDurationMs,
-                audioTitle = audioTitle,
-                localAudioPath = localAudioPath,
-                audioData = encodedAudio,
-                caption = caption
-            ).onSuccess {
-                onComplete(true)
-            }.onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not share story")
+                localAudioPath = localAudioPath
+            )
+            if (uploaded.failureReason != null ||
+                (mediaType == "VIDEO" && uploaded.videoUrl == null && uploaded.videoDataFallback == null)
+            ) {
+                _errorMessage.value = uploaded.failureReason ?: "Could not upload story clip."
                 onComplete(false)
+                return@launch
             }
+            val newStory = Story(
+                id = storyId,
+                userId = currentUserId,
+                username = currentProfile.username,
+                avatarKey = currentProfile.avatarKey,
+                avatarUrl = currentProfile.avatarUrl,
+                imageKey = imageKey,
+                imageUrl = uploaded.imageUrl,
+                imageData = uploaded.imageDataFallback,
+                mediaType = mediaType,
+                videoUrl = uploaded.videoUrl,
+                videoData = uploaded.videoDataFallback,
+                videoDurationMs = videoDurationMs,
+                audioTitle = audioTitle.trim().take(80),
+                audioUrl = uploaded.audioUrl,
+                audioData = uploaded.audioDataFallback,
+                caption = caption.trim().take(240),
+                createdAt = Timestamp.now(),
+                isOwnStory = true,
+                isSeen = false
+            )
+            supabaseBackend.createStory(currentProfile, newStory)
+                .onSuccess {
+                    supaStories.update { current -> listOf(newStory) + current.filterNot { it.id == newStory.id } }
+                    onComplete(true)
+                }
+                .onFailure { err ->
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not share story")
+                    onComplete(false)
+                }
         }
     }
 
     fun deletePost(postId: String) {
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                pendingDeletedPostIds[postId] = System.currentTimeMillis() + MUTATION_PROTECTION_MS
-                pendingCreatedPosts.remove(postId)
-                supaPosts.update { list -> list.filterNot { it.id == postId } }
-                supabaseBackend.deletePost(postId)
-                    .onFailure {
-                        pendingDeletedPostIds.remove(postId)
-                        _errorMessage.value = unwrapErrorMessage(it, "Could not delete post")
-                    }
-                launch { runCatching { repository.deletePost(postId) } }
-                return@launch
-            }
-            repository.deletePost(postId).onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not delete post")
-            }
+            pendingDeletedPostIds[postId] = System.currentTimeMillis() + MUTATION_PROTECTION_MS
+            pendingCreatedPosts.remove(postId)
+            supaPosts.update { list -> list.filterNot { it.id == postId } }
+            supabaseBackend.deletePost(postId)
+                .onFailure {
+                    pendingDeletedPostIds.remove(postId)
+                    _errorMessage.value = unwrapErrorMessage(it, "Could not delete post")
+                }
         }
     }
 
     fun markStorySeen(storyId: String) {
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                supaSeenStoryIds.update { it + storyId }
-                supabaseBackend.setInteraction(currentUserId, "SEEN_STORY", storyId, true)
-                launch { runCatching { repository.markStorySeen(storyId) } }
-                return@launch
-            }
-            repository.markStorySeen(storyId)
+            supaSeenStoryIds.update { it + storyId }
+            supabaseBackend.setInteraction(currentUserId, "SEEN_STORY", storyId, true)
         }
     }
 
@@ -2011,20 +1652,14 @@ class MomiViewModel(
             var nextAvatarUrl: String? = if (removeAvatar) null else currentProfile.avatarUrl
             var nextAvatarData: String? = if (removeAvatar) null else currentProfile.avatarData
             if (!removeAvatar && !pickedAvatarLocalPath.isNullOrBlank()) {
-                if (supabaseClient.isConfigured()) {
-                    val uploadedAvatar = supabaseBackend.uploadImageToStorage(
-                        bucket = "momi-avatars",
-                        objectPath = "avatars/${currentUserId}_${System.currentTimeMillis()}.jpg",
-                        localImagePath = pickedAvatarLocalPath
-                    )
-                    if (uploadedAvatar != null) {
-                        nextAvatarUrl = uploadedAvatar
-                        nextAvatarData = null
-                    } else {
-                        nextAvatarData = withContext(Dispatchers.IO) {
-                            MediaAssets.encodeAvatarFileToBase64(pickedAvatarLocalPath)
-                        } ?: currentProfile.avatarData
-                    }
+                val uploadedAvatar = supabaseBackend.uploadImageToStorage(
+                    bucket = "momi-avatars",
+                    objectPath = "avatars/${currentUserId}_${System.currentTimeMillis()}.jpg",
+                    localImagePath = pickedAvatarLocalPath
+                )
+                if (uploadedAvatar != null) {
+                    nextAvatarUrl = uploadedAvatar
+                    nextAvatarData = null
                 } else {
                     nextAvatarData = withContext(Dispatchers.IO) {
                         MediaAssets.encodeAvatarFileToBase64(pickedAvatarLocalPath)
@@ -2032,57 +1667,29 @@ class MomiViewModel(
                 }
             }
 
-            if (supabaseClient.isConfigured()) {
-                val updated = currentProfile.copy(
-                    displayName = displayName.trim().take(80).ifBlank { currentProfile.displayName },
-                    username = username.trim().lowercase().replace(Regex("[^a-z0-9._]"), "").take(50).ifBlank { currentProfile.username },
-                    category = category.trim().take(60),
-                    bio = bio.trim().take(240),
-                    website = website.trim().take(120),
-                    avatarUrl = nextAvatarUrl,
-                    avatarData = nextAvatarData
-                )
-                pendingProfileOverride = updated to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
-                supaProfiles.update { list ->
-                    if (list.any { it.userId == updated.userId }) list.map { if (it.userId == updated.userId) updated else it }
-                    else listOf(updated) + list
-                }
-                cachedProfile.value = updated
-                supabaseBackend.upsertProfile(updated)
-                    .onSuccess {
-                        _statusNotice.value = "Profile saved!"
-                    }
-                    .onFailure {
-                        pendingProfileOverride = null
-                        _errorMessage.value = unwrapErrorMessage(it, "Could not update profile")
-                    }
-                launch {
-                    runCatching {
-                        repository.updateProfile(
-                            current = currentProfile,
-                            displayName = displayName,
-                            username = username,
-                            category = category,
-                            bio = bio,
-                            website = website,
-                            avatarData = nextAvatarData
-                        )
-                    }
-                }
-                return@launch
-            }
-
-            repository.updateProfile(
-                current = currentProfile,
-                displayName = displayName,
-                username = username,
-                category = category,
-                bio = bio,
-                website = website,
+            val updated = currentProfile.copy(
+                displayName = displayName.trim().take(80).ifBlank { currentProfile.displayName },
+                username = username.trim().lowercase().replace(Regex("[^a-z0-9._]"), "").take(50).ifBlank { currentProfile.username },
+                category = category.trim().take(60),
+                bio = bio.trim().take(240),
+                website = website.trim().take(120),
+                avatarUrl = nextAvatarUrl,
                 avatarData = nextAvatarData
-            ).onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not update profile")
+            )
+            pendingProfileOverride = updated to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
+            supaProfiles.update { list ->
+                if (list.any { it.userId == updated.userId }) list.map { if (it.userId == updated.userId) updated else it }
+                else listOf(updated) + list
             }
+            cachedProfile.value = updated
+            supabaseBackend.upsertProfile(updated)
+                .onSuccess {
+                    _statusNotice.value = "Profile saved!"
+                }
+                .onFailure {
+                    pendingProfileOverride = null
+                    _errorMessage.value = unwrapErrorMessage(it, "Could not update profile")
+                }
         }
     }
 
@@ -2092,20 +1699,13 @@ class MomiViewModel(
             return
         }
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                supabaseClient.patchRows("profiles", "user_id=eq.${java.net.URLEncoder.encode(targetUid, "UTF-8")}", mapOf("is_verified" to verified))
-                    .onSuccess {
-                        supaProfiles.update { list -> list.map { if (it.userId == targetUid) it.copy(isVerified = verified) else it } }
-                    }
-                    .onFailure {
-                        _errorMessage.value = unwrapErrorMessage(it, "Could not update verified badge")
-                    }
-                launch { runCatching { repository.setUserVerified(targetUid, verified) } }
-                return@launch
-            }
-            repository.setUserVerified(targetUid, verified).onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not update verified badge")
-            }
+            supabaseClient.patchRows("profiles", "user_id=eq.${java.net.URLEncoder.encode(targetUid, "UTF-8")}", mapOf("is_verified" to verified))
+                .onSuccess {
+                    supaProfiles.update { list -> list.map { if (it.userId == targetUid) it.copy(isVerified = verified) else it } }
+                }
+                .onFailure {
+                    _errorMessage.value = unwrapErrorMessage(it, "Could not update verified badge")
+                }
         }
     }
 
@@ -2123,41 +1723,22 @@ class MomiViewModel(
             return
         }
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val adminEmail = initialEmail ?: "syali6511@gmail.com"
-                supabaseClient.patchRows(
-                    "profiles",
-                    "user_id=eq.${java.net.URLEncoder.encode(targetUid, "UTF-8")}",
-                    mapOf("role" to role, "moderation_scopes" to scopes, "assigned_by_email" to adminEmail)
-                ).onSuccess {
-                    supaProfiles.update { list ->
-                        list.map { if (it.userId == targetUid) it.copy(role = role, moderationScopes = scopes, assignedByEmail = adminEmail) else it }
-                    }
-                    _statusNotice.value = if (role == MomiRoles.USER) {
-                        "Team role removed — user restored to regular member."
-                    } else {
-                        "Updated team member to ${MomiRoles.labelOf(role)} (${scopes.size} duties)."
-                    }
-                }.onFailure { err ->
-                    _errorMessage.value = unwrapErrorMessage(err, "Could not update team member role")
-                }
-                launch { runCatching { repository.setUserRoleAndScopes(targetUid, role, scopes, adminEmail) } }
-                return@launch
-            }
-
-            repository.setUserRoleAndScopes(
-                targetUid = targetUid,
-                role = role,
-                scopes = scopes,
-                adminEmail = initialEmail ?: "syali6511@gmail.com"
+            val adminEmail = initialEmail ?: "syali6511@gmail.com"
+            supabaseClient.patchRows(
+                "profiles",
+                "user_id=eq.${java.net.URLEncoder.encode(targetUid, "UTF-8")}",
+                mapOf("role" to role, "moderation_scopes" to scopes, "assigned_by_email" to adminEmail)
             ).onSuccess {
+                supaProfiles.update { list ->
+                    list.map { if (it.userId == targetUid) it.copy(role = role, moderationScopes = scopes, assignedByEmail = adminEmail) else it }
+                }
                 _statusNotice.value = if (role == MomiRoles.USER) {
                     "Team role removed — user restored to regular member."
                 } else {
                     "Updated team member to ${MomiRoles.labelOf(role)} (${scopes.size} duties)."
                 }
-            }.onFailure { error ->
-                _errorMessage.value = unwrapErrorMessage(error, "Could not update team member role")
+            }.onFailure { err ->
+                _errorMessage.value = unwrapErrorMessage(err, "Could not update team member role")
             }
         }
     }
@@ -2173,60 +1754,28 @@ class MomiViewModel(
     ) {
         val currentProfile = fallbackProfile()
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val report = ContentReport(
-                    id = "rep_${UUID.randomUUID()}",
-                    targetType = targetType,
-                    targetId = targetId,
-                    targetAuthorUid = targetAuthorUid,
-                    targetAuthorUsername = targetAuthorUsername,
-                    targetPreviewText = targetPreviewText.take(200),
-                    category = category,
-                    reasonDetail = reasonDetail.trim().take(500),
-                    reporterUid = currentUserId,
-                    reporterUsername = currentProfile.username,
-                    status = "OPEN",
-                    createdAt = Timestamp.now()
-                )
-                supabaseBackend.upsertReport(report)
-                    .onSuccess {
-                        supaContentReports.update { listOf(report) + it }
-                        _statusNotice.value = "Report submitted to Momi Safety Team."
-                    }
-                    .onFailure { err ->
-                        _errorMessage.value = unwrapErrorMessage(err, "Could not submit report")
-                    }
-                launch {
-                    runCatching {
-                        repository.submitContentReport(
-                            reporterProfile = currentProfile,
-                            targetType = targetType,
-                            targetId = targetId,
-                            targetAuthorUid = targetAuthorUid,
-                            targetAuthorUsername = targetAuthorUsername,
-                            targetPreviewText = targetPreviewText,
-                            category = category,
-                            reasonDetail = reasonDetail
-                        )
-                    }
-                }
-                return@launch
-            }
-
-            repository.submitContentReport(
-                reporterProfile = currentProfile,
+            val report = ContentReport(
+                id = "rep_${UUID.randomUUID()}",
                 targetType = targetType,
                 targetId = targetId,
                 targetAuthorUid = targetAuthorUid,
                 targetAuthorUsername = targetAuthorUsername,
-                targetPreviewText = targetPreviewText,
+                targetPreviewText = targetPreviewText.take(200),
                 category = category,
-                reasonDetail = reasonDetail
-            ).onSuccess {
-                _statusNotice.value = "Report submitted to Momi Safety Team."
-            }.onFailure { error ->
-                _errorMessage.value = unwrapErrorMessage(error, "Could not submit report")
-            }
+                reasonDetail = reasonDetail.trim().take(500),
+                reporterUid = currentUserId,
+                reporterUsername = currentProfile.username,
+                status = "OPEN",
+                createdAt = Timestamp.now()
+            )
+            supabaseBackend.upsertReport(report)
+                .onSuccess {
+                    supaContentReports.update { listOf(report) + it }
+                    _statusNotice.value = "Report submitted to Momi Safety Team."
+                }
+                .onFailure { err ->
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not submit report")
+                }
         }
     }
 
@@ -2247,140 +1796,78 @@ class MomiViewModel(
             if (removeContent) "Removed violating content" else "Reviewed and cleared"
         }
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                if (removeContent) {
-                    when (report.targetType.uppercase()) {
-                        "POST" -> if (!report.targetId.startsWith("showcase_")) {
-                            supabaseBackend.deletePost(report.targetId)
-                            supaPosts.update { list -> list.filterNot { it.id == report.targetId } }
-                        }
-                        "PRODUCT" -> {
-                            supabaseBackend.deleteProduct(report.targetId)
-                            supaProducts.update { list -> list.filterNot { it.id == report.targetId } }
-                        }
-                    }
-                }
-                val updated = report.copy(
-                    status = nextStatus,
-                    reviewedByUid = reviewer.userId,
-                    reviewedByUsername = reviewer.username,
-                    reviewedByRole = role,
-                    resolutionNote = note
-                )
-                supabaseBackend.upsertReport(updated)
-                    .onSuccess {
-                        supaContentReports.update { list -> list.map { if (it.id == updated.id) updated else it } }
-                        _statusNotice.value = if (removeContent) "Content removed & report closed." else "Report dismissed."
-                    }
-                    .onFailure { err ->
-                        _errorMessage.value = unwrapErrorMessage(err, "Could not update report status")
-                    }
-                launch {
-                    runCatching {
-                        repository.resolveContentReport(report.id, nextStatus, reviewer, role, note)
-                    }
-                }
-                return@launch
-            }
-
             if (removeContent) {
                 when (report.targetType.uppercase()) {
-                    "POST" -> {
-                        if (!report.targetId.startsWith("showcase_")) {
-                            val delResult = repository.deletePost(report.targetId)
-                            if (delResult.isFailure) {
-                                val err = delResult.exceptionOrNull()
-                                Log.w(TAG, "Post delete before resolving report failed/already gone", err)
-                            }
-                        }
+                    "POST" -> if (!report.targetId.startsWith("showcase_")) {
+                        supabaseBackend.deletePost(report.targetId)
+                        supaPosts.update { list -> list.filterNot { it.id == report.targetId } }
                     }
                     "PRODUCT" -> {
-                        val delResult = marketplaceRepository.deleteProduct(report.targetId)
-                        if (delResult.isFailure) {
-                            Log.w(TAG, "Product delete failed", delResult.exceptionOrNull())
-                        }
+                        supabaseBackend.deleteProduct(report.targetId)
+                        supaProducts.update { list -> list.filterNot { it.id == report.targetId } }
                     }
                 }
             }
-            repository.resolveContentReport(
-                reportId = report.id,
+            val updated = report.copy(
                 status = nextStatus,
-                reviewerProfile = reviewer,
-                reviewerRole = role,
+                reviewedByUid = reviewer.userId,
+                reviewedByUsername = reviewer.username,
+                reviewedByRole = role,
                 resolutionNote = note
-            ).onSuccess {
-                _statusNotice.value = if (removeContent) "Content removed & report closed." else "Report dismissed."
-            }.onFailure { error ->
-                _errorMessage.value = unwrapErrorMessage(error, "Could not update report status")
-            }
+            )
+            supabaseBackend.upsertReport(updated)
+                .onSuccess {
+                    supaContentReports.update { list -> list.map { if (it.id == updated.id) updated else it } }
+                    _statusNotice.value = if (removeContent) "Content removed & report closed." else "Report dismissed."
+                }
+                .onFailure { err ->
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not update report status")
+                }
         }
     }
 
     fun toggleNotificationFollow(notification: NotificationItem) {
-        val currentProfile = fallbackProfile()
-        if (supabaseClient.isConfigured()) {
-            toggleFollow(notification.actorUid, notification.actorUsername, notification.isFollowingBack)
-            return
-        }
-        viewModelScope.launch {
-            repository.toggleNotificationFollow(currentProfile, notification).onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not update follow state")
-            }
-        }
+        toggleFollow(notification.actorUid, notification.actorUsername, notification.isFollowingBack)
     }
 
     fun markNotificationsRead() {
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                supaNotifications.update { list -> list.map { it.copy(isUnread = false) } }
-                supabaseBackend.markNotificationsRead(currentUserId)
-                launch { runCatching { repository.markNotificationsRead() } }
-                return@launch
-            }
-            repository.markNotificationsRead()
+            supaNotifications.update { list -> list.map { it.copy(isUnread = false) } }
+            supabaseBackend.markNotificationsRead(currentUserId)
         }
     }
 
     fun startDirectChat(peerProfile: UserProfile, onOpened: (MessageThread) -> Unit) {
         val currentProfile = fallbackProfile()
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val sorted = listOf(currentUserId, peerProfile.userId).sorted()
-                val threadId = "${sorted[0]}__${sorted[1]}"
-                val existing = supaThreads.value.firstOrNull { it.id == threadId }
-                if (existing != null) {
-                    onOpened(existing)
-                    return@launch
-                }
-                val newThread = MessageThread(
-                    id = threadId,
-                    participantUids = sorted,
-                    userAId = currentUserId,
-                    userAUsername = currentProfile.username,
-                    userADisplayName = currentProfile.displayName,
-                    userAAvatarKey = currentProfile.avatarKey,
-                    userBId = peerProfile.userId,
-                    userBUsername = peerProfile.username,
-                    userBDisplayName = peerProfile.displayName,
-                    userBAvatarKey = peerProfile.avatarKey,
-                    lastMessage = "",
-                    lastSenderUid = "",
-                    unreadCount = 0L,
-                    updatedAt = Timestamp.now()
-                )
-                supabaseBackend.upsertThread(newThread)
-                    .onSuccess {
-                        supaThreads.update { list -> listOf(newThread) + list.filterNot { it.id == threadId } }
-                        onOpened(newThread)
-                    }
-                    .onFailure {
-                        _errorMessage.value = unwrapErrorMessage(it, "Could not open chat")
-                    }
+            val sorted = listOf(currentUserId, peerProfile.userId).sorted()
+            val threadId = "${sorted[0]}__${sorted[1]}"
+            val existing = supaThreads.value.firstOrNull { it.id == threadId }
+            if (existing != null) {
+                onOpened(existing)
                 return@launch
             }
-
-            repository.openOrCreateThread(currentProfile, peerProfile)
-                .onSuccess(onOpened)
+            val newThread = MessageThread(
+                id = threadId,
+                participantUids = sorted,
+                userAId = currentUserId,
+                userAUsername = currentProfile.username,
+                userADisplayName = currentProfile.displayName,
+                userAAvatarKey = currentProfile.avatarKey,
+                userBId = peerProfile.userId,
+                userBUsername = peerProfile.username,
+                userBDisplayName = peerProfile.displayName,
+                userBAvatarKey = peerProfile.avatarKey,
+                lastMessage = "",
+                lastSenderUid = "",
+                unreadCount = 0L,
+                updatedAt = Timestamp.now()
+            )
+            supabaseBackend.upsertThread(newThread)
+                .onSuccess {
+                    supaThreads.update { list -> listOf(newThread) + list.filterNot { it.id == threadId } }
+                    onOpened(newThread)
+                }
                 .onFailure {
                     _errorMessage.value = unwrapErrorMessage(it, "Could not open chat")
                 }
@@ -2417,38 +1904,30 @@ class MomiViewModel(
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val msg = ChatMessage(
-                    id = "msg_${UUID.randomUUID()}",
-                    participantUids = thread.participantUids.ifEmpty { listOf(thread.userAId, thread.userBId).filter { it.isNotBlank() } },
-                    senderUid = currentUserId,
-                    senderUsername = currentProfile.username,
-                    messageType = "TEXT",
-                    text = trimmed.take(1000),
-                    createdAt = Timestamp.now()
-                )
-                val updatedThread = thread.copy(
-                    lastMessage = msg.text.take(80),
-                    lastSenderUid = currentUserId,
-                    unreadUid = thread.peerUidFor(currentUserId),
-                    unreadCount = thread.unreadCount + 1L,
-                    updatedAt = Timestamp.now()
-                )
-                supabaseBackend.sendChatMessage(updatedThread, msg)
-                    .onSuccess {
-                        supaChatMessagesByThread.update { map -> map + (thread.id to (map[thread.id].orEmpty() + msg)) }
-                        supaThreads.update { list -> listOf(updatedThread) + list.filterNot { it.id == thread.id } }
-                    }
-                    .onFailure {
-                        _errorMessage.value = unwrapErrorMessage(it, "Could not send message")
-                    }
-                launch { runCatching { repository.sendMessage(thread, currentProfile, trimmed) } }
-                return@launch
-            }
-
-            repository.sendMessage(thread, currentProfile, text).onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not send message")
-            }
+            val msg = ChatMessage(
+                id = "msg_${UUID.randomUUID()}",
+                participantUids = thread.participantUids.ifEmpty { listOf(thread.userAId, thread.userBId).filter { it.isNotBlank() } },
+                senderUid = currentUserId,
+                senderUsername = currentProfile.username,
+                messageType = "TEXT",
+                text = trimmed.take(1000),
+                createdAt = Timestamp.now()
+            )
+            val updatedThread = thread.copy(
+                lastMessage = msg.text.take(80),
+                lastSenderUid = currentUserId,
+                unreadUid = thread.peerUidFor(currentUserId),
+                unreadCount = thread.unreadCount + 1L,
+                updatedAt = Timestamp.now()
+            )
+            supabaseBackend.sendChatMessage(updatedThread, msg)
+                .onSuccess {
+                    supaChatMessagesByThread.update { map -> map + (thread.id to (map[thread.id].orEmpty() + msg)) }
+                    supaThreads.update { list -> listOf(updatedThread) + list.filterNot { it.id == thread.id } }
+                }
+                .onFailure {
+                    _errorMessage.value = unwrapErrorMessage(it, "Could not send message")
+                }
         }
     }
 
@@ -2456,62 +1935,40 @@ class MomiViewModel(
         val currentProfile = fallbackProfile()
         _isSendingChatMedia.value = true
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val msgId = "msg_${UUID.randomUUID()}"
-                val imageUrl = supabaseBackend.uploadImageToStorage("momi-media", "chat/${thread.id}_$msgId.jpg", localImagePath)
-                val imageData = if (imageUrl == null) {
-                    withContext(Dispatchers.IO) { MediaAssets.encodeImageFileToBase64(localImagePath) }
-                } else null
-                if (imageUrl == null && imageData.isNullOrBlank()) {
-                    _isSendingChatMedia.value = false
-                    _errorMessage.value = "Could not upload photo for chat."
-                    return@launch
-                }
-                val msg = ChatMessage(
-                    id = msgId,
-                    participantUids = thread.participantUids.ifEmpty { listOf(thread.userAId, thread.userBId).filter { it.isNotBlank() } },
-                    senderUid = currentUserId,
-                    senderUsername = currentProfile.username,
-                    messageType = "IMAGE",
-                    text = "Photo",
-                    mediaUrl = imageUrl,
-                    imageData = imageData,
-                    createdAt = Timestamp.now()
-                )
-                val updatedThread = thread.copy(
-                    lastMessage = "Sent a photo",
-                    lastSenderUid = currentUserId,
-                    unreadUid = thread.peerUidFor(currentUserId),
-                    unreadCount = thread.unreadCount + 1L,
-                    updatedAt = Timestamp.now()
-                )
-                supabaseBackend.sendChatMessage(updatedThread, msg)
-                    .onSuccess {
-                        supaChatMessagesByThread.update { map -> map + (thread.id to (map[thread.id].orEmpty() + msg)) }
-                        supaThreads.update { list -> listOf(updatedThread) + list.filterNot { it.id == thread.id } }
-                    }
-                    .onFailure { _errorMessage.value = unwrapErrorMessage(it, "Could not send photo") }
+            val msgId = "msg_${UUID.randomUUID()}"
+            val imageUrl = supabaseBackend.uploadImageToStorage("momi-media", "chat/${thread.id}_$msgId.jpg", localImagePath)
+            val imageData = if (imageUrl == null) {
+                withContext(Dispatchers.IO) { MediaAssets.encodeImageFileToBase64(localImagePath) }
+            } else null
+            if (imageUrl == null && imageData.isNullOrBlank()) {
                 _isSendingChatMedia.value = false
+                _errorMessage.value = "Could not upload photo for chat."
                 return@launch
             }
-
-            val encoded = withContext(Dispatchers.IO) {
-                MediaAssets.encodeImageFileToBase64(localImagePath)
-            }
-            if (encoded.isNullOrBlank()) {
-                _isSendingChatMedia.value = false
-                _errorMessage.value = "Could not compress photo for chat."
-                return@launch
-            }
-            repository.sendMediaMessage(
-                thread = thread,
-                senderProfile = currentProfile,
+            val msg = ChatMessage(
+                id = msgId,
+                participantUids = thread.participantUids.ifEmpty { listOf(thread.userAId, thread.userBId).filter { it.isNotBlank() } },
+                senderUid = currentUserId,
+                senderUsername = currentProfile.username,
                 messageType = "IMAGE",
-                caption = "Photo",
-                imageData = encoded
-            ).onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not send photo")
-            }
+                text = "Photo",
+                mediaUrl = imageUrl,
+                imageData = imageData,
+                createdAt = Timestamp.now()
+            )
+            val updatedThread = thread.copy(
+                lastMessage = "Sent a photo",
+                lastSenderUid = currentUserId,
+                unreadUid = thread.peerUidFor(currentUserId),
+                unreadCount = thread.unreadCount + 1L,
+                updatedAt = Timestamp.now()
+            )
+            supabaseBackend.sendChatMessage(updatedThread, msg)
+                .onSuccess {
+                    supaChatMessagesByThread.update { map -> map + (thread.id to (map[thread.id].orEmpty() + msg)) }
+                    supaThreads.update { list -> listOf(updatedThread) + list.filterNot { it.id == thread.id } }
+                }
+                .onFailure { _errorMessage.value = unwrapErrorMessage(it, "Could not send photo") }
             _isSendingChatMedia.value = false
         }
     }
@@ -2520,67 +1977,44 @@ class MomiViewModel(
         val currentProfile = fallbackProfile()
         _isSendingChatMedia.value = true
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val msgId = "msg_${UUID.randomUUID()}"
-                val rawVideo = MediaAssets.readUploadBytesUpToLimit(localVideoPath, 16_000_000L)
-                val videoUrl = if (rawVideo != null) {
-                    supabaseClient.uploadStorageBytes("momi-videos", "chat/${thread.id}_$msgId.mp4", rawVideo, "video/mp4").getOrNull()
-                } else null
-                val videoData = if (videoUrl == null) {
-                    MediaAssets.prepareCompactVideoForChat(context.applicationContext, localVideoPath).getOrNull()
-                } else null
-                if (videoUrl == null && videoData.isNullOrBlank()) {
-                    _isSendingChatMedia.value = false
-                    _errorMessage.value = "Video clip is too large for chat."
-                    return@launch
-                }
-                val msg = ChatMessage(
-                    id = msgId,
-                    participantUids = thread.participantUids.ifEmpty { listOf(thread.userAId, thread.userBId).filter { it.isNotBlank() } },
-                    senderUid = currentUserId,
-                    senderUsername = currentProfile.username,
-                    messageType = "VIDEO",
-                    text = "Video clip",
-                    mediaUrl = videoUrl,
-                    videoData = videoData,
-                    videoDurationMs = durationMs,
-                    createdAt = Timestamp.now()
-                )
-                val updatedThread = thread.copy(
-                    lastMessage = "Sent a video",
-                    lastSenderUid = currentUserId,
-                    unreadUid = thread.peerUidFor(currentUserId),
-                    unreadCount = thread.unreadCount + 1L,
-                    updatedAt = Timestamp.now()
-                )
-                supabaseBackend.sendChatMessage(updatedThread, msg)
-                    .onSuccess {
-                        supaChatMessagesByThread.update { map -> map + (thread.id to (map[thread.id].orEmpty() + msg)) }
-                        supaThreads.update { list -> listOf(updatedThread) + list.filterNot { it.id == thread.id } }
-                    }
-                    .onFailure { _errorMessage.value = unwrapErrorMessage(it, "Could not send video") }
+            val msgId = "msg_${UUID.randomUUID()}"
+            val rawVideo = MediaAssets.readUploadBytesUpToLimit(localVideoPath, 16_000_000L)
+            val videoUrl = if (rawVideo != null) {
+                supabaseClient.uploadStorageBytes("momi-videos", "chat/${thread.id}_$msgId.mp4", rawVideo, "video/mp4").getOrNull()
+            } else null
+            val videoData = if (videoUrl == null) {
+                MediaAssets.prepareCompactVideoForChat(context.applicationContext, localVideoPath).getOrNull()
+            } else null
+            if (videoUrl == null && videoData.isNullOrBlank()) {
                 _isSendingChatMedia.value = false
+                _errorMessage.value = "Video clip is too large for chat."
                 return@launch
             }
-
-            val videoResult = MediaAssets.prepareCompactVideoForChat(context.applicationContext, localVideoPath)
-            val encoded = videoResult.getOrNull()
-            if (encoded.isNullOrBlank()) {
-                _isSendingChatMedia.value = false
-                _errorMessage.value = videoResult.exceptionOrNull()?.localizedMessage
-                    ?: "Video clip is too large for chat."
-                return@launch
-            }
-            repository.sendMediaMessage(
-                thread = thread,
-                senderProfile = currentProfile,
+            val msg = ChatMessage(
+                id = msgId,
+                participantUids = thread.participantUids.ifEmpty { listOf(thread.userAId, thread.userBId).filter { it.isNotBlank() } },
+                senderUid = currentUserId,
+                senderUsername = currentProfile.username,
                 messageType = "VIDEO",
-                caption = "Video clip",
-                videoData = encoded,
-                videoDurationMs = durationMs
-            ).onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not send video")
-            }
+                text = "Video clip",
+                mediaUrl = videoUrl,
+                videoData = videoData,
+                videoDurationMs = durationMs,
+                createdAt = Timestamp.now()
+            )
+            val updatedThread = thread.copy(
+                lastMessage = "Sent a video",
+                lastSenderUid = currentUserId,
+                unreadUid = thread.peerUidFor(currentUserId),
+                unreadCount = thread.unreadCount + 1L,
+                updatedAt = Timestamp.now()
+            )
+            supabaseBackend.sendChatMessage(updatedThread, msg)
+                .onSuccess {
+                    supaChatMessagesByThread.update { map -> map + (thread.id to (map[thread.id].orEmpty() + msg)) }
+                    supaThreads.update { list -> listOf(updatedThread) + list.filterNot { it.id == thread.id } }
+                }
+                .onFailure { _errorMessage.value = unwrapErrorMessage(it, "Could not send video") }
             _isSendingChatMedia.value = false
         }
     }
@@ -2589,67 +2023,45 @@ class MomiViewModel(
         val currentProfile = fallbackProfile()
         _isSendingChatMedia.value = true
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val msgId = "msg_${UUID.randomUUID()}"
-                val rawAudio = StudioMusicCatalog.readAudioUploadBytes(localAudioPath)
-                val audioUrl = if (rawAudio != null) {
-                    supabaseClient.uploadStorageBytes("momi-media", "chat/${thread.id}_$msgId.m4a", rawAudio, "audio/mp4").getOrNull()
-                } else null
-                val audioData = if (audioUrl == null) {
-                    StudioMusicCatalog.encodeAudioForFirestore(context.applicationContext, localAudioPath)
-                } else null
-                runCatching { File(localAudioPath).delete() }
-                if (audioUrl == null && audioData.isNullOrBlank()) {
-                    _isSendingChatMedia.value = false
-                    _errorMessage.value = "Voice clip could not be encoded."
-                    return@launch
-                }
-                val msg = ChatMessage(
-                    id = msgId,
-                    participantUids = thread.participantUids.ifEmpty { listOf(thread.userAId, thread.userBId).filter { it.isNotBlank() } },
-                    senderUid = currentUserId,
-                    senderUsername = currentProfile.username,
-                    messageType = "AUDIO",
-                    text = "Voice message",
-                    mediaUrl = audioUrl,
-                    audioData = audioData,
-                    audioDurationMs = durationMs,
-                    createdAt = Timestamp.now()
-                )
-                val updatedThread = thread.copy(
-                    lastMessage = "Voice message",
-                    lastSenderUid = currentUserId,
-                    unreadUid = thread.peerUidFor(currentUserId),
-                    unreadCount = thread.unreadCount + 1L,
-                    updatedAt = Timestamp.now()
-                )
-                supabaseBackend.sendChatMessage(updatedThread, msg)
-                    .onSuccess {
-                        supaChatMessagesByThread.update { map -> map + (thread.id to (map[thread.id].orEmpty() + msg)) }
-                        supaThreads.update { list -> listOf(updatedThread) + list.filterNot { it.id == thread.id } }
-                    }
-                    .onFailure { _errorMessage.value = unwrapErrorMessage(it, "Could not send voice note") }
-                _isSendingChatMedia.value = false
-                return@launch
-            }
-
-            val encoded = StudioMusicCatalog.encodeAudioForFirestore(context.applicationContext, localAudioPath)
+            val msgId = "msg_${UUID.randomUUID()}"
+            val rawAudio = StudioMusicCatalog.readAudioUploadBytes(localAudioPath)
+            val audioUrl = if (rawAudio != null) {
+                supabaseClient.uploadStorageBytes("momi-media", "chat/${thread.id}_$msgId.m4a", rawAudio, "audio/mp4").getOrNull()
+            } else null
+            val audioData = if (audioUrl == null) {
+                StudioMusicCatalog.encodeAudioForFirestore(context.applicationContext, localAudioPath)
+            } else null
             runCatching { File(localAudioPath).delete() }
-            if (encoded.isNullOrBlank()) {
+            if (audioUrl == null && audioData.isNullOrBlank()) {
                 _isSendingChatMedia.value = false
                 _errorMessage.value = "Voice clip could not be encoded."
                 return@launch
             }
-            repository.sendMediaMessage(
-                thread = thread,
-                senderProfile = currentProfile,
+            val msg = ChatMessage(
+                id = msgId,
+                participantUids = thread.participantUids.ifEmpty { listOf(thread.userAId, thread.userBId).filter { it.isNotBlank() } },
+                senderUid = currentUserId,
+                senderUsername = currentProfile.username,
                 messageType = "AUDIO",
-                caption = "Voice message",
-                audioData = encoded,
-                audioDurationMs = durationMs
-            ).onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not send voice note")
-            }
+                text = "Voice message",
+                mediaUrl = audioUrl,
+                audioData = audioData,
+                audioDurationMs = durationMs,
+                createdAt = Timestamp.now()
+            )
+            val updatedThread = thread.copy(
+                lastMessage = "Voice message",
+                lastSenderUid = currentUserId,
+                unreadUid = thread.peerUidFor(currentUserId),
+                unreadCount = thread.unreadCount + 1L,
+                updatedAt = Timestamp.now()
+            )
+            supabaseBackend.sendChatMessage(updatedThread, msg)
+                .onSuccess {
+                    supaChatMessagesByThread.update { map -> map + (thread.id to (map[thread.id].orEmpty() + msg)) }
+                    supaThreads.update { list -> listOf(updatedThread) + list.filterNot { it.id == thread.id } }
+                }
+                .onFailure { _errorMessage.value = unwrapErrorMessage(it, "Could not send voice note") }
             _isSendingChatMedia.value = false
         }
     }
@@ -2663,49 +2075,31 @@ class MomiViewModel(
     ) {
         val currentProfile = fallbackProfile()
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val existing = supaMerchants.value.firstOrNull { it.userId == currentUserId }
-                val merchant = MerchantAccount(
-                    id = currentUserId,
-                    userId = currentUserId,
-                    ownerUsername = currentProfile.username,
-                    storeName = storeName.trim().take(80),
-                    tagline = tagline.trim().take(160),
-                    category = category.trim().take(60),
-                    location = location.trim().take(80),
-                    avatarKey = currentProfile.avatarKey,
-                    avatarUrl = currentProfile.avatarUrl,
-                    avatarData = currentProfile.avatarData,
-                    isVerified = existing?.isVerified ?: false,
-                    createdAt = existing?.createdAt ?: Timestamp.now()
-                )
-                supabaseBackend.upsertMerchant(merchant)
-                    .onSuccess {
-                        supaMerchants.update { list -> listOf(merchant) + list.filterNot { it.userId == merchant.userId } }
-                        _statusNotice.value = "Merchant storefront saved!"
-                        onComplete(true)
-                    }
-                    .onFailure {
-                        _errorMessage.value = unwrapErrorMessage(it, "Could not save merchant account")
-                        onComplete(false)
-                    }
-                launch { runCatching { marketplaceRepository.createOrUpdateMerchant(currentProfile, storeName, tagline, category, location) } }
-                return@launch
-            }
-
-            marketplaceRepository.createOrUpdateMerchant(
-                profile = currentProfile,
-                storeName = storeName,
-                tagline = tagline,
-                category = category,
-                location = location
-            ).onSuccess {
-                _statusNotice.value = "Merchant storefront saved!"
-                onComplete(true)
-            }.onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not save merchant account")
-                onComplete(false)
-            }
+            val existing = supaMerchants.value.firstOrNull { it.userId == currentUserId }
+            val merchant = MerchantAccount(
+                id = currentUserId,
+                userId = currentUserId,
+                ownerUsername = currentProfile.username,
+                storeName = storeName.trim().take(80),
+                tagline = tagline.trim().take(160),
+                category = category.trim().take(60),
+                location = location.trim().take(80),
+                avatarKey = currentProfile.avatarKey,
+                avatarUrl = currentProfile.avatarUrl,
+                avatarData = currentProfile.avatarData,
+                isVerified = existing?.isVerified ?: false,
+                createdAt = existing?.createdAt ?: Timestamp.now()
+            )
+            supabaseBackend.upsertMerchant(merchant)
+                .onSuccess {
+                    supaMerchants.update { list -> listOf(merchant) + list.filterNot { it.userId == merchant.userId } }
+                    _statusNotice.value = "Merchant storefront saved!"
+                    onComplete(true)
+                }
+                .onFailure {
+                    _errorMessage.value = unwrapErrorMessage(it, "Could not save merchant account")
+                    onComplete(false)
+                }
         }
     }
 
@@ -2715,25 +2109,14 @@ class MomiViewModel(
             return
         }
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val adminEmail = initialEmail ?: "syali6511@gmail.com"
-                supabaseClient.patchRows(
-                    "merchants",
-                    "user_id=eq.${java.net.URLEncoder.encode(merchantUid, "UTF-8")}",
-                    mapOf("is_verified" to verified, "verified_by_email" to adminEmail)
-                ).onSuccess {
-                    supaMerchants.update { list -> list.map { if (it.userId == merchantUid) it.copy(isVerified = verified) else it } }
-                }.onFailure {
-                    _errorMessage.value = unwrapErrorMessage(it, "Could not update merchant verification")
-                }
-                launch { runCatching { marketplaceRepository.setMerchantVerified(merchantUid, verified, adminEmail) } }
-                return@launch
-            }
-            marketplaceRepository.setMerchantVerified(
-                targetMerchantUid = merchantUid,
-                verified = verified,
-                adminEmail = initialEmail ?: "syali6511@gmail.com"
-            ).onFailure {
+            val adminEmail = initialEmail ?: "syali6511@gmail.com"
+            supabaseClient.patchRows(
+                "merchants",
+                "user_id=eq.${java.net.URLEncoder.encode(merchantUid, "UTF-8")}",
+                mapOf("is_verified" to verified, "verified_by_email" to adminEmail)
+            ).onSuccess {
+                supaMerchants.update { list -> list.map { if (it.userId == merchantUid) it.copy(isVerified = verified) else it } }
+            }.onFailure {
                 _errorMessage.value = unwrapErrorMessage(it, "Could not update merchant verification")
             }
         }
@@ -2745,27 +2128,16 @@ class MomiViewModel(
             return
         }
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                supabaseClient.patchRows(
-                    "market_products",
-                    "id=eq.${java.net.URLEncoder.encode(productId, "UTF-8")}",
-                    mapOf("is_featured" to featured)
-                ).onSuccess {
-                    supaProducts.update { list -> list.map { if (it.id == productId) it.copy(isFeatured = featured) else it } }
-                    _statusNotice.value = if (featured) "Added to Editor's Picks!" else "Removed from Editor's Picks."
-                }.onFailure {
-                    _errorMessage.value = unwrapErrorMessage(it, "Could not update featured status")
-                }
-                launch { runCatching { marketplaceRepository.setProductFeatured(productId, featured) } }
-                return@launch
+            supabaseClient.patchRows(
+                "market_products",
+                "id=eq.${java.net.URLEncoder.encode(productId, "UTF-8")}",
+                mapOf("is_featured" to featured)
+            ).onSuccess {
+                supaProducts.update { list -> list.map { if (it.id == productId) it.copy(isFeatured = featured) else it } }
+                _statusNotice.value = if (featured) "Added to Editor's Picks!" else "Removed from Editor's Picks."
+            }.onFailure {
+                _errorMessage.value = unwrapErrorMessage(it, "Could not update featured status")
             }
-            marketplaceRepository.setProductFeatured(productId, featured)
-                .onSuccess {
-                    _statusNotice.value = if (featured) "Added to Editor's Picks!" else "Removed from Editor's Picks."
-                }
-                .onFailure {
-                    _errorMessage.value = unwrapErrorMessage(it, "Could not update featured status")
-                }
         }
     }
 
@@ -2787,196 +2159,124 @@ class MomiViewModel(
         val currentProfile = fallbackProfile()
         val cleanPaths = imagePaths.filter { it.isNotBlank() }.take(5)
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val productId = "prod_${UUID.randomUUID()}"
-                val uploaded = supabaseBackend.prepareAndUploadPostMedia(
-                    context = context.applicationContext,
-                    mediaId = productId,
-                    localImagePath = cleanPaths.firstOrNull(),
-                    localExtraImagePaths = cleanPaths.drop(1),
-                    mediaType = if (!localVideoPath.isNullOrBlank()) "VIDEO" else "IMAGE",
-                    localVideoPath = localVideoPath,
-                    localAudioPath = null
-                )
-                if (uploaded.failureReason != null ||
-                    (!localVideoPath.isNullOrBlank() && uploaded.videoUrl == null && uploaded.videoDataFallback == null)
-                ) {
-                    _errorMessage.value = uploaded.failureReason ?: "Could not prepare product video."
-                    onComplete(false)
-                    return@launch
-                }
-                val product = MarketProduct(
-                    id = productId,
-                    sellerUid = currentUserId,
-                    sellerUsername = currentProfile.username,
-                    storeName = merchant.storeName,
-                    sellerVerified = merchant.isVerified,
-                    title = title.trim().take(100),
-                    description = description.trim().take(1000),
-                    category = category,
-                    priceUsd = priceUsd,
-                    originalPriceUsd = originalPriceUsd,
-                    freeShipping = freeShipping,
-                    imageUrl = uploaded.imageUrl,
-                    imageData = uploaded.imageDataFallback,
-                    extraImageUrls = uploaded.extraImageUrls,
-                    extraImageDatas = uploaded.extraImageDatasFallback,
-                    videoUrl = uploaded.videoUrl,
-                    videoData = uploaded.videoDataFallback,
-                    videoChunksCount = uploaded.videoChunksFallback.size.toLong(),
-                    videoDurationMs = videoDurationMs,
-                    stockCount = stockCount.coerceAtLeast(1L),
-                    isFeatured = false,
-                    createdAt = Timestamp.now()
-                )
-                supabaseBackend.upsertProduct(product)
-                    .onSuccess {
-                        supaProducts.update { list -> listOf(product) + list.filterNot { it.id == product.id } }
-                        _statusNotice.value = "Listing published to Momi Marketplace!"
-                        onComplete(true)
-                    }
-                    .onFailure {
-                        _errorMessage.value = unwrapErrorMessage(it, "Could not publish product listing")
-                        onComplete(false)
-                    }
-                return@launch
-            }
-
-            val primaryImageData = withContext(Dispatchers.IO) {
-                MediaAssets.encodePrimaryPostImage(cleanPaths.firstOrNull(), hasExtraSlides = cleanPaths.size > 1)
-            }
-            val extraImageDatas = withContext(Dispatchers.IO) {
-                cleanPaths.drop(1).mapNotNull { MediaAssets.encodeCarouselImageToBase64(it) }
-            }
-            val videoPayload = if (!localVideoPath.isNullOrBlank()) {
-                MediaAssets.prepareVideoPayloadForFirestore(context.applicationContext, localVideoPath)
-            } else {
-                null
-            }
-            if (!localVideoPath.isNullOrBlank() && (videoPayload == null || !videoPayload.isReady)) {
-                _errorMessage.value = videoPayload?.failureReason ?: "Could not prepare product video."
+            val productId = "prod_${UUID.randomUUID()}"
+            val uploaded = supabaseBackend.prepareAndUploadPostMedia(
+                context = context.applicationContext,
+                mediaId = productId,
+                localImagePath = cleanPaths.firstOrNull(),
+                localExtraImagePaths = cleanPaths.drop(1),
+                mediaType = if (!localVideoPath.isNullOrBlank()) "VIDEO" else "IMAGE",
+                localVideoPath = localVideoPath,
+                localAudioPath = null
+            )
+            if (uploaded.failureReason != null ||
+                (!localVideoPath.isNullOrBlank() && uploaded.videoUrl == null && uploaded.videoDataFallback == null)
+            ) {
+                _errorMessage.value = uploaded.failureReason ?: "Could not prepare product video."
                 onComplete(false)
                 return@launch
             }
-            marketplaceRepository.publishProduct(
-                profile = currentProfile,
-                merchant = merchant,
-                title = title,
-                description = description,
+            val product = MarketProduct(
+                id = productId,
+                sellerUid = currentUserId,
+                sellerUsername = currentProfile.username,
+                storeName = merchant.storeName,
+                sellerVerified = merchant.isVerified,
+                title = title.trim().take(100),
+                description = description.trim().take(1000),
                 category = category,
                 priceUsd = priceUsd,
                 originalPriceUsd = originalPriceUsd,
                 freeShipping = freeShipping,
-                imageData = primaryImageData,
-                extraImageDatas = extraImageDatas,
-                videoData = videoPayload?.inlineVideoData,
-                videoChunks = videoPayload?.videoChunks.orEmpty(),
+                imageUrl = uploaded.imageUrl,
+                imageData = uploaded.imageDataFallback,
+                extraImageUrls = uploaded.extraImageUrls,
+                extraImageDatas = uploaded.extraImageDatasFallback,
+                videoUrl = uploaded.videoUrl,
+                videoData = uploaded.videoDataFallback,
+                videoChunksCount = uploaded.videoChunksFallback.size.toLong(),
                 videoDurationMs = videoDurationMs,
-                stockCount = stockCount
-            ).onSuccess {
-                _statusNotice.value = "Listing published to Momi Marketplace!"
-                onComplete(true)
-            }.onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not publish product listing")
-                onComplete(false)
-            }
+                stockCount = stockCount.coerceAtLeast(1L),
+                isFeatured = false,
+                createdAt = Timestamp.now()
+            )
+            supabaseBackend.upsertProduct(product)
+                .onSuccess {
+                    supaProducts.update { list -> listOf(product) + list.filterNot { it.id == product.id } }
+                    _statusNotice.value = "Listing published to Momi Marketplace!"
+                    onComplete(true)
+                }
+                .onFailure {
+                    _errorMessage.value = unwrapErrorMessage(it, "Could not publish product listing")
+                    onComplete(false)
+                }
         }
     }
 
     fun deleteMarketProduct(productId: String) {
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                supabaseBackend.deleteProduct(productId)
-                    .onSuccess { supaProducts.update { list -> list.filterNot { it.id == productId } } }
-                    .onFailure { _errorMessage.value = unwrapErrorMessage(it, "Could not delete listing") }
-                launch { runCatching { marketplaceRepository.deleteProduct(productId) } }
-                return@launch
-            }
-            marketplaceRepository.deleteProduct(productId).onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not delete listing")
-            }
+            supabaseBackend.deleteProduct(productId)
+                .onSuccess { supaProducts.update { list -> list.filterNot { it.id == productId } } }
+                .onFailure { _errorMessage.value = unwrapErrorMessage(it, "Could not delete listing") }
         }
     }
 
     fun placeMarketOrder(product: MarketProduct, shippingAddress: String, onComplete: (Boolean) -> Unit) {
         val currentProfile = fallbackProfile()
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val order = MarketOrder(
-                    id = "ord_${UUID.randomUUID()}",
-                    productId = product.id,
-                    productTitle = product.title,
-                    productImageKey = product.imageKey,
-                    productImageUrl = product.imageUrl,
-                    productImageData = product.imageData,
-                    priceUsd = product.priceUsd,
-                    buyerUid = currentUserId,
-                    buyerUsername = currentProfile.username,
-                    sellerUid = product.sellerUid,
-                    sellerStoreName = product.storeName,
-                    shippingAddress = shippingAddress.trim().take(240),
-                    status = "PLACED",
-                    createdAt = Timestamp.now()
-                )
-                supabaseBackend.upsertOrder(order)
-                    .onSuccess {
-                        supaOrders.update { list -> listOf(order) + list }
-                        supabaseBackend.sendNotification(
-                            NotificationItem(
-                                id = "ord_${order.id}",
-                                userId = product.sellerUid,
-                                actorUid = currentUserId,
-                                actorUsername = currentProfile.username,
-                                actorAvatarKey = currentProfile.avatarKey,
-                                message = "ordered ${product.title}",
-                                timeLabel = "Just now",
-                                section = "Today",
-                                previewImageKey = product.imageKey,
-                                isUnread = true,
-                                createdAt = Timestamp.now()
-                            )
+            val order = MarketOrder(
+                id = "ord_${UUID.randomUUID()}",
+                productId = product.id,
+                productTitle = product.title,
+                productImageKey = product.imageKey,
+                productImageUrl = product.imageUrl,
+                productImageData = product.imageData,
+                priceUsd = product.priceUsd,
+                buyerUid = currentUserId,
+                buyerUsername = currentProfile.username,
+                sellerUid = product.sellerUid,
+                sellerStoreName = product.storeName,
+                shippingAddress = shippingAddress.trim().take(240),
+                status = "PLACED",
+                createdAt = Timestamp.now()
+            )
+            supabaseBackend.upsertOrder(order)
+                .onSuccess {
+                    supaOrders.update { list -> listOf(order) + list }
+                    supabaseBackend.sendNotification(
+                        NotificationItem(
+                            id = "ord_${order.id}",
+                            userId = product.sellerUid,
+                            actorUid = currentUserId,
+                            actorUsername = currentProfile.username,
+                            actorAvatarKey = currentProfile.avatarKey,
+                            message = "ordered ${product.title}",
+                            timeLabel = "Just now",
+                            section = "Today",
+                            previewImageKey = product.imageKey,
+                            isUnread = true,
+                            createdAt = Timestamp.now()
                         )
-                        _statusNotice.value = "Order placed with ${product.storeName}!"
-                        onComplete(true)
-                    }
-                    .onFailure {
-                        _errorMessage.value = unwrapErrorMessage(it, "Could not place order")
-                        onComplete(false)
-                    }
-                launch { runCatching { marketplaceRepository.placeOrder(currentProfile, product, shippingAddress) } }
-                return@launch
-            }
-
-            marketplaceRepository.placeOrder(
-                buyerProfile = currentProfile,
-                product = product,
-                shippingAddress = shippingAddress
-            ).onSuccess {
-                _statusNotice.value = "Order placed with ${product.storeName}!"
-                onComplete(true)
-            }.onFailure {
-                _errorMessage.value = unwrapErrorMessage(it, "Could not place order")
-                onComplete(false)
-            }
+                    )
+                    _statusNotice.value = "Order placed with ${product.storeName}!"
+                    onComplete(true)
+                }
+                .onFailure {
+                    _errorMessage.value = unwrapErrorMessage(it, "Could not place order")
+                    onComplete(false)
+                }
         }
     }
 
     fun updateMarketOrderStatus(orderId: String, nextStatus: String) {
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                supabaseClient.patchRows(
-                    "market_orders",
-                    "id=eq.${java.net.URLEncoder.encode(orderId, "UTF-8")}",
-                    mapOf("status" to nextStatus)
-                ).onSuccess {
-                    supaOrders.update { list -> list.map { if (it.id == orderId) it.copy(status = nextStatus) else it } }
-                }.onFailure {
-                    _errorMessage.value = unwrapErrorMessage(it, "Could not update order status")
-                }
-                launch { runCatching { marketplaceRepository.updateOrderStatus(orderId, nextStatus) } }
-                return@launch
-            }
-            marketplaceRepository.updateOrderStatus(orderId, nextStatus).onFailure {
+            supabaseClient.patchRows(
+                "market_orders",
+                "id=eq.${java.net.URLEncoder.encode(orderId, "UTF-8")}",
+                mapOf("status" to nextStatus)
+            ).onSuccess {
+                supaOrders.update { list -> list.map { if (it.id == orderId) it.copy(status = nextStatus) else it } }
+            }.onFailure {
                 _errorMessage.value = unwrapErrorMessage(it, "Could not update order status")
             }
         }
@@ -2984,17 +2284,12 @@ class MomiViewModel(
 
     fun clearThreadUnread(thread: MessageThread) {
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                supabaseClient.patchRows(
-                    "threads",
-                    "id=eq.${java.net.URLEncoder.encode(thread.id, "UTF-8")}",
-                    mapOf("unread_count" to 0L)
-                )
-                supaThreads.update { list -> list.map { if (it.id == thread.id) it.copy(unreadCount = 0L) else it } }
-                launch { runCatching { repository.clearThreadUnread(thread) } }
-                return@launch
-            }
-            repository.clearThreadUnread(thread)
+            supabaseClient.patchRows(
+                "threads",
+                "id=eq.${java.net.URLEncoder.encode(thread.id, "UTF-8")}",
+                mapOf("unread_count" to 0L)
+            )
+            supaThreads.update { list -> list.map { if (it.id == thread.id) it.copy(unreadCount = 0L) else it } }
         }
     }
 
@@ -3008,91 +2303,59 @@ class MomiViewModel(
         val nextViews = (post?.viewsCount ?: 0L) + 1L
         pendingMinViews[postId] = nextViews to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                supaPosts.update { list -> list.map { if (it.id == postId) it.copy(viewsCount = maxOf(it.viewsCount, nextViews)) else it } }
-                supabaseBackend.updatePostCounts(postId, viewsCount = nextViews)
-                return@launch
-            }
-            if (postId.startsWith("showcase_") || System.currentTimeMillis() < quotaCooldownUntilMs) return@launch
-            repository.incrementPostView(postId).onFailure { error ->
-                if (isQuotaExceeded(error)) {
-                    quotaCooldownUntilMs = System.currentTimeMillis() + QUOTA_RETRY_COOLDOWN_MS
-                }
-                Log.w(TAG, "Failed to record post view for $postId", error)
-            }
+            supaPosts.update { list -> list.map { if (it.id == postId) it.copy(viewsCount = maxOf(it.viewsCount, nextViews)) else it } }
+            supabaseBackend.updatePostCounts(postId, viewsCount = nextViews)
         }
     }
 
     fun startLiveStream(title: String, category: String = "Live", onStarted: (Result<String>) -> Unit) {
         val currentProfile = fallbackProfile()
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val now = Timestamp.now()
-                val streamId = currentUserId
-                val stream = LiveStream(
-                    id = streamId,
-                    userId = streamId,
-                    username = currentProfile.username,
-                    displayName = currentProfile.displayName,
-                    avatarKey = currentProfile.avatarKey,
-                    avatarUrl = currentProfile.avatarUrl,
-                    authorVerified = currentProfile.isVerified,
-                    title = title.trim().ifBlank { "@${currentProfile.username} is live" },
-                    category = category,
-                    viewerCount = 0L,
-                    likesCount = 0L,
-                    giftsCredits = 0L,
-                    isLive = true,
-                    createdAt = now,
-                    updatedAt = now
-                )
-                val initialFrame = LiveFrame(
-                    id = streamId,
-                    userId = streamId,
-                    seq = 1L,
-                    frameData = "",
-                    cameraEnabled = true,
-                    micMuted = false,
-                    updatedAt = now
-                )
-                val res = supabaseBackend.startLiveStream(stream, initialFrame).map { streamId }
-                res.onSuccess {
-                    supaLiveStreams.update { list -> listOf(stream) + list.filterNot { it.id == streamId } }
-                    supaLiveFrameByStream.update { map -> map + (streamId to initialFrame) }
-                    supaLiveCommentsByStream.update { map -> map + (streamId to emptyList()) }
-                }.onFailure { error ->
-                    _errorMessage.value = unwrapErrorMessage(error, "Could not start live broadcast")
-                }
-                launch { runCatching { repository.startLiveStream(currentProfile, title, category) } }
-                onStarted(res)
-                return@launch
-            }
-
-            val result = repository.startLiveStream(
-                profile = currentProfile,
-                title = title,
-                category = category
+            val now = Timestamp.now()
+            val streamId = currentUserId
+            val stream = LiveStream(
+                id = streamId,
+                userId = streamId,
+                username = currentProfile.username,
+                displayName = currentProfile.displayName,
+                avatarKey = currentProfile.avatarKey,
+                avatarUrl = currentProfile.avatarUrl,
+                authorVerified = currentProfile.isVerified,
+                title = title.trim().ifBlank { "@${currentProfile.username} is live" },
+                category = category,
+                viewerCount = 0L,
+                likesCount = 0L,
+                giftsCredits = 0L,
+                isLive = true,
+                createdAt = now,
+                updatedAt = now
             )
-            result.onFailure { error ->
+            val initialFrame = LiveFrame(
+                id = streamId,
+                userId = streamId,
+                seq = 1L,
+                frameData = "",
+                cameraEnabled = true,
+                micMuted = false,
+                updatedAt = now
+            )
+            val res = supabaseBackend.startLiveStream(stream, initialFrame).map { streamId }
+            res.onSuccess {
+                supaLiveStreams.update { list -> listOf(stream) + list.filterNot { it.id == streamId } }
+                supaLiveFrameByStream.update { map -> map + (streamId to initialFrame) }
+                supaLiveCommentsByStream.update { map -> map + (streamId to emptyList()) }
+            }.onFailure { error ->
                 _errorMessage.value = unwrapErrorMessage(error, "Could not start live broadcast")
             }
-            onStarted(result)
+            onStarted(res)
         }
     }
 
     fun endLiveStream(streamId: String = currentUserId, onEnded: () -> Unit = {}) {
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                supabaseBackend.endLiveStream(streamId)
-                supaLiveStreams.update { list -> list.filterNot { it.id == streamId } }
-                supaLiveFrameByStream.update { map -> map - streamId }
-                launch { runCatching { repository.endLiveStream(streamId) } }
-                onEnded()
-                return@launch
-            }
-            repository.endLiveStream(streamId).onFailure { error ->
-                Log.w(TAG, "Error ending live stream $streamId", error)
-            }
+            supabaseBackend.endLiveStream(streamId)
+            supaLiveStreams.update { list -> list.filterNot { it.id == streamId } }
+            supaLiveFrameByStream.update { map -> map - streamId }
             onEnded()
         }
     }
@@ -3105,34 +2368,18 @@ class MomiViewModel(
         micMuted: Boolean
     ) {
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val frame = LiveFrame(
-                    id = streamId,
-                    userId = streamId,
-                    seq = seq,
-                    frameData = frameData,
-                    cameraEnabled = cameraEnabled,
-                    micMuted = micMuted,
-                    updatedAt = Timestamp.now()
-                )
-                supaLiveFrameByStream.update { map -> map + (streamId to frame) }
-                supabaseBackend.publishLiveFrame(frame).onFailure { err ->
-                    Log.w(TAG, "Supabase live frame publish skipped", err)
-                }
-                return@launch
-            }
-            if (System.currentTimeMillis() < quotaCooldownUntilMs) return@launch
-            repository.publishLiveFrame(
-                streamId = streamId,
+            val frame = LiveFrame(
+                id = streamId,
+                userId = streamId,
                 seq = seq,
                 frameData = frameData,
                 cameraEnabled = cameraEnabled,
-                micMuted = micMuted
-            ).onFailure { error ->
-                if (isQuotaExceeded(error)) {
-                    quotaCooldownUntilMs = System.currentTimeMillis() + QUOTA_RETRY_COOLDOWN_MS
-                }
-                Log.w(TAG, "Live frame publish skipped", error)
+                micMuted = micMuted,
+                updatedAt = Timestamp.now()
+            )
+            supaLiveFrameByStream.update { map -> map + (streamId to frame) }
+            supabaseBackend.publishLiveFrame(frame).onFailure { err ->
+                Log.w(TAG, "Supabase live frame publish skipped", err)
             }
         }
     }
@@ -3143,46 +2390,30 @@ class MomiViewModel(
             return
         }
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val current = supaLiveStreams.value.firstOrNull { it.id == streamId }
-                val nextCount = (current?.viewerCount ?: 0L) + 1L
-                supabaseBackend.updateLiveCounters(streamId, viewerCount = nextCount)
-                supaLiveStreams.update { list -> list.map { if (it.id == streamId) it.copy(viewerCount = nextCount) else it } }
-                onJoined(true)
-                launch { runCatching { repository.joinLiveStream(streamId) } }
-                return@launch
-            }
-            val joined = repository.joinLiveStream(streamId).getOrDefault(false)
-            onJoined(joined)
+            val current = supaLiveStreams.value.firstOrNull { it.id == streamId }
+            val nextCount = (current?.viewerCount ?: 0L) + 1L
+            supabaseBackend.updateLiveCounters(streamId, viewerCount = nextCount)
+            supaLiveStreams.update { list -> list.map { if (it.id == streamId) it.copy(viewerCount = nextCount) else it } }
+            onJoined(true)
         }
     }
 
     fun leaveLiveStream(streamId: String) {
         if (streamId.isBlank() || streamId == currentUserId) return
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val current = supaLiveStreams.value.firstOrNull { it.id == streamId }
-                val nextCount = ((current?.viewerCount ?: 1L) - 1L).coerceAtLeast(0L)
-                supabaseBackend.updateLiveCounters(streamId, viewerCount = nextCount)
-                supaLiveStreams.update { list -> list.map { if (it.id == streamId) it.copy(viewerCount = nextCount) else it } }
-                launch { runCatching { repository.leaveLiveStream(streamId) } }
-                return@launch
-            }
-            repository.leaveLiveStream(streamId)
+            val current = supaLiveStreams.value.firstOrNull { it.id == streamId }
+            val nextCount = ((current?.viewerCount ?: 1L) - 1L).coerceAtLeast(0L)
+            supabaseBackend.updateLiveCounters(streamId, viewerCount = nextCount)
+            supaLiveStreams.update { list -> list.map { if (it.id == streamId) it.copy(viewerCount = nextCount) else it } }
         }
     }
 
     fun sendLiveHeart(streamId: String) {
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val current = supaLiveStreams.value.firstOrNull { it.id == streamId }
-                val nextLikes = (current?.likesCount ?: 0L) + 1L
-                supaLiveStreams.update { list -> list.map { if (it.id == streamId) it.copy(likesCount = nextLikes) else it } }
-                supabaseBackend.updateLiveCounters(streamId, likesCount = nextLikes)
-                launch { runCatching { repository.sendLiveHeart(streamId) } }
-                return@launch
-            }
-            repository.sendLiveHeart(streamId)
+            val current = supaLiveStreams.value.firstOrNull { it.id == streamId }
+            val nextLikes = (current?.likesCount ?: 0L) + 1L
+            supaLiveStreams.update { list -> list.map { if (it.id == streamId) it.copy(likesCount = nextLikes) else it } }
+            supabaseBackend.updateLiveCounters(streamId, likesCount = nextLikes)
         }
     }
 
@@ -3191,24 +2422,17 @@ class MomiViewModel(
         if (trimmed.isEmpty()) return
         val currentProfile = fallbackProfile()
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val cmt = LiveComment(
-                    id = "lcmt_${UUID.randomUUID()}",
-                    userId = currentUserId,
-                    username = currentProfile.username,
-                    avatarKey = currentProfile.avatarKey,
-                    text = trimmed.take(200),
-                    createdAt = Timestamp.now()
-                )
-                supaLiveCommentsByStream.update { map -> map + (streamId to (map[streamId].orEmpty() + cmt)) }
-                supabaseBackend.sendLiveComment(streamId, cmt).onFailure { err ->
-                    _errorMessage.value = unwrapErrorMessage(err, "Could not send live comment")
-                }
-                launch { runCatching { repository.sendLiveComment(streamId, currentProfile, trimmed) } }
-                return@launch
-            }
-            repository.sendLiveComment(streamId, currentProfile, trimmed).onFailure { error ->
-                _errorMessage.value = unwrapErrorMessage(error, "Could not send live comment")
+            val cmt = LiveComment(
+                id = "lcmt_${UUID.randomUUID()}",
+                userId = currentUserId,
+                username = currentProfile.username,
+                avatarKey = currentProfile.avatarKey,
+                text = trimmed.take(200),
+                createdAt = Timestamp.now()
+            )
+            supaLiveCommentsByStream.update { map -> map + (streamId to (map[streamId].orEmpty() + cmt)) }
+            supabaseBackend.sendLiveComment(streamId, cmt).onFailure { err ->
+                _errorMessage.value = unwrapErrorMessage(err, "Could not send live comment")
             }
         }
     }
@@ -3222,61 +2446,43 @@ class MomiViewModel(
         val currentProfile = fallbackProfile()
         viewModelScope.launch {
             _isProcessingWalletAction.value = true
-            if (supabaseClient.isConfigured()) {
-                val currentW = supaWallet.value ?: UserWallet(id = currentUserId, userId = currentUserId)
-                val nextPurchased = currentW.totalPurchased + pkg.credits
-                val txId = "tx_${UUID.randomUUID()}"
-                val updatedW = currentW.copy(
-                    balance = currentW.balance + pkg.credits,
-                    totalPurchased = nextPurchased,
-                    accountTier = MomiCreditCatalog.tierForTotalPurchased(nextPurchased, currentW.unlockedPerks),
-                    lastTxId = txId,
-                    updatedAt = Timestamp.now()
-                )
-                val tx = CreditTransaction(
-                    id = txId,
-                    txId = txId,
-                    type = CreditTransaction.TYPE_TOP_UP,
-                    paymentMethod = paymentMethod,
-                    paymentRef = paymentRef,
-                    senderUid = currentUserId,
-                    senderUsername = currentProfile.username,
-                    recipientUid = currentUserId,
-                    recipientUsername = currentProfile.username,
-                    creditsAmount = pkg.credits,
-                    priceUsd = pkg.fallbackPriceUsd,
-                    status = "COMPLETED",
-                    recipientClaimed = true,
-                    createdAt = Timestamp.now()
-                )
-                supabaseBackend.upsertWalletAndTx(updatedW, tx)
-                    .onSuccess {
-                        supaWallet.value = updatedW
-                        supaCreditTransactions.update { listOf(tx) + it }
-                        _statusNotice.value = "Added +${pkg.credits} Momi credits to your account!"
-                        onComplete(true)
-                    }
-                    .onFailure { err ->
-                        _errorMessage.value = unwrapErrorMessage(err, "Could not add credits to wallet")
-                        onComplete(false)
-                    }
-                _isProcessingWalletAction.value = false
-                launch { runCatching { walletRepository.recordCreditTopUp(currentProfile, pkg, paymentMethod, paymentRef) } }
-                return@launch
-            }
-
-            walletRepository.recordCreditTopUp(
-                profile = currentProfile,
-                pkg = pkg,
+            val currentW = supaWallet.value ?: UserWallet(id = currentUserId, userId = currentUserId)
+            val nextPurchased = currentW.totalPurchased + pkg.credits
+            val txId = "tx_${UUID.randomUUID()}"
+            val updatedW = currentW.copy(
+                balance = currentW.balance + pkg.credits,
+                totalPurchased = nextPurchased,
+                accountTier = MomiCreditCatalog.tierForTotalPurchased(nextPurchased, currentW.unlockedPerks),
+                lastTxId = txId,
+                updatedAt = Timestamp.now()
+            )
+            val tx = CreditTransaction(
+                id = txId,
+                txId = txId,
+                type = CreditTransaction.TYPE_TOP_UP,
                 paymentMethod = paymentMethod,
-                paymentRef = paymentRef
-            ).onSuccess {
-                _statusNotice.value = "Added +${pkg.credits} Momi credits to your account!"
-                onComplete(true)
-            }.onFailure { error ->
-                _errorMessage.value = unwrapErrorMessage(error, "Could not add credits to wallet")
-                onComplete(false)
-            }
+                paymentRef = paymentRef,
+                senderUid = currentUserId,
+                senderUsername = currentProfile.username,
+                recipientUid = currentUserId,
+                recipientUsername = currentProfile.username,
+                creditsAmount = pkg.credits,
+                priceUsd = pkg.fallbackPriceUsd,
+                status = "COMPLETED",
+                recipientClaimed = true,
+                createdAt = Timestamp.now()
+            )
+            supabaseBackend.upsertWalletAndTx(updatedW, tx)
+                .onSuccess {
+                    supaWallet.value = updatedW
+                    supaCreditTransactions.update { listOf(tx) + it }
+                    _statusNotice.value = "Added +${pkg.credits} Momi credits to your account!"
+                    onComplete(true)
+                }
+                .onFailure { err ->
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not add credits to wallet")
+                    onComplete(false)
+                }
             _isProcessingWalletAction.value = false
         }
     }
@@ -3304,88 +2510,68 @@ class MomiViewModel(
         val currentProfile = fallbackProfile()
         viewModelScope.launch {
             _isProcessingWalletAction.value = true
-            if (supabaseClient.isConfigured()) {
-                val currentW = supaWallet.value ?: UserWallet(id = currentUserId, userId = currentUserId)
-                if (currentW.balance < gift.creditsCost) {
-                    _isProcessingWalletAction.value = false
-                    _errorMessage.value = "Not enough credits (need ${gift.creditsCost} cr). Top up in Wallet."
-                    onComplete(false)
-                    return@launch
-                }
-                val txId = "gift_${UUID.randomUUID()}"
-                val updatedSenderW = currentW.copy(
-                    balance = currentW.balance - gift.creditsCost,
-                    totalSpent = currentW.totalSpent + gift.creditsCost,
-                    lastTxId = txId,
-                    updatedAt = Timestamp.now()
-                )
-                val tx = CreditTransaction(
-                    id = txId,
-                    txId = txId,
-                    type = CreditTransaction.TYPE_GIFT,
-                    paymentMethod = CreditTransaction.METHOD_WALLET_CREDITS,
-                    paymentRef = streamId ?: "",
-                    senderUid = currentUserId,
-                    senderUsername = currentProfile.username,
-                    recipientUid = recipientUid,
-                    recipientUsername = recipientUsername,
-                    creditsAmount = gift.creditsCost,
-                    giftKey = gift.key,
-                    giftName = "${gift.emojiLabel} ${gift.name}",
-                    streamId = streamId,
-                    status = "COMPLETED",
-                    recipientClaimed = true,
-                    createdAt = Timestamp.now()
-                )
-                supabaseBackend.upsertWalletAndTx(updatedSenderW, tx)
-                    .onSuccess {
-                        supaWallet.value = updatedSenderW
-                        supaCreditTransactions.update { listOf(tx) + it }
-                        if (!streamId.isNullOrBlank()) {
-                            val stream = supaLiveStreams.value.firstOrNull { it.id == streamId }
-                            val nextCredits = (stream?.giftsCredits ?: 0L) + gift.creditsCost
-                            supabaseBackend.updateLiveCounters(streamId, giftsCredits = nextCredits)
-                            supaLiveStreams.update { list ->
-                                list.map { if (it.id == streamId) it.copy(giftsCredits = nextCredits) else it }
-                            }
-                            val giftCmt = LiveComment(
-                                id = "lcmt_gift_${UUID.randomUUID()}",
-                                userId = currentUserId,
-                                username = currentProfile.username,
-                                avatarKey = currentProfile.avatarKey,
-                                text = "[GIFT] sent ${gift.emojiLabel} ${gift.name} (+${gift.creditsCost} cr)",
-                                createdAt = Timestamp.now()
-                            )
-                            supaLiveCommentsByStream.update { map -> map + (streamId to (map[streamId].orEmpty() + giftCmt)) }
-                            supabaseBackend.sendLiveComment(streamId, giftCmt)
-                        }
-                        _statusNotice.value =
-                            "Sent ${gift.emojiLabel} ${gift.name} (-${gift.creditsCost} cr) to @$recipientUsername!"
-                        onComplete(true)
-                    }
-                    .onFailure { err ->
-                        _errorMessage.value = unwrapErrorMessage(err, "Could not send gift")
-                        onComplete(false)
-                    }
+            val currentW = supaWallet.value ?: UserWallet(id = currentUserId, userId = currentUserId)
+            if (currentW.balance < gift.creditsCost) {
                 _isProcessingWalletAction.value = false
-                launch { runCatching { walletRepository.sendGift(currentProfile, recipientUid, recipientUsername, gift, streamId) } }
+                _errorMessage.value = "Not enough credits (need ${gift.creditsCost} cr). Top up in Wallet."
+                onComplete(false)
                 return@launch
             }
-
-            walletRepository.sendGift(
-                senderProfile = currentProfile,
+            val txId = "gift_${UUID.randomUUID()}"
+            val updatedSenderW = currentW.copy(
+                balance = currentW.balance - gift.creditsCost,
+                totalSpent = currentW.totalSpent + gift.creditsCost,
+                lastTxId = txId,
+                updatedAt = Timestamp.now()
+            )
+            val tx = CreditTransaction(
+                id = txId,
+                txId = txId,
+                type = CreditTransaction.TYPE_GIFT,
+                paymentMethod = CreditTransaction.METHOD_WALLET_CREDITS,
+                paymentRef = streamId ?: "",
+                senderUid = currentUserId,
+                senderUsername = currentProfile.username,
                 recipientUid = recipientUid,
                 recipientUsername = recipientUsername,
-                gift = gift,
-                streamId = streamId
-            ).onSuccess {
-                _statusNotice.value =
-                    "Sent ${gift.emojiLabel} ${gift.name} (-${gift.creditsCost} cr) to @$recipientUsername!"
-                onComplete(true)
-            }.onFailure { error ->
-                _errorMessage.value = unwrapErrorMessage(error, "Could not send gift")
-                onComplete(false)
-            }
+                creditsAmount = gift.creditsCost,
+                giftKey = gift.key,
+                giftName = "${gift.emojiLabel} ${gift.name}",
+                streamId = streamId,
+                status = "COMPLETED",
+                recipientClaimed = true,
+                createdAt = Timestamp.now()
+            )
+            supabaseBackend.upsertWalletAndTx(updatedSenderW, tx)
+                .onSuccess {
+                    supaWallet.value = updatedSenderW
+                    supaCreditTransactions.update { listOf(tx) + it }
+                    if (!streamId.isNullOrBlank()) {
+                        val stream = supaLiveStreams.value.firstOrNull { it.id == streamId }
+                        val nextCredits = (stream?.giftsCredits ?: 0L) + gift.creditsCost
+                        supabaseBackend.updateLiveCounters(streamId, giftsCredits = nextCredits)
+                        supaLiveStreams.update { list ->
+                            list.map { if (it.id == streamId) it.copy(giftsCredits = nextCredits) else it }
+                        }
+                        val giftCmt = LiveComment(
+                            id = "lcmt_gift_${UUID.randomUUID()}",
+                            userId = currentUserId,
+                            username = currentProfile.username,
+                            avatarKey = currentProfile.avatarKey,
+                            text = "[GIFT] sent ${gift.emojiLabel} ${gift.name} (+${gift.creditsCost} cr)",
+                            createdAt = Timestamp.now()
+                        )
+                        supaLiveCommentsByStream.update { map -> map + (streamId to (map[streamId].orEmpty() + giftCmt)) }
+                        supabaseBackend.sendLiveComment(streamId, giftCmt)
+                    }
+                    _statusNotice.value =
+                        "Sent ${gift.emojiLabel} ${gift.name} (-${gift.creditsCost} cr) to @$recipientUsername!"
+                    onComplete(true)
+                }
+                .onFailure { err ->
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not send gift")
+                    onComplete(false)
+                }
             _isProcessingWalletAction.value = false
         }
     }
@@ -3397,63 +2583,48 @@ class MomiViewModel(
         val currentProfile = fallbackProfile()
         viewModelScope.launch {
             _isProcessingWalletAction.value = true
-            if (supabaseClient.isConfigured()) {
-                val currentW = supaWallet.value ?: UserWallet(id = currentUserId, userId = currentUserId)
-                if (currentW.balance < perk.creditsCost) {
-                    _isProcessingWalletAction.value = false
-                    _errorMessage.value = "Need ${perk.creditsCost} credits to unlock ${perk.title}."
-                    onComplete(false)
-                    return@launch
-                }
-                val nextPerks = (currentW.unlockedPerks + perk.key).distinct()
-                val txId = "perk_${UUID.randomUUID()}"
-                val updatedW = currentW.copy(
-                    balance = currentW.balance - perk.creditsCost,
-                    totalSpent = currentW.totalSpent + perk.creditsCost,
-                    accountTier = MomiCreditCatalog.tierForTotalPurchased(currentW.totalPurchased, nextPerks),
-                    verificationTier = MomiCreditCatalog.verificationTierForPerks(currentW.verificationTier, nextPerks),
-                    unlockedPerks = nextPerks,
-                    lastTxId = txId,
-                    updatedAt = Timestamp.now()
-                )
-                val tx = CreditTransaction(
-                    id = txId,
-                    txId = txId,
-                    type = CreditTransaction.TYPE_PERK_UNLOCK,
-                    paymentMethod = CreditTransaction.METHOD_WALLET_CREDITS,
-                    senderUid = currentUserId,
-                    senderUsername = currentProfile.username,
-                    recipientUid = currentUserId,
-                    recipientUsername = currentProfile.username,
-                    creditsAmount = perk.creditsCost,
-                    perkKey = perk.key,
-                    status = "COMPLETED",
-                    recipientClaimed = true,
-                    createdAt = Timestamp.now()
-                )
-                supabaseBackend.upsertWalletAndTx(updatedW, tx)
-                    .onSuccess {
-                        supaWallet.value = updatedW
-                        supaCreditTransactions.update { listOf(tx) + it }
-                        _statusNotice.value = "Unlocked ${perk.title}!"
-                        onComplete(true)
-                    }
-                    .onFailure { err ->
-                        _errorMessage.value = unwrapErrorMessage(err, "Could not unlock perk")
-                        onComplete(false)
-                    }
+            val currentW = supaWallet.value ?: UserWallet(id = currentUserId, userId = currentUserId)
+            if (currentW.balance < perk.creditsCost) {
                 _isProcessingWalletAction.value = false
-                launch { runCatching { walletRepository.unlockPerk(currentProfile, perk) } }
+                _errorMessage.value = "Need ${perk.creditsCost} credits to unlock ${perk.title}."
+                onComplete(false)
                 return@launch
             }
-
-            walletRepository.unlockPerk(currentProfile, perk)
+            val nextPerks = (currentW.unlockedPerks + perk.key).distinct()
+            val txId = "perk_${UUID.randomUUID()}"
+            val updatedW = currentW.copy(
+                balance = currentW.balance - perk.creditsCost,
+                totalSpent = currentW.totalSpent + perk.creditsCost,
+                accountTier = MomiCreditCatalog.tierForTotalPurchased(currentW.totalPurchased, nextPerks),
+                verificationTier = MomiCreditCatalog.verificationTierForPerks(currentW.verificationTier, nextPerks),
+                unlockedPerks = nextPerks,
+                lastTxId = txId,
+                updatedAt = Timestamp.now()
+            )
+            val tx = CreditTransaction(
+                id = txId,
+                txId = txId,
+                type = CreditTransaction.TYPE_PERK_UNLOCK,
+                paymentMethod = CreditTransaction.METHOD_WALLET_CREDITS,
+                senderUid = currentUserId,
+                senderUsername = currentProfile.username,
+                recipientUid = currentUserId,
+                recipientUsername = currentProfile.username,
+                creditsAmount = perk.creditsCost,
+                perkKey = perk.key,
+                status = "COMPLETED",
+                recipientClaimed = true,
+                createdAt = Timestamp.now()
+            )
+            supabaseBackend.upsertWalletAndTx(updatedW, tx)
                 .onSuccess {
+                    supaWallet.value = updatedW
+                    supaCreditTransactions.update { listOf(tx) + it }
                     _statusNotice.value = "Unlocked ${perk.title}!"
                     onComplete(true)
                 }
-                .onFailure { error ->
-                    _errorMessage.value = unwrapErrorMessage(error, "Could not unlock perk")
+                .onFailure { err ->
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not unlock perk")
                     onComplete(false)
                 }
             _isProcessingWalletAction.value = false
@@ -3475,35 +2646,19 @@ class MomiViewModel(
         }
         viewModelScope.launch {
             _isProcessingWalletAction.value = true
-            if (supabaseClient.isConfigured()) {
-                val adminEmail = initialEmail ?: "syali6511@gmail.com"
-                val finalCfg = config.copy(updatedByEmail = adminEmail, updatedAt = Timestamp.now())
-                supabaseBackend.saveAppConfig(finalCfg)
-                    .onSuccess {
-                        supaMonetizationConfig.value = finalCfg
-                        cachedMonetizationConfig.value = finalCfg
-                        _statusNotice.value = "Updated AdMob, Start.io & Monetag config for Android & Web!"
-                        onComplete(true)
-                    }
-                    .onFailure { err ->
-                        _errorMessage.value = unwrapErrorMessage(err, "Could not save monetizer settings")
-                        onComplete(false)
-                    }
-                _isProcessingWalletAction.value = false
-                launch { runCatching { repository.saveAdMonetizationConfig(config, adminEmail) } }
-                return@launch
-            }
-
-            repository.saveAdMonetizationConfig(
-                config = config,
-                adminEmail = initialEmail ?: "syali6511@gmail.com"
-            ).onSuccess {
-                _statusNotice.value = "Updated AdMob, Start.io & Monetag config for Android & Web!"
-                onComplete(true)
-            }.onFailure { error ->
-                _errorMessage.value = unwrapErrorMessage(error, "Could not save monetizer settings")
-                onComplete(false)
-            }
+            val adminEmail = initialEmail ?: "syali6511@gmail.com"
+            val finalCfg = config.copy(updatedByEmail = adminEmail, updatedAt = Timestamp.now())
+            supabaseBackend.saveAppConfig(finalCfg)
+                .onSuccess {
+                    supaMonetizationConfig.value = finalCfg
+                    cachedMonetizationConfig.value = finalCfg
+                    _statusNotice.value = "Updated AdMob, Start.io & Monetag config for Android & Web!"
+                    onComplete(true)
+                }
+                .onFailure { err ->
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not save monetizer settings")
+                    onComplete(false)
+                }
             _isProcessingWalletAction.value = false
         }
     }
@@ -3513,40 +2668,22 @@ class MomiViewModel(
         onComplete: (Boolean) -> Unit = {}
     ) {
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                supabaseClient.patchRows(
-                    "profiles",
-                    "user_id=eq.${java.net.URLEncoder.encode(currentUserId, "UTF-8")}",
-                    mapOf("partner_consent" to consented)
-                ).onSuccess {
-                    supaProfiles.update { list -> list.map { if (it.userId == currentUserId) it.copy(partnerConsent = consented) else it } }
-                    _statusNotice.value = if (consented) {
-                        "Partner Boost & Perks Consent enabled — you're eligible for owner grants & featured perks!"
-                    } else {
-                        "Partner Boost & Perks Consent turned off."
-                    }
-                    onComplete(true)
-                }.onFailure { err ->
-                    _errorMessage.value = unwrapErrorMessage(err, "Could not update consent preference")
-                    onComplete(false)
+            supabaseClient.patchRows(
+                "profiles",
+                "user_id=eq.${java.net.URLEncoder.encode(currentUserId, "UTF-8")}",
+                mapOf("partner_consent" to consented)
+            ).onSuccess {
+                supaProfiles.update { list -> list.map { if (it.userId == currentUserId) it.copy(partnerConsent = consented) else it } }
+                _statusNotice.value = if (consented) {
+                    "Partner Boost & Perks Consent enabled — you're eligible for owner grants & featured perks!"
+                } else {
+                    "Partner Boost & Perks Consent turned off."
                 }
-                launch { runCatching { repository.updatePartnerConsent(consented) } }
-                return@launch
+                onComplete(true)
+            }.onFailure { err ->
+                _errorMessage.value = unwrapErrorMessage(err, "Could not update consent preference")
+                onComplete(false)
             }
-
-            repository.updatePartnerConsent(consented)
-                .onSuccess {
-                    _statusNotice.value = if (consented) {
-                        "Partner Boost & Perks Consent enabled — you're eligible for owner grants & featured perks!"
-                    } else {
-                        "Partner Boost & Perks Consent turned off."
-                    }
-                    onComplete(true)
-                }
-                .onFailure { error ->
-                    _errorMessage.value = unwrapErrorMessage(error, "Could not update consent preference")
-                    onComplete(false)
-                }
         }
     }
 
@@ -3558,72 +2695,55 @@ class MomiViewModel(
         val currentProfile = fallbackProfile()
         viewModelScope.launch {
             _isProcessingWalletAction.value = true
-            if (supabaseClient.isConfigured()) {
-                val currentW = supaWallet.value ?: UserWallet(id = currentUserId, userId = currentUserId)
-                if (currentW.balance < option.creditsCost) {
-                    _isProcessingWalletAction.value = false
-                    _errorMessage.value = "Need ${option.creditsCost} credits to boost post."
-                    onComplete(false)
-                    return@launch
-                }
-                val txId = "boost_${UUID.randomUUID()}"
-                val updatedW = currentW.copy(
-                    balance = currentW.balance - option.creditsCost,
-                    totalSpent = currentW.totalSpent + option.creditsCost,
-                    lastTxId = txId,
-                    updatedAt = Timestamp.now()
-                )
-                val tx = CreditTransaction(
-                    id = txId,
-                    txId = txId,
-                    type = CreditTransaction.TYPE_POST_BOOST,
-                    paymentMethod = CreditTransaction.METHOD_WALLET_CREDITS,
-                    paymentRef = post.id,
-                    postId = post.id,
-                    senderUid = currentUserId,
-                    senderUsername = currentProfile.username,
-                    recipientUid = currentUserId,
-                    recipientUsername = currentProfile.username,
-                    creditsAmount = option.creditsCost,
-                    status = "COMPLETED",
-                    recipientClaimed = true,
-                    createdAt = Timestamp.now()
-                )
-                supabaseBackend.upsertWalletAndTx(updatedW, tx)
-                    .mapCatching {
-                        supabaseClient.patchRows(
-                            "posts",
-                            "id=eq.${java.net.URLEncoder.encode(post.id, "UTF-8")}",
-                            mapOf("is_boosted" to true, "boost_tier" to option.tier)
-                        ).getOrThrow()
-                    }
-                    .onSuccess {
-                        supaWallet.value = updatedW
-                        supaCreditTransactions.update { listOf(tx) + it }
-                        supaPosts.update { list -> list.map { if (it.id == post.id) it.copy(isBoosted = true, boostTier = option.tier) else it } }
-                        _statusNotice.value = "${option.title} activated (-${option.creditsCost} cr)! Your post is now promoted."
-                        onComplete(true)
-                    }
-                    .onFailure { err ->
-                        _errorMessage.value = unwrapErrorMessage(err, "Could not boost post")
-                        onComplete(false)
-                    }
+            val currentW = supaWallet.value ?: UserWallet(id = currentUserId, userId = currentUserId)
+            if (currentW.balance < option.creditsCost) {
                 _isProcessingWalletAction.value = false
-                launch { runCatching { walletRepository.boostPostWithCredits(currentProfile, post.id, option) } }
+                _errorMessage.value = "Need ${option.creditsCost} credits to boost post."
+                onComplete(false)
                 return@launch
             }
-
-            walletRepository.boostPostWithCredits(
-                profile = currentProfile,
+            val txId = "boost_${UUID.randomUUID()}"
+            val updatedW = currentW.copy(
+                balance = currentW.balance - option.creditsCost,
+                totalSpent = currentW.totalSpent + option.creditsCost,
+                lastTxId = txId,
+                updatedAt = Timestamp.now()
+            )
+            val tx = CreditTransaction(
+                id = txId,
+                txId = txId,
+                type = CreditTransaction.TYPE_POST_BOOST,
+                paymentMethod = CreditTransaction.METHOD_WALLET_CREDITS,
+                paymentRef = post.id,
                 postId = post.id,
-                option = option
-            ).onSuccess {
-                _statusNotice.value = "${option.title} activated (-${option.creditsCost} cr)! Your post is now promoted."
-                onComplete(true)
-            }.onFailure { error ->
-                _errorMessage.value = unwrapErrorMessage(error, "Could not boost post")
-                onComplete(false)
-            }
+                senderUid = currentUserId,
+                senderUsername = currentProfile.username,
+                recipientUid = currentUserId,
+                recipientUsername = currentProfile.username,
+                creditsAmount = option.creditsCost,
+                status = "COMPLETED",
+                recipientClaimed = true,
+                createdAt = Timestamp.now()
+            )
+            supabaseBackend.upsertWalletAndTx(updatedW, tx)
+                .mapCatching {
+                    supabaseClient.patchRows(
+                        "posts",
+                        "id=eq.${java.net.URLEncoder.encode(post.id, "UTF-8")}",
+                        mapOf("is_boosted" to true, "boost_tier" to option.tier)
+                    ).getOrThrow()
+                }
+                .onSuccess {
+                    supaWallet.value = updatedW
+                    supaCreditTransactions.update { listOf(tx) + it }
+                    supaPosts.update { list -> list.map { if (it.id == post.id) it.copy(isBoosted = true, boostTier = option.tier) else it } }
+                    _statusNotice.value = "${option.title} activated (-${option.creditsCost} cr)! Your post is now promoted."
+                    onComplete(true)
+                }
+                .onFailure { err ->
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not boost post")
+                    onComplete(false)
+                }
             _isProcessingWalletAction.value = false
         }
     }
@@ -3640,42 +2760,21 @@ class MomiViewModel(
             return
         }
         viewModelScope.launch {
-            if (supabaseClient.isConfigured()) {
-                val finalLabel = if (recommended) label else ""
-                supabaseClient.patchRows(
-                    "posts",
-                    "id=eq.${java.net.URLEncoder.encode(post.id, "UTF-8")}",
-                    mapOf("recommended_label" to finalLabel)
-                ).onSuccess {
-                    supaPosts.update { list -> list.map { if (it.id == post.id) it.copy(recommendedLabel = finalLabel) else it } }
-                    _statusNotice.value = if (recommended) {
-                        "Post by @${post.authorUsername} marked \"$label\"!"
-                    } else {
-                        "Removed recommendation badge from @${post.authorUsername}'s post."
-                    }
-                    onComplete(true)
-                }.onFailure { err ->
-                    _errorMessage.value = unwrapErrorMessage(err, "Could not update post recommendation")
-                    onComplete(false)
-                }
-                launch { runCatching { repository.adminSetPostRecommended(post, recommended, fallbackProfile(), label) } }
-                return@launch
-            }
-
-            repository.adminSetPostRecommended(
-                post = post,
-                recommended = recommended,
-                actorProfile = fallbackProfile(),
-                label = label
+            val finalLabel = if (recommended) label else ""
+            supabaseClient.patchRows(
+                "posts",
+                "id=eq.${java.net.URLEncoder.encode(post.id, "UTF-8")}",
+                mapOf("recommended_label" to finalLabel)
             ).onSuccess {
+                supaPosts.update { list -> list.map { if (it.id == post.id) it.copy(recommendedLabel = finalLabel) else it } }
                 _statusNotice.value = if (recommended) {
                     "Post by @${post.authorUsername} marked \"$label\"!"
                 } else {
                     "Removed recommendation badge from @${post.authorUsername}'s post."
                 }
                 onComplete(true)
-            }.onFailure { error ->
-                _errorMessage.value = unwrapErrorMessage(error, "Could not update post recommendation")
+            }.onFailure { err ->
+                _errorMessage.value = unwrapErrorMessage(err, "Could not update post recommendation")
                 onComplete(false)
             }
         }
@@ -3695,68 +2794,49 @@ class MomiViewModel(
         }
         viewModelScope.launch {
             _isProcessingWalletAction.value = true
-            if (supabaseClient.isConfigured()) {
-                val adminProfile = fallbackProfile()
-                val txId = "grant_${UUID.randomUUID()}"
-                val tx = CreditTransaction(
-                    id = txId,
-                    txId = txId,
-                    type = CreditTransaction.TYPE_OWNER_GRANT,
-                    paymentMethod = CreditTransaction.METHOD_OWNER_ADMIN,
-                    senderUid = currentUserId,
-                    senderUsername = adminProfile.username,
-                    recipientUid = targetUser.userId,
-                    recipientUsername = targetUser.username,
-                    creditsAmount = creditsAmount.coerceAtLeast(0L),
-                    perkKey = perk?.key,
-                    status = "COMPLETED",
-                    recipientClaimed = true,
-                    createdAt = Timestamp.now()
-                )
-                val targetW = UserWallet(
-                    id = targetUser.userId,
-                    userId = targetUser.userId,
-                    balance = creditsAmount.coerceAtLeast(0L),
-                    totalEarned = creditsAmount.coerceAtLeast(0L),
-                    unlockedPerks = listOfNotNull(perk?.key),
-                    lastTxId = txId,
-                    updatedAt = Timestamp.now()
-                )
-                supabaseBackend.upsertWalletAndTx(targetW, tx)
-                    .onSuccess {
-                        if (grantVerified) {
-                            supabaseClient.patchRows(
-                                "profiles",
-                                "user_id=eq.${java.net.URLEncoder.encode(targetUser.userId, "UTF-8")}",
-                                mapOf("is_verified" to true)
-                            )
-                            supaProfiles.update { list -> list.map { if (it.userId == targetUser.userId) it.copy(isVerified = true) else it } }
-                        }
-                        _statusNotice.value = "Granted rewards to @${targetUser.username}!"
-                        onComplete(true)
+            val adminProfile = fallbackProfile()
+            val txId = "grant_${UUID.randomUUID()}"
+            val tx = CreditTransaction(
+                id = txId,
+                txId = txId,
+                type = CreditTransaction.TYPE_OWNER_GRANT,
+                paymentMethod = CreditTransaction.METHOD_OWNER_ADMIN,
+                senderUid = currentUserId,
+                senderUsername = adminProfile.username,
+                recipientUid = targetUser.userId,
+                recipientUsername = targetUser.username,
+                creditsAmount = creditsAmount.coerceAtLeast(0L),
+                perkKey = perk?.key,
+                status = "COMPLETED",
+                recipientClaimed = true,
+                createdAt = Timestamp.now()
+            )
+            val targetW = UserWallet(
+                id = targetUser.userId,
+                userId = targetUser.userId,
+                balance = creditsAmount.coerceAtLeast(0L),
+                totalEarned = creditsAmount.coerceAtLeast(0L),
+                unlockedPerks = listOfNotNull(perk?.key),
+                lastTxId = txId,
+                updatedAt = Timestamp.now()
+            )
+            supabaseBackend.upsertWalletAndTx(targetW, tx)
+                .onSuccess {
+                    if (grantVerified) {
+                        supabaseClient.patchRows(
+                            "profiles",
+                            "user_id=eq.${java.net.URLEncoder.encode(targetUser.userId, "UTF-8")}",
+                            mapOf("is_verified" to true)
+                        )
+                        supaProfiles.update { list -> list.map { if (it.userId == targetUser.userId) it.copy(isVerified = true) else it } }
                     }
-                    .onFailure { err ->
-                        _errorMessage.value = unwrapErrorMessage(err, "Could not send owner grant")
-                        onComplete(false)
-                    }
-                _isProcessingWalletAction.value = false
-                launch { runCatching { walletRepository.adminGrantUserPerksAndCredits(adminProfile, targetUser, creditsAmount, perk, grantVerified) } }
-                return@launch
-            }
-
-            walletRepository.adminGrantUserPerksAndCredits(
-                adminProfile = fallbackProfile(),
-                targetUser = targetUser,
-                creditsAmount = creditsAmount,
-                perk = perk,
-                grantVerified = grantVerified
-            ).onSuccess {
-                _statusNotice.value = "Granted rewards to @${targetUser.username}!"
-                onComplete(true)
-            }.onFailure { error ->
-                _errorMessage.value = unwrapErrorMessage(error, "Could not send owner grant")
-                onComplete(false)
-            }
+                    _statusNotice.value = "Granted rewards to @${targetUser.username}!"
+                    onComplete(true)
+                }
+                .onFailure { err ->
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not send owner grant")
+                    onComplete(false)
+                }
             _isProcessingWalletAction.value = false
         }
     }
@@ -3769,26 +2849,13 @@ class MomiViewModel(
         if (_isShowcaseActionBusy.value) return
         viewModelScope.launch {
             _isShowcaseActionBusy.value = true
-            if (supabaseClient.isConfigured()) {
-                supabaseBackend.publishShowcaseBurst()
-                    .onSuccess { count ->
-                        refreshFromSupabase(forceEnsureProfile = false)
-                        _statusNotice.value = "Published $count starter showcase posts, comments & stories!"
-                    }
-                    .onFailure { err ->
-                        _errorMessage.value = unwrapErrorMessage(err, "Could not publish starter showcase activity")
-                    }
-                _isShowcaseActionBusy.value = false
-                launch { runCatching { repository.publishShowcaseActivityBurst() } }
-                return@launch
-            }
-
-            repository.publishShowcaseActivityBurst()
+            supabaseBackend.publishShowcaseBurst()
                 .onSuccess { count ->
+                    refreshFromSupabase(forceEnsureProfile = false)
                     _statusNotice.value = "Published $count starter showcase posts, comments & stories!"
                 }
-                .onFailure { error ->
-                    _errorMessage.value = unwrapErrorMessage(error, "Could not publish starter showcase activity")
+                .onFailure { err ->
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not publish starter showcase activity")
                 }
             _isShowcaseActionBusy.value = false
         }
@@ -3802,56 +2869,40 @@ class MomiViewModel(
         if (_isShowcaseActionBusy.value) return
         viewModelScope.launch {
             _isShowcaseActionBusy.value = true
-            if (supabaseClient.isConfigured()) {
-                val recentPosts = allPosts.value.take(6)
-                if (recentPosts.isEmpty()) {
-                    _statusNotice.value = "No posts available yet — publish a showcase burst first."
-                    _isShowcaseActionBusy.value = false
-                    return@launch
-                }
-                recentPosts.forEachIndexed { idx, p ->
-                    val nextLikes = p.likesCount + 2L
-                    supabaseBackend.updatePostCounts(p.id, likesCount = nextLikes)
-                    val persona = MomiFirestoreRepository.SHOWCASE_PERSONAS[idx % MomiFirestoreRepository.SHOWCASE_PERSONAS.size]
-                    val comment = Comment(
-                        id = "showcase_eng_${System.currentTimeMillis()}_$idx",
-                        userId = "showcase_${persona.username}",
-                        authorUsername = persona.username,
-                        authorAvatarKey = persona.avatarKey,
-                        text = MomiFirestoreRepository.SHOWCASE_COMMENTS[idx % MomiFirestoreRepository.SHOWCASE_COMMENTS.size],
-                        likesCount = 1L,
-                        createdAt = Timestamp.now()
-                    )
-                    supabaseBackend.addComment(
-                        p.id,
-                        UserProfile(
-                            id = comment.userId,
-                            userId = comment.userId,
-                            username = persona.username,
-                            displayName = persona.displayName,
-                            avatarKey = persona.avatarKey
-                        ),
-                        comment,
-                        p.commentsCount + 1L
-                    )
-                }
-                refreshFromSupabase(forceEnsureProfile = false)
-                _statusNotice.value = "Added starter likes & comments across ${recentPosts.size} recent posts!"
+            val recentPosts = allPosts.value.take(6)
+            if (recentPosts.isEmpty()) {
+                _statusNotice.value = "No posts available yet — publish a showcase burst first."
                 _isShowcaseActionBusy.value = false
                 return@launch
             }
-
-            repository.engageRecentPostsWithShowcase()
-                .onSuccess { count ->
-                    _statusNotice.value = if (count > 0) {
-                        "Added starter likes & comments across $count recent posts!"
-                    } else {
-                        "No posts available yet — publish a showcase burst first."
-                    }
-                }
-                .onFailure { error ->
-                    _errorMessage.value = unwrapErrorMessage(error, "Could not add starter engagement")
-                }
+            recentPosts.forEachIndexed { idx, p ->
+                val nextLikes = p.likesCount + 2L
+                supabaseBackend.updatePostCounts(p.id, likesCount = nextLikes)
+                val persona = ShowcaseCatalog.PERSONAS[idx % ShowcaseCatalog.PERSONAS.size]
+                val comment = Comment(
+                    id = "showcase_eng_${System.currentTimeMillis()}_$idx",
+                    userId = "showcase_${persona.username}",
+                    authorUsername = persona.username,
+                    authorAvatarKey = persona.avatarKey,
+                    text = ShowcaseCatalog.COMMENTS[idx % ShowcaseCatalog.COMMENTS.size],
+                    likesCount = 1L,
+                    createdAt = Timestamp.now()
+                )
+                supabaseBackend.addComment(
+                    p.id,
+                    UserProfile(
+                        id = comment.userId,
+                        userId = comment.userId,
+                        username = persona.username,
+                        displayName = persona.displayName,
+                        avatarKey = persona.avatarKey
+                    ),
+                    comment,
+                    p.commentsCount + 1L
+                )
+            }
+            refreshFromSupabase(forceEnsureProfile = false)
+            _statusNotice.value = "Added starter likes & comments across ${recentPosts.size} recent posts!"
             _isShowcaseActionBusy.value = false
         }
     }
@@ -3864,27 +2915,14 @@ class MomiViewModel(
         if (_isShowcaseActionBusy.value) return
         viewModelScope.launch {
             _isShowcaseActionBusy.value = true
-            if (supabaseClient.isConfigured()) {
-                supabaseBackend.removeAllShowcase()
-                    .onSuccess {
-                        supaPosts.update { list -> list.filterNot { it.id.startsWith("showcase_") } }
-                        supaStories.update { list -> list.filterNot { it.id.startsWith("showcase_") } }
-                        _statusNotice.value = "Removed starter showcase posts & stories."
-                    }
-                    .onFailure { err ->
-                        _errorMessage.value = unwrapErrorMessage(err, "Could not remove starter showcase accounts")
-                    }
-                _isShowcaseActionBusy.value = false
-                launch { runCatching { repository.removeAllShowcaseContent() } }
-                return@launch
-            }
-
-            repository.removeAllShowcaseContent()
-                .onSuccess { (postsRemoved, storiesRemoved) ->
-                    _statusNotice.value = "Removed $postsRemoved starter posts & $storiesRemoved stories."
+            supabaseBackend.removeAllShowcase()
+                .onSuccess {
+                    supaPosts.update { list -> list.filterNot { it.id.startsWith("showcase_") } }
+                    supaStories.update { list -> list.filterNot { it.id.startsWith("showcase_") } }
+                    _statusNotice.value = "Removed starter showcase posts & stories."
                 }
-                .onFailure { error ->
-                    _errorMessage.value = unwrapErrorMessage(error, "Could not remove starter showcase accounts")
+                .onFailure { err ->
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not remove starter showcase accounts")
                 }
             _isShowcaseActionBusy.value = false
         }
@@ -4534,28 +3572,21 @@ class MomiViewModel(
     private fun isQuotaExceeded(error: Throwable?): Boolean {
         if (error == null) return false
         return generateSequence(error) { it.cause }.any { cause ->
-            (cause is FirebaseFirestoreException && cause.code == FirebaseFirestoreException.Code.RESOURCE_EXHAUSTED) ||
-                cause.message?.contains("quota", ignoreCase = true) == true ||
-                cause.message?.contains("RESOURCE_EXHAUSTED", ignoreCase = true) == true
+            cause.message?.contains("quota", ignoreCase = true) == true ||
+                cause.message?.contains("rate limit", ignoreCase = true) == true
         }
     }
 
     private fun unwrapOrRethrowCancellation(error: Throwable): Throwable {
-        val firestoreError = generateSequence(error) { it.cause }
-            .filterIsInstance<FirebaseFirestoreException>()
-            .firstOrNull()
-        if (firestoreError == null && error is CancellationException) throw error
-        return firestoreError ?: error
+        if (error is CancellationException) throw error
+        return error
     }
 
     private fun unwrapErrorMessage(error: Throwable, fallback: String): String {
         if (isQuotaExceeded(error)) {
-            return QUOTA_FRIENDLY_MESSAGE
+            return RATE_LIMIT_FRIENDLY_MESSAGE
         }
-        val firestoreError = generateSequence(error) { it.cause }
-            .filterIsInstance<FirebaseFirestoreException>()
-            .firstOrNull()
-        return firestoreError?.localizedMessage ?: error.localizedMessage ?: fallback
+        return error.localizedMessage ?: fallback
     }
 
     private data class PostHydrationInputs(
@@ -4570,8 +3601,7 @@ class MomiViewModel(
         const val TAG = "MomiVM"
         const val STOP_TIMEOUT_MILLIS = 5000L
         const val MUTATION_PROTECTION_MS = 12_000L
-        const val QUOTA_RETRY_COOLDOWN_MS = 120_000L
-        const val QUOTA_FRIENDLY_MESSAGE =
-            "Daily Firebase Spark quota temporarily reached — cached posts remain visible. Quota resets daily or after upgrading to Blaze."
+        const val RATE_LIMIT_FRIENDLY_MESSAGE =
+            "Supabase rate limit reached briefly — cached content remains visible. Retrying shortly."
     }
 }

@@ -443,7 +443,7 @@ fun OwnerMonetizationAndPlaySheet(
                         PlayChecklistRow("Zero broad storage permissions (Photo Picker only)")
                         PlayChecklistRow("Explicit Sponsored labeling + https:// external browser launch for Direct Links")
                         PlayChecklistRow("ProGuard keep rules configured for AdMob & Start.io in Release .aab")
-                        PlayChecklistRow("100 MB offline Firestore cache + sticky feed during Spark quota limits")
+                        PlayChecklistRow("100% Supabase Auth, PostgreSQL, Realtime WebSockets & Storage")
                     }
                 }
             }
@@ -618,11 +618,11 @@ fun OwnerMonetizationAndPlaySheet(
                         onClick = { runCatching { uriHandler.openUri("https://portal.start.io") } }
                     )
                     PortalLinkButton(
-                        title = "Firebase Quota & Blaze Upgrade",
-                        subtitle = "Project gen-lang-client-0132255277 daily reads/writes",
+                        title = "Supabase Realtime Replication & Tables",
+                        subtitle = "Verify supabase_realtime publication and row policies",
                         onClick = {
                             runCatching {
-                                uriHandler.openUri("https://console.firebase.google.com/project/gen-lang-client-0132255277/usage/details")
+                                uriHandler.openUri("https://supabase.com/dashboard/project/qotuvugkapaspowhbsbf/database/publications")
                             }
                         }
                     )

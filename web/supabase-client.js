@@ -1153,3 +1153,241 @@ export async function supabaseSignOut(cfg = SUPABASE_WEB_CONFIG, accessToken = '
     // Ignore logout network failures after clearing local session
   }
 }
+
+// ---------------------------------------------------------------------------
+// Supabase Realtime CDC WebSocket Client (Phoenix Protocol)
+// ---------------------------------------------------------------------------
+
+export function buildSupabaseRealtimeWsUrl(cfg = SUPABASE_WEB_CONFIG) {
+  const baseUrl = normalizeSupabaseUrl(cfg?.url);
+  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) return '';
+  const wsBase = baseUrl.replace(/^https:\/\//i, 'wss://');
+  const anonKey = encodeURIComponent(String(cfg.anonKey).trim());
+  return `${wsBase}/realtime/v1/websocket?apikey=${anonKey}&vsn=1.0.0`;
+}
+
+export function buildSupabaseRealtimeJoinMessage(ref = '1', accessToken = '') {
+  const payload = {
+    config: {
+      broadcast: { self: false },
+      presence: { key: '' },
+      postgres_changes: [{ event: '*', schema: 'public' }]
+    }
+  };
+  const token = String(accessToken || '').trim();
+  if (token) {
+    payload.access_token = token;
+  }
+  return {
+    topic: 'realtime:public',
+    event: 'phx_join',
+    payload,
+    ref: String(ref || '1')
+  };
+}
+
+export function parseSupabaseRealtimeMessage(rawData) {
+  if (!rawData) return null;
+  let frame = null;
+  if (typeof rawData === 'string') {
+    try {
+      frame = JSON.parse(rawData);
+    } catch {
+      return null;
+    }
+  } else if (typeof rawData === 'object') {
+    frame = rawData;
+  }
+  if (!frame || typeof frame !== 'object') return null;
+
+  if (frame.event === 'postgres_changes') {
+    const inner = frame.payload?.data || frame.payload || {};
+    const table = String(inner.table || '').trim();
+    if (!table) return null;
+    return {
+      kind: 'postgres_changes',
+      table,
+      schema: String(inner.schema || 'public'),
+      eventType: String(inner.type || inner.eventType || 'UPDATE').toUpperCase(),
+      record: inner.record || inner.new || null,
+      oldRecord: inner.old_record || inner.old || null
+    };
+  }
+
+  if (frame.event === 'phx_reply') {
+    return {
+      kind: 'phx_reply',
+      topic: String(frame.topic || ''),
+      status: String(frame.payload?.status || ''),
+      ref: frame.ref ? String(frame.ref) : ''
+    };
+  }
+
+  if (frame.event === 'system') {
+    return {
+      kind: 'system',
+      status: String(frame.payload?.status || ''),
+      message: String(frame.payload?.message || '')
+    };
+  }
+
+  return null;
+}
+
+export function createSupabaseRealtimeClient(
+  cfg = SUPABASE_WEB_CONFIG,
+  {
+    getAccessToken = getActiveSupabaseAccessToken,
+    onTableChange = () => undefined,
+    onStatusChange = () => undefined,
+    WebSocketImpl = globalThis.WebSocket
+  } = {}
+) {
+  let ws = null;
+  let stopped = true;
+  let refSeq = 0;
+  let reconnectDelayMs = 1500;
+  let heartbeatTimer = null;
+  let reconnectTimer = null;
+
+  const nextRef = () => {
+    refSeq += 1;
+    return String(refSeq);
+  };
+
+  const clearTimers = () => {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  };
+
+  const sendFrame = (frame) => {
+    if (!ws || ws.readyState !== 1) return false;
+    try {
+      ws.send(JSON.stringify(frame));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const scheduleReconnect = () => {
+    if (stopped || reconnectTimer) return;
+    const delay = reconnectDelayMs;
+    reconnectDelayMs = Math.min(20000, Math.round(reconnectDelayMs * 1.7));
+    onStatusChange('reconnecting', `Reconnecting WebSocket in ${Math.round(delay / 1000)}s...`);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connectSocket();
+    }, delay);
+  };
+
+  const connectSocket = () => {
+    if (stopped) return;
+    const wsUrl = buildSupabaseRealtimeWsUrl(cfg);
+    if (!wsUrl || typeof WebSocketImpl !== 'function') {
+      onStatusChange('unavailable', 'WebSocket Realtime unavailable in this environment');
+      return;
+    }
+    clearTimers();
+    try {
+      ws?.close(1000, 'reconnect');
+    } catch {
+      // Ignore close failure
+    }
+    onStatusChange('connecting', 'Connecting to Supabase Realtime...');
+    try {
+      ws = new WebSocketImpl(wsUrl);
+    } catch (err) {
+      onStatusChange('error', err?.message || 'WebSocket connection failed');
+      scheduleReconnect();
+      return;
+    }
+
+    ws.onopen = () => {
+      if (stopped) {
+        try {
+          ws?.close(1000, 'stopped');
+        } catch {
+          // Ignore close error
+        }
+        return;
+      }
+      reconnectDelayMs = 1500;
+      const token = String(getAccessToken?.() || '').trim();
+      sendFrame(buildSupabaseRealtimeJoinMessage(nextRef(), token));
+      heartbeatTimer = setInterval(() => {
+        sendFrame({
+          topic: 'phoenix',
+          event: 'heartbeat',
+          payload: {},
+          ref: nextRef()
+        });
+      }, 30000);
+    };
+
+    ws.onmessage = (evt) => {
+      const parsed = parseSupabaseRealtimeMessage(evt?.data);
+      if (!parsed) return;
+      if (parsed.kind === 'postgres_changes') {
+        onTableChange(parsed);
+      } else if (parsed.kind === 'phx_reply' && parsed.topic === 'realtime:public') {
+        if (parsed.status === 'ok') {
+          onStatusChange('connected', 'Supabase Realtime Live (WebSocket)');
+        } else {
+          onStatusChange('error', `Realtime channel status: ${parsed.status || 'rejected'}`);
+        }
+      } else if (parsed.kind === 'system' && parsed.status === 'error') {
+        onStatusChange('error', parsed.message || 'Realtime channel error');
+      }
+    };
+
+    ws.onerror = () => {
+      onStatusChange('error', 'Supabase Realtime socket error — falling back briefly');
+    };
+
+    ws.onclose = () => {
+      clearTimers();
+      if (!stopped) {
+        scheduleReconnect();
+      } else {
+        onStatusChange('disconnected', 'Supabase Realtime disconnected');
+      }
+    };
+  };
+
+  return {
+    start() {
+      if (!stopped) return;
+      stopped = false;
+      connectSocket();
+    },
+    stop() {
+      stopped = true;
+      clearTimers();
+      try {
+        ws?.close(1000, 'client_stop');
+      } catch {
+        // Ignore close error
+      }
+      ws = null;
+      onStatusChange('disconnected', 'Supabase Realtime stopped');
+    },
+    updateAccessToken(token = '') {
+      const clean = String(token || '').trim();
+      if (!clean || stopped) return;
+      sendFrame({
+        topic: 'realtime:public',
+        event: 'access_token',
+        payload: { access_token: clean },
+        ref: nextRef()
+      });
+    }
+  };
+}
+

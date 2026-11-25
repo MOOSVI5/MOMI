@@ -7,10 +7,13 @@ import com.example.data.model.Post
 import com.example.data.model.Story
 import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
+import com.example.data.model.ShowcaseCatalog
 import com.example.data.supabase.MomiSupabaseClient
 import com.example.data.supabase.MomiSupabaseSchema
+import com.example.data.supabase.SupabaseRealtimeClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -230,5 +233,54 @@ class SupabaseMigrationTest {
                 listOf("pages", "page_follows", "groups", "group_members", "showcase_accounts")
             )
         )
+    }
+
+    @Test
+    fun realtimeWebSocketHelpersAndShowcaseCatalogWork() {
+        val wsUrl = SupabaseRealtimeClient.buildRealtimeWebSocketUrl(
+            rawBaseUrl = "https://qotuvugkapaspowhbsbf.supabase.co/",
+            rawAnonKey = "sb_publishable_LbrQBbU_4qH18qjopmNwIg_ALsMhlln"
+        )
+        assertEquals(
+            "wss://qotuvugkapaspowhbsbf.supabase.co/realtime/v1/websocket?apikey=sb_publishable_LbrQBbU_4qH18qjopmNwIg_ALsMhlln&vsn=1.0.0",
+            wsUrl
+        )
+        assertEquals(
+            "",
+            SupabaseRealtimeClient.buildRealtimeWebSocketUrl(
+                rawBaseUrl = "https://qotuvugkapaspowhbsbf.supabase.co",
+                rawAnonKey = "sb_secret_forbidden"
+            )
+        )
+
+        val joinPayload = SupabaseRealtimeClient.buildJoinPayload(ref = "3", accessToken = "jwt_abc")
+        assertTrue(joinPayload.contains("\"event\":\"phx_join\""))
+        assertTrue(joinPayload.contains("\"topic\":\"realtime:public\""))
+        assertTrue(joinPayload.contains("\"access_token\":\"jwt_abc\""))
+        assertTrue(joinPayload.contains("\"postgres_changes\""))
+
+        val parsed = SupabaseRealtimeClient.parseRealtimeChangeMessage(
+            """
+            {
+              "topic": "realtime:public",
+              "event": "postgres_changes",
+              "payload": {
+                "data": {
+                  "schema": "public",
+                  "table": "chat_messages",
+                  "type": "INSERT",
+                  "record": { "id": "msg_1", "thread_id": "u1__u2" }
+                }
+              }
+            }
+            """.trimIndent()
+        )
+        assertNotNull(parsed)
+        assertEquals("chat_messages", parsed?.table)
+        assertEquals("INSERT", parsed?.eventType)
+        assertEquals("u1__u2", parsed?.recordFields?.get("thread_id"))
+
+        assertEquals(6, ShowcaseCatalog.PERSONAS.size)
+        assertTrue(ShowcaseCatalog.COMMENTS.size >= 4)
     }
 }

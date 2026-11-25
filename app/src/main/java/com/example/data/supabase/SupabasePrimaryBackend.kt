@@ -24,10 +24,10 @@ import com.example.data.model.NotificationItem
 import com.example.data.model.Post
 import com.example.data.model.PostBoostOption
 import com.example.data.model.ShowcaseAccount
+import com.example.data.model.ShowcaseCatalog
 import com.example.data.model.Story
 import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
-import com.example.data.repository.MomiFirestoreRepository
 import com.example.util.MediaAssets
 import com.example.util.StudioMusicCatalog
 import com.google.firebase.Timestamp
@@ -327,9 +327,9 @@ class SupabasePrimaryBackend(
     suspend fun publishShowcaseBurst(): Result<Int> {
         val now = Timestamp.now()
         val stamp = System.currentTimeMillis()
-        val selected = MomiFirestoreRepository.SHOWCASE_PERSONAS.shuffled().take(4)
+        val selected = ShowcaseCatalog.PERSONAS.shuffled().take(4)
 
-        val personaProfiles = MomiFirestoreRepository.SHOWCASE_PERSONAS.map { persona ->
+        val personaProfiles = ShowcaseCatalog.PERSONAS.map { persona ->
             val uid = "showcase_${persona.username}"
             UserProfile(
                 id = uid,
@@ -352,8 +352,8 @@ class SupabasePrimaryBackend(
         selected.forEachIndexed { idx, persona ->
             val uid = "showcase_${persona.username}"
             val postId = "showcase_post_${stamp}_$idx"
-            val commenter = MomiFirestoreRepository.SHOWCASE_PERSONAS[(idx + 2) % MomiFirestoreRepository.SHOWCASE_PERSONAS.size]
-            val commentText = MomiFirestoreRepository.SHOWCASE_COMMENTS[(idx + stamp.toInt()) % MomiFirestoreRepository.SHOWCASE_COMMENTS.size]
+            val commenter = ShowcaseCatalog.PERSONAS[(idx + 2) % ShowcaseCatalog.PERSONAS.size]
+            val commentText = ShowcaseCatalog.COMMENTS[(idx + stamp.toInt()) % ShowcaseCatalog.COMMENTS.size]
             posts.add(
                 Post(
                     id = postId,

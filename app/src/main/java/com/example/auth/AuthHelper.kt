@@ -15,8 +15,6 @@ import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential.Companion.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
-import com.google.firebase.Firebase
-import com.google.firebase.auth.auth
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
@@ -233,7 +231,6 @@ fun signOut(
                 val activeToken = MomiSupabaseClient.activeSession?.accessToken
                 AppearancePrefs.clearSupabaseSession(context)
                 MomiSupabaseClient().signOutSession(activeToken)
-                runCatching { Firebase.auth.signOut() }
                 onSignOutComplete()
             }
         }

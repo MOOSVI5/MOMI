@@ -89,15 +89,11 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import com.example.auth.configureAppCheck
 import com.example.auth.signOut
 import com.example.billing.PlayBillingManager
 import com.example.billing.PlayPurchaseEvent
 import com.example.data.model.CreditTransaction
 import com.example.data.model.Post
-import com.example.data.repository.MarketplaceRepository
-import com.example.data.repository.MomiFirestoreRepository
-import com.example.data.repository.WalletRepository
 import com.example.data.supabase.MomiSupabaseClient
 import com.example.ui.components.CommentsBottomSheet
 import com.example.ui.components.FloatingMomiAssistantButton
@@ -135,9 +131,6 @@ import com.example.util.MomiAlertNotifier
 import com.example.util.MomiDeepLink
 import com.example.util.MomiLinks
 import com.google.android.gms.ads.MobileAds
-import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.PersistentCacheSettings
-import com.google.firebase.firestore.firestoreSettings
 import com.startapp.sdk.adsbase.StartAppSDK
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -201,7 +194,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         MomiAlertNotifier.ensureChannel(this)
-        configureAppCheck(this, intent)
         latestIncomingIntent.value = intent
 
         lifecycleScope.launch(Dispatchers.IO) {
@@ -282,14 +274,7 @@ private fun AppNavigation(
                 key = uid,
                 factory = viewModelFactory {
                     initializer {
-                        val app = checkNotNull(this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY])
-                        val db = FirebaseFirestore.getInstance(app.getString(R.string.firestore_database_id)).also { firestore ->
-                            configureFirestoreCacheOnce(firestore)
-                        }
                         MomiViewModel(
-                            repository = MomiFirestoreRepository(db),
-                            marketplaceRepository = MarketplaceRepository(db),
-                            walletRepository = WalletRepository(db),
                             currentUserId = uid,
                             initialDisplayName = session.displayName,
                             initialEmail = session.email
@@ -1728,24 +1713,4 @@ private fun shareText(context: Context, subject: String, text: String) {
         putExtra(Intent.EXTRA_TEXT, text)
     }
     context.startActivity(Intent.createChooser(intent, "Share via"))
-}
-
-@Volatile
-private var firestorePersistenceConfigured = false
-
-private fun configureFirestoreCacheOnce(db: FirebaseFirestore) {
-    if (firestorePersistenceConfigured) return
-    synchronized(MainActivity::class.java) {
-        if (firestorePersistenceConfigured) return
-        runCatching {
-            db.firestoreSettings = firestoreSettings {
-                setLocalCacheSettings(
-                    PersistentCacheSettings.newBuilder()
-                        .setSizeBytes(100L * 1024L * 1024L)
-                        .build()
-                )
-            }
-        }
-        firestorePersistenceConfigured = true
-    }
 }

@@ -1,12 +1,3 @@
-import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.6.0/firebase-app.js';
-import {
-  collection,
-  deleteDoc,
-  doc,
-  initializeFirestore,
-  serverTimestamp,
-  setDoc
-} from 'https://www.gstatic.com/firebasejs/11.6.0/firebase-firestore.js';
 import {
   ADMIN_OWNER_EMAIL,
   ANDROID_APK_URL,
@@ -24,8 +15,6 @@ import {
   extractMentions,
   FILTER_OPTIONS,
   filterCssForTag,
-  FIREBASE_WEB_CONFIG,
-  FIRESTORE_DATABASE_ID,
   formatCount,
   initialsForUsername,
   isOwnerEmail,
@@ -56,6 +45,7 @@ import {
   buildSupabaseGoogleOAuthUrl,
   checkSupabaseHealth,
   clearSupabaseAuthSession,
+  createSupabaseRealtimeClient,
   deleteSupabaseRows,
   fetchSupabaseFeed,
   fetchUserSupabaseWorkspace,
@@ -99,14 +89,6 @@ import {
   playMomiAlertChime,
   renderEditedCanvas
 } from './studio.js';
-
-const firebaseApp = initializeApp(FIREBASE_WEB_CONFIG);
-// Secondary best-effort Firestore handle (Supabase is primary; experimentalAutoDetectLongPolling kept for fallback telemetry)
-const db = initializeFirestore(
-  firebaseApp,
-  { experimentalAutoDetectLongPolling: true },
-  FIRESTORE_DATABASE_ID
-);
 
 const GIFT_CATALOG = [
   { key: 'rose', name: 'Silk Rose', credits: 10 },
@@ -173,6 +155,10 @@ const state = {
   scheme: localStorage.getItem('momi_scheme') || 'MIDNIGHT_SUNSET',
   soundEnabled: localStorage.getItem('momi_sound') !== 'false',
   pollTimers: [],
+  realtimeClient: null,
+  realtimeState: 'idle',
+  activePostModalId: null,
+  activeLiveRoomRefresh: null,
   livePollTimer: null,
   liveTimer: null,
   liveStreamMedia: null,
@@ -187,7 +173,7 @@ const state = {
   adminBusy: false,
   supabaseBusy: false,
   supabaseStatus: isSupabaseClientReady(SUPABASE_WEB_CONFIG)
-    ? 'Supabase primary PostgreSQL & Storage active.'
+    ? 'Supabase Auth, PostgreSQL, Realtime WebSockets & Storage active.'
     : 'Waiting for SUPABASE_WEB_CONFIG (url + anonKey).',
   pendingDeepLink: parseDeepLinkFromLocation(window.location.search, window.location.hash),
   studio: {
@@ -483,6 +469,8 @@ function closeModal() {
     clearInterval(state.livePollTimer);
     state.livePollTimer = null;
   }
+  state.activePostModalId = null;
+  state.activeLiveRoomRefresh = null;
   modalBackdrop.classList.add('hidden');
   modalContent.innerHTML = '';
   if (window.location.search.includes('post=') || window.location.hash.startsWith('#post-')) {
@@ -652,10 +640,21 @@ document.getElementById('drawerSignOutBtn')?.addEventListener('click', handleSig
 
 function cleanupSubscriptions() {
   stopLiveBroadcast();
+  if (state.realtimeClient) {
+    state.realtimeClient.stop();
+    state.realtimeClient = null;
+  }
+  if (realtimeDebounceTimer) {
+    clearTimeout(realtimeDebounceTimer);
+    realtimeDebounceTimer = null;
+  }
   if (state.livePollTimer) {
     clearInterval(state.livePollTimer);
     state.livePollTimer = null;
   }
+  state.activePostModalId = null;
+  state.activeLiveRoomRefresh = null;
+  state.realtimeState = 'idle';
   state.pollTimers.forEach((id) => clearInterval(id));
   state.pollTimers = [];
   state.initialSnapshotsLoaded = { notifs: false, threads: false };
@@ -694,10 +693,6 @@ function buildFallbackProfile(user) {
     moderationScopes: [],
     partnerConsent: false
   };
-}
-
-function mirrorFirestoreBestEffort(fn) {
-  Promise.resolve().then(fn).catch(() => undefined);
 }
 
 function applyAuthSession(session) {
@@ -790,6 +785,7 @@ bootstrapSupabaseAuth();
 async function initializeSupabaseWorkspace(user) {
   await ensureUserSeededInSupabase(user);
   await refreshAllFromSupabase({ showErrors: true });
+  startSupabaseRealtime(user.uid);
   startSupabasePolling(user.uid);
 }
 
@@ -1067,7 +1063,69 @@ async function refreshAllFromSupabase({ showErrors = false, forceRender = false 
   }
 }
 
+let realtimeDebounceTimer = null;
+
+function scheduleRealtimeFeedRefresh() {
+  if (realtimeDebounceTimer) return;
+  realtimeDebounceTimer = setTimeout(() => {
+    realtimeDebounceTimer = null;
+    if (state.user) {
+      refreshAllFromSupabase({ showErrors: false });
+    }
+  }, 350);
+}
+
+function startSupabaseRealtime(uid) {
+  if (state.realtimeClient) {
+    state.realtimeClient.stop();
+  }
+  const client = createSupabaseRealtimeClient(SUPABASE_WEB_CONFIG, {
+    onStatusChange(status, detail) {
+      state.realtimeState = status;
+      if (detail) {
+        state.supabaseStatus = detail;
+      }
+      if (state.nav === 'admin' || state.nav === 'profile') {
+        renderMainStage();
+      }
+    },
+    onTableChange(evt) {
+      if (!state.user || state.user.uid !== uid) return;
+      const table = evt?.table || '';
+      if (table === 'live_frames' || table === 'live_comments' || table === 'live_streams') {
+        if (typeof state.activeLiveRoomRefresh === 'function') {
+          state.activeLiveRoomRefresh();
+        }
+        if (table === 'live_streams') {
+          scheduleRealtimeFeedRefresh();
+        }
+        return;
+      }
+      if (table === 'chat_messages') {
+        if (state.nav === 'messages' && state.activeThreadId) {
+          loadMessagesForThread(state.activeThreadId);
+        } else {
+          scheduleRealtimeFeedRefresh();
+        }
+        return;
+      }
+      if (table === 'comments') {
+        const postId = evt?.record?.post_id || evt?.oldRecord?.post_id || '';
+        if (state.activePostModalId && (!postId || postId === state.activePostModalId)) {
+          refreshOpenPostModalComments(state.activePostModalId);
+        }
+        scheduleRealtimeFeedRefresh();
+        return;
+      }
+      scheduleRealtimeFeedRefresh();
+    }
+  });
+  state.realtimeClient = client;
+  client.start();
+}
+
 function startSupabasePolling(uid) {
+  // Low-frequency safety reconciliation sweep alongside primary WebSocket CDC Realtime
   const feedTimer = setInterval(() => {
     if (!document.hidden && state.user?.uid === uid) {
       refreshAllFromSupabase({ showErrors: false });
@@ -1075,7 +1133,7 @@ function startSupabasePolling(uid) {
         loadMessagesForThread(state.activeThreadId);
       }
     }
-  }, 6000);
+  }, 15000);
   state.pollTimers.push(feedTimer);
 }
 
@@ -3129,7 +3187,6 @@ function bindFeedInteractions(container) {
       state.posts = state.posts.filter((p) => p.id !== pid);
       renderMainStage();
       await deleteSupabaseRows(SUPABASE_WEB_CONFIG, 'posts', `id=eq.${encodeURIComponent(pid)}`);
-      mirrorFirestoreBestEffort(() => deleteDoc(doc(db, 'posts', pid)));
       showToast('Post deleted');
     };
   });
@@ -3408,6 +3465,7 @@ async function openPostDetailModal(postId) {
   }));
   const morePosts = state.posts.filter((p) => p.id !== postId).slice(0, 4);
 
+  state.activePostModalId = postId;
   openModal(`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;gap:10px;">
       <strong>@${escapeHtml(post.authorUsername)}</strong>
@@ -3427,7 +3485,7 @@ async function openPostDetailModal(postId) {
       <div style="display:flex;flex-direction:column;gap:12px;">
         <div class="post-caption">${renderRichCaptionHtml(post.caption || '')}</div>
         <div class="muted small">${formatCount(post.likesCount)} likes &middot; ${formatCount(post.commentsCount)} comments &middot; ${formatCount(post.viewsCount)} views</div>
-        <div style="flex:1;max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--border);padding-top:10px;">
+        <div id="modalCommentsList" style="flex:1;max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--border);padding-top:10px;">
           ${
             comments.length === 0
               ? '<p class="muted small">Be the first to comment.</p>'
@@ -3476,8 +3534,24 @@ async function openPostDetailModal(postId) {
     }], '', globalThis.fetch, 'id');
     post.commentsCount = (post.commentsCount || 0) + 1;
     await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'posts', `id=eq.${encodeURIComponent(postId)}`, { comments_count: post.commentsCount });
-    openPostDetailModal(postId);
+    refreshOpenPostModalComments(postId);
   };
+}
+
+async function refreshOpenPostModalComments(postId) {
+  if (state.activePostModalId !== postId) return;
+  const listEl = document.getElementById('modalCommentsList');
+  if (!listEl) return;
+  const commentRows = await selectSupabaseTable(
+    SUPABASE_WEB_CONFIG,
+    'comments',
+    `select=*&post_id=eq.${encodeURIComponent(postId)}&order=created_at.asc&limit=60`
+  );
+  if (state.activePostModalId !== postId) return;
+  listEl.innerHTML = commentRows.length === 0
+    ? '<p class="muted small">Be the first to comment.</p>'
+    : commentRows.map((c) => `<div><strong>@${escapeHtml(c.author_username)}</strong> ${escapeHtml(c.text)}</div>`).join('');
+  listEl.scrollTop = listEl.scrollHeight;
 }
 
 function openStoryModal(storyId) {
@@ -3835,7 +3909,7 @@ function openGoLiveModal() {
     document.getElementById('studioLiveTag').textContent = 'LIVE';
 
     state.liveTimer = setInterval(publishFrame, 1500);
-    state.livePollTimer = setInterval(async () => {
+    const pollBroadcasterRoom = async () => {
       const [streams, comments] = await Promise.all([
         selectSupabaseTable(SUPABASE_WEB_CONFIG, 'live_streams', `select=*&id=eq.${encodeURIComponent(uid)}&limit=1`),
         selectSupabaseTable(SUPABASE_WEB_CONFIG, 'live_comments', `select=*&stream_id=eq.${encodeURIComponent(uid)}&order=created_at.asc&limit=40`)
@@ -3850,7 +3924,9 @@ function openGoLiveModal() {
         chatBox.innerHTML = comments.map((c) => `<div><strong>@${escapeHtml(c.username)}</strong> ${escapeHtml(c.text)}</div>`).join('');
         chatBox.scrollTop = chatBox.scrollHeight;
       }
-    }, 1800);
+    };
+    state.activeLiveRoomRefresh = pollBroadcasterRoom;
+    state.livePollTimer = setInterval(pollBroadcasterRoom, 5000);
 
     await refreshAllFromSupabase({ showErrors: false });
     showToast('You are LIVE on Momi!');
@@ -3998,8 +4074,9 @@ function openWatchLiveModal(streamId) {
       box.scrollTop = box.scrollHeight;
     }
   };
+  state.activeLiveRoomRefresh = pollRoom;
   pollRoom();
-  state.livePollTimer = setInterval(pollRoom, 1600);
+  state.livePollTimer = setInterval(pollRoom, 5000);
 
   document.getElementById('closeModalBtn').onclick = () => {
     patchSupabaseRows(

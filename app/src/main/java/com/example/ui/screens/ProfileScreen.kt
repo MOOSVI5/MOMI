@@ -106,9 +106,10 @@ import com.example.data.model.MomiCreditCatalog
 import com.example.data.model.MomiRoles
 import com.example.data.model.Post
 import com.example.data.model.ShowcaseAccount
+import com.example.data.model.ShowcaseCatalog
+import com.example.data.model.Story
 import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
-import com.example.data.repository.MomiFirestoreRepository
 import com.example.ui.components.EditProfileDialog
 import com.example.ui.components.FollowListBottomSheet
 import com.example.ui.components.LumaAvatar
@@ -2003,7 +2004,7 @@ private fun ShowcaseAccountsManagerSheet(
 
     val personas = remember(showcaseAccounts) {
         showcaseAccounts.ifEmpty {
-            MomiFirestoreRepository.SHOWCASE_PERSONAS.map { p ->
+            ShowcaseCatalog.PERSONAS.map { p ->
                 ShowcaseAccount(
                     username = p.username,
                     displayName = p.displayName,

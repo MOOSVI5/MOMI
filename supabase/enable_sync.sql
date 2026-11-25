@@ -16,7 +16,7 @@ ALTER TABLE public.posts ADD COLUMN IF NOT EXISTS community_name text NOT NULL D
 ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS announcement_id text NOT NULL DEFAULT '';
 ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS announcement_title text NOT NULL DEFAULT '';
 ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS announcement_body text NOT NULL DEFAULT '';
-ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS latest_version_name text NOT NULL DEFAULT '2.1';
+ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS latest_version_name text NOT NULL DEFAULT '2.2';
 ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS release_notes text NOT NULL DEFAULT '';
 
 -- 2. Pages, Page Follows, Groups, Group Members & Showcase Starters Tables
@@ -211,3 +211,52 @@ DROP POLICY IF EXISTS momi_storage_delete ON storage.objects;
 CREATE POLICY momi_storage_delete ON storage.objects
   FOR DELETE TO anon, authenticated
   USING (bucket_id IN ('momi-media', 'momi-avatars', 'momi-videos'));
+
+-- 6. Enable Supabase Realtime CDC WebSocket Broadcasts for All Momi Tables
+DO $$
+DECLARE
+  tbl text;
+  momi_tables text[] := ARRAY[
+    'profiles',
+    'posts',
+    'comments',
+    'stories',
+    'follows',
+    'user_interactions',
+    'notifications',
+    'threads',
+    'chat_messages',
+    'live_streams',
+    'live_frames',
+    'live_comments',
+    'merchants',
+    'market_products',
+    'market_orders',
+    'content_reports',
+    'wallets',
+    'credit_transactions',
+    'app_config',
+    'pages',
+    'page_follows',
+    'groups',
+    'group_members',
+    'showcase_accounts'
+  ];
+BEGIN
+  FOREACH tbl IN ARRAY momi_tables LOOP
+    IF EXISTS (
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = tbl
+    ) THEN
+      EXECUTE format('ALTER TABLE public.%I REPLICA IDENTITY FULL', tbl);
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_publication_tables
+        WHERE pubname = 'supabase_realtime'
+          AND schemaname = 'public'
+          AND tablename = tbl
+      ) THEN
+        EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE public.%I', tbl);
+      END IF;
+    END IF;
+  END LOOP;
+END $$;

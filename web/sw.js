@@ -1,4 +1,4 @@
-const CACHE_NAME = 'momi-web-v7-version-sync';
+const CACHE_NAME = 'momi-web-v8-realtime-supabase';
 const SHELL_ASSETS = [
   './',
   './index.html',
