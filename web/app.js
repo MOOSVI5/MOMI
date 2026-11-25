@@ -67,6 +67,7 @@ import {
   mapSupabaseThreadToWeb,
   mapSupabaseTransactionToWeb,
   mapSupabaseWalletToWeb,
+  mergeSupabaseProfileIntoTarget,
   parseSupabaseOAuthCallback,
   patchSupabaseRows,
   saveSupabaseAuthSession,
@@ -955,11 +956,17 @@ async function ensureUserSeededInSupabase(user) {
     const matched = existingProfiles.find((p) => p.user_id === uid) || existingProfiles[0] || null;
     if (matched) {
       const hydrated = mapSupabaseProfileToWeb(matched);
-      state.profile = { ...state.profile, ...hydrated, userId: hydrated.userId || uid };
-      saveCachedWebWorkspace(uid);
-      if (email && !matched.email && matched.user_id === uid) {
-        await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'profiles', `user_id=eq.${encodeURIComponent(uid)}`, { email }).catch(() => undefined);
+      if (matched.user_id && matched.user_id !== uid) {
+        const mergedProfile = { ...state.profile, ...hydrated, userId: uid, email: email || hydrated.email };
+        state.profile = mergedProfile;
+        await mergeSupabaseProfileIntoTarget(SUPABASE_WEB_CONFIG, matched.user_id, mergedProfile).catch(() => undefined);
+      } else {
+        state.profile = { ...state.profile, ...hydrated, userId: hydrated.userId || uid };
+        if (email && !matched.email && matched.user_id === uid) {
+          await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'profiles', `user_id=eq.${encodeURIComponent(uid)}`, { email }).catch(() => undefined);
+        }
       }
+      saveCachedWebWorkspace(uid);
     } else {
       await upsertSupabaseTable(
         SUPABASE_WEB_CONFIG,
@@ -5570,6 +5577,32 @@ function renderAdminConsole() {
                 SQL Editor &#8599;
               </a>
             </div>
+            ${(() => {
+              const mergeCandidates = state.creators.filter((c) => c.userId && c.userId !== state.user?.uid && !String(c.userId).startsWith('showcase_'));
+              if (mergeCandidates.length === 0) return '';
+              return `
+                <div style="border-top:1px solid var(--border);padding-top:12px;display:grid;gap:8px;">
+                  <div>
+                    <strong>Claim / Merge Old Profile Posts into @${escapeHtml(state.profile?.username || 'syali6511')}</strong>
+                    <div class="muted small">Move posts, stories, comments, and followers from an older UID profile (such as user.nMyAI9) into your current owner account.</div>
+                  </div>
+                  ${mergeCandidates.map((cand) => {
+                    const postCount = state.posts.filter((p) => p.userId === cand.userId && !p.id.startsWith('showcase_')).length;
+                    return `
+                      <div class="consent-row">
+                        <div style="min-width:0;flex:1;">
+                          <strong>@${escapeHtml(cand.username)}</strong>
+                          <div class="muted small">${postCount} posts &middot; ${cand.followersCount || 0} followers</div>
+                        </div>
+                        <button type="button" class="btn-primary btn-sm" data-merge-legacy-uid="${escapeHtml(cand.userId)}" ${state.supabaseBusy ? 'disabled' : ''}>
+                          Merge into @${escapeHtml(state.profile?.username || 'owner')}
+                        </button>
+                      </div>
+                    `;
+                  }).join('')}
+                </div>
+              `;
+            })()}
           </div>
         ` : ''}
       </div>
@@ -5615,6 +5648,30 @@ function renderAdminConsole() {
   document.getElementById('testSupabaseWebBtn')?.addEventListener('click', () => runSupabaseWebHealthCheck());
   document.getElementById('syncSupabaseWebBtn')?.addEventListener('click', () => syncSupabaseDataFromWeb());
   document.getElementById('downloadSupabaseJsonBtn')?.addEventListener('click', () => downloadSupabaseMigrationSnapshot());
+  mainStage.querySelectorAll('[data-merge-legacy-uid]').forEach((b) => {
+    b.onclick = async () => {
+      const sourceUid = b.dataset.mergeLegacyUid;
+      const cand = state.creators.find((c) => c.userId === sourceUid);
+      if (!sourceUid || !state.user?.uid) return;
+      if (!window.confirm(`Move all posts, stories, and followers from @${cand?.username || sourceUid} into @${state.profile?.username || 'owner'}?`)) return;
+      state.supabaseBusy = true;
+      renderAdminConsole();
+      try {
+        const res = await mergeSupabaseProfileIntoTarget(SUPABASE_WEB_CONFIG, sourceUid, {
+          ...state.profile,
+          userId: state.user.uid,
+          email: state.user.email || state.profile?.email || ''
+        });
+        await syncFromSupabase();
+        showToast(`Merged @${cand?.username || sourceUid} (${res.movedPosts} posts) into @${state.profile?.username || 'owner'}!`);
+      } catch (err) {
+        showToast(err?.message || 'Could not merge profile posts');
+      } finally {
+        state.supabaseBusy = false;
+        renderAdminConsole();
+      }
+    };
+  });
   bindFeedInteractions(mainStage);
 }
 

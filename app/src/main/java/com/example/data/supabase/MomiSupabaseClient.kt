@@ -1460,6 +1460,15 @@ class MomiSupabaseClient(
         if (cleanEmail.isNotBlank()) {
             val existingByEmail = fetchProfileByEmail(cleanEmail)
             if (existingByEmail != null) {
+                if (existingByEmail.userId != userId) {
+                    val migratedTarget = existingByEmail.copy(
+                        id = userId,
+                        userId = userId,
+                        email = cleanEmail,
+                        avatarUrl = avatarUrl ?: existingByEmail.avatarUrl
+                    )
+                    mergeLegacyProfileIntoUser(existingByEmail.userId, migratedTarget)
+                }
                 return Result.success(Unit)
             }
         }
@@ -1478,6 +1487,129 @@ class MomiSupabaseClient(
             onConflict = "user_id",
             ignoreDuplicates = true
         ).map { Unit }
+    }
+
+    suspend fun mergeLegacyProfileIntoUser(
+        sourceUserId: String,
+        targetProfile: UserProfile,
+        accessToken: String? = null
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        val cleanSource = sourceUserId.trim()
+        val cleanTarget = targetProfile.userId.trim()
+        if (!isConfigured() || cleanSource.isBlank() || cleanTarget.isBlank() || cleanSource == cleanTarget) {
+            return@withContext Result.success(0)
+        }
+        val token = resolvedAccessToken(accessToken)
+        val encSource = URLEncoder.encode(cleanSource, "UTF-8")
+        // 1. Ensure target profile exists first (without violating email uniqueness if source holds email)
+        val sourceProf = fetchProfileByUserId(cleanSource)
+        if (sourceProf != null && sourceProf.email.isNotBlank()) {
+            runCatching { patchRows("profiles", "user_id=eq.$encSource", mapOf("email" to ""), accessToken = token) }
+        }
+        upsertRows("profiles", listOf(MomiSupabaseSchema.toProfileRow(targetProfile)), accessToken = token, onConflict = "user_id")
+            .onFailure { return@withContext Result.failure(it) }
+
+        var movedPostsCount = 0
+        runCatching {
+            val sourcePosts = parsePosts(fetchJsonArray("$baseUrl/rest/v1/posts?select=id&user_id=eq.$encSource"))
+            movedPostsCount = sourcePosts.size
+        }
+
+        // 2. Re-assign authored posts, stories, comments, pages, groups, marketplace & notifications
+        patchRows(
+            "posts",
+            "user_id=eq.$encSource",
+            mapOf(
+                "user_id" to cleanTarget,
+                "author_username" to targetProfile.username.ifBlank { "momi.user" },
+                "author_display_name" to targetProfile.displayName.ifBlank { targetProfile.username },
+                "author_avatar_key" to targetProfile.avatarKey.ifBlank { "avatar_aria" },
+                "author_avatar_url" to targetProfile.avatarUrl,
+                "author_verified" to targetProfile.isVerified
+            ),
+            accessToken = token
+        )
+        patchRows(
+            "stories",
+            "user_id=eq.$encSource",
+            mapOf(
+                "user_id" to cleanTarget,
+                "username" to targetProfile.username.ifBlank { "momi.user" },
+                "avatar_key" to targetProfile.avatarKey.ifBlank { "avatar_aria" },
+                "avatar_url" to targetProfile.avatarUrl
+            ),
+            accessToken = token
+        )
+        patchRows(
+            "comments",
+            "user_id=eq.$encSource",
+            mapOf(
+                "user_id" to cleanTarget,
+                "author_username" to targetProfile.username.ifBlank { "momi.user" },
+                "author_avatar_key" to targetProfile.avatarKey.ifBlank { "avatar_aria" }
+            ),
+            accessToken = token
+        )
+        runCatching {
+            patchRows(
+                "pages",
+                "owner_uid=eq.$encSource",
+                mapOf("owner_uid" to cleanTarget, "owner_username" to targetProfile.username),
+                accessToken = token
+            )
+            patchRows(
+                "groups",
+                "owner_uid=eq.$encSource",
+                mapOf("owner_uid" to cleanTarget, "owner_username" to targetProfile.username),
+                accessToken = token
+            )
+            patchRows(
+                "market_products",
+                "seller_uid=eq.$encSource",
+                mapOf("seller_uid" to cleanTarget, "seller_username" to targetProfile.username),
+                accessToken = token
+            )
+            patchRows(
+                "merchants",
+                "user_id=eq.$encSource",
+                mapOf("user_id" to cleanTarget, "owner_username" to targetProfile.username),
+                accessToken = token
+            )
+            patchRows("notifications", "user_id=eq.$encSource", mapOf("user_id" to cleanTarget), accessToken = token)
+        }
+
+        // 3. Migrate followers & following edges respecting chk_follow_id_match + chk_no_self_follow
+        runCatching {
+            val edges = parseFollows(
+                fetchJsonArray(
+                    "$baseUrl/rest/v1/follows?select=*&or=(follower_uid.eq.$encSource,target_uid.eq.$encSource)"
+                )
+            )
+            val newEdges = edges.mapNotNull { edge ->
+                val newFollower = if (edge.followerUid == cleanSource) cleanTarget else edge.followerUid
+                val newTarget = if (edge.targetUid == cleanSource) cleanTarget else edge.targetUid
+                if (newFollower.isBlank() || newTarget.isBlank() || newFollower == newTarget) return@mapNotNull null
+                val followerUsername = if (edge.followerUid == cleanSource) targetProfile.username else edge.followerUsername
+                val targetUsername = if (edge.targetUid == cleanSource) targetProfile.username else edge.targetUsername
+                MomiSupabaseSchema.toFollowRow(
+                    FollowEdge(
+                        id = "${newFollower}_$newTarget",
+                        followerUid = newFollower,
+                        targetUid = newTarget,
+                        followerUsername = followerUsername.ifBlank { "momi.user" },
+                        targetUsername = targetUsername.ifBlank { "momi.user" },
+                        createdAt = edge.createdAt
+                    )
+                )
+            }
+            if (newEdges.isNotEmpty()) {
+                upsertRows("follows", newEdges, accessToken = token, onConflict = "id", ignoreDuplicates = true)
+            }
+        }
+
+        // 4. Remove the legacy duplicate profile row (ON DELETE CASCADE cleans up stale edges/records)
+        deleteRows("profiles", "user_id=eq.$encSource", accessToken = token)
+        Result.success(movedPostsCount)
     }
 
     suspend fun syncLiveSnapshot(

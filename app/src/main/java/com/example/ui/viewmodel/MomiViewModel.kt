@@ -3308,6 +3308,68 @@ class MomiViewModel(
         }
     }
 
+    fun mergeLegacyProfileIntoMine(
+        sourceProfile: UserProfile,
+        onComplete: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        if (!isOwnerAccount) {
+            onComplete(false, "Only the owner account can merge legacy profiles.")
+            return
+        }
+        val target = (profile.value ?: fallbackProfileBase()).copy(
+            id = currentUserId,
+            userId = currentUserId
+        )
+        if (sourceProfile.userId.isBlank() || sourceProfile.userId == currentUserId) {
+            onComplete(false, "Select a different legacy profile to merge.")
+            return
+        }
+        viewModelScope.launch {
+            _isSupabaseBusy.value = true
+            supabaseClient.mergeLegacyProfileIntoUser(sourceProfile.userId, target)
+                .onSuccess { movedPosts ->
+                    supaPosts.update { list ->
+                        list.map { p ->
+                            if (p.userId == sourceProfile.userId) {
+                                p.copy(
+                                    userId = target.userId,
+                                    authorUsername = target.username,
+                                    authorDisplayName = target.displayName,
+                                    authorAvatarKey = target.avatarKey,
+                                    authorAvatarUrl = target.avatarUrl,
+                                    authorVerified = target.isVerified
+                                )
+                            } else p
+                        }
+                    }
+                    supaStories.update { list ->
+                        list.map { s ->
+                            if (s.userId == sourceProfile.userId) {
+                                s.copy(
+                                    userId = target.userId,
+                                    username = target.username,
+                                    avatarKey = target.avatarKey,
+                                    avatarUrl = target.avatarUrl
+                                )
+                            } else s
+                        }
+                    }
+                    supaProfiles.update { list -> list.filterNot { it.userId == sourceProfile.userId } }
+                    refreshFromSupabase(forceEnsureProfile = false)
+                    val msg = "Merged @$sourceProfile.username ($movedPosts posts) into @${target.username}!"
+                        .replace("@$sourceProfile.username", "@${sourceProfile.username}")
+                    _statusNotice.value = msg
+                    onComplete(true, msg)
+                }
+                .onFailure { err ->
+                    val msg = unwrapErrorMessage(err, "Could not merge legacy profile")
+                    _errorMessage.value = msg
+                    onComplete(false, msg)
+                }
+            _isSupabaseBusy.value = false
+        }
+    }
+
     fun createPage(
         name: String,
         handle: String,

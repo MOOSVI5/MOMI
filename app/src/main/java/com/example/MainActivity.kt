@@ -1169,6 +1169,7 @@ private fun LumaApp(
                                 },
                                 onBoostPostWithShowcase = viewModel::boostPostMetricsWithShowcase,
                                 onPublishInAppAnnouncement = viewModel::publishInAppAnnouncement,
+                                onMergeLegacyProfile = viewModel::mergeLegacyProfileIntoMine,
                                 monetizationConfig = monetizationConfig,
                                 isSavingMonetization = isProcessingWalletAction,
                                 onSaveMonetizationConfig = viewModel::saveAdMonetizationConfig,

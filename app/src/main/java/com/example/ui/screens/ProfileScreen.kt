@@ -193,6 +193,7 @@ fun ProfileScreen(
     onPublishCustomShowcasePost: (ShowcaseAccount, String, String, String, String?, String?, Boolean, (Boolean) -> Unit) -> Unit = { _, _, _, _, _, _, _, cb -> cb(false) },
     onBoostPostWithShowcase: (Post, ShowcaseAccount, Long, Long, String, (Boolean) -> Unit) -> Unit = { _, _, _, _, _, cb -> cb(false) },
     onPublishInAppAnnouncement: (String, String, String, String, (Boolean) -> Unit) -> Unit = { _, _, _, _, cb -> cb(false) },
+    onMergeLegacyProfile: (UserProfile, (Boolean, String) -> Unit) -> Unit = { _, cb -> cb(false, "Unavailable") },
     monetizationConfig: AdMonetizationConfig = AdMonetizationConfig(),
     isSavingMonetization: Boolean = false,
     onSaveMonetizationConfig: (AdMonetizationConfig, (Boolean) -> Unit) -> Unit = { _, _ -> },
@@ -219,6 +220,7 @@ fun ProfileScreen(
     var showOwnerGrantsSheet by remember { mutableStateOf(false) }
     var showShowcaseManagerSheet by remember { mutableStateOf(false) }
     var showAnnouncementSheet by remember { mutableStateOf(false) }
+    var showMergeLegacySheet by remember { mutableStateOf(false) }
     var followSheetTab by remember { mutableStateOf<Int?>(null) }
 
     val canAccessSafetyQueue = isAdminViewActive || (
@@ -1004,6 +1006,21 @@ fun ProfileScreen(
         )
     }
 
+    if (showMergeLegacySheet && isOwnerAccount && profile != null) {
+        MergeLegacyProfileSheet(
+            ownerProfile = profile,
+            allCreators = allCreators,
+            allPosts = allPosts,
+            isBusy = isSupabaseBusy,
+            onMerge = { source ->
+                onMergeLegacyProfile(source) { ok, _ ->
+                    if (ok) showMergeLegacySheet = false
+                }
+            },
+            onDismiss = { showMergeLegacySheet = false }
+        )
+    }
+
     if (showAdminVerifySheet && isAdminViewActive) {
         var userFilter by remember { mutableStateOf("") }
         val filteredUsers = remember(allCreators, userFilter) {
@@ -1690,6 +1707,56 @@ fun ProfileScreen(
                                         maxLines = 1,
                                         softWrap = false
                                     )
+                                }
+                                val mergeableProfilesCount = remember(allCreators, profile?.userId) {
+                                    allCreators.count {
+                                        it.userId != profile?.userId &&
+                                            it.userId.isNotBlank() &&
+                                            !it.userId.startsWith("showcase_")
+                                    }
+                                }
+                                if (mergeableProfilesCount > 0) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .minimumInteractiveComponentSize()
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(MaterialTheme.colorScheme.surface)
+                                            .clickable { showMergeLegacySheet = true }
+                                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                                            .testTag("profile_merge_legacy_chip"),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Filled.SwapHoriz,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(17.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = "Claim / Merge Old Profile Posts",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "$mergeableProfilesCount found",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -2655,6 +2722,116 @@ private fun InAppAnnouncementSheet(
                 Text(if (isSaving) "Publishing..." else "Broadcast Inside App", fontWeight = FontWeight.Bold)
             }
             Spacer(modifier = Modifier.height(14.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MergeLegacyProfileSheet(
+    ownerProfile: UserProfile,
+    allCreators: List<UserProfile>,
+    allPosts: List<Post>,
+    isBusy: Boolean,
+    onMerge: (UserProfile) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val candidates = remember(allCreators, allPosts, ownerProfile.userId) {
+        allCreators
+            .filter {
+                it.userId != ownerProfile.userId &&
+                    it.userId.isNotBlank() &&
+                    !it.userId.startsWith("showcase_")
+            }
+            .sortedByDescending { creator ->
+                allPosts.count { it.userId == creator.userId && !it.id.startsWith("showcase_") }
+            }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.SwapHoriz, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Claim / Merge Old Profile into @${ownerProfile.username}",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Text(
+                text = "Move all posts, stories, comments, and followers from an older UID profile (for example user.nMyAI9) into your current @${ownerProfile.username} profile.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (candidates.isEmpty()) {
+                Text(
+                    text = "No separate legacy profiles found.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 360.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(candidates, key = { it.userId }) { candidate ->
+                        val postCount = allPosts.count { it.userId == candidate.userId && !it.id.startsWith("showcase_") }
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                LumaAvatar(
+                                    username = candidate.username,
+                                    avatarKey = candidate.avatarKey,
+                                    size = 40.dp,
+                                    avatarData = candidate.avatarData,
+                                    avatarUrl = candidate.avatarUrl
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "@${candidate.username}",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "$postCount posts · ${candidate.followersCount} followers",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Button(
+                                    enabled = !isBusy,
+                                    onClick = { onMerge(candidate) },
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.heightIn(min = 40.dp)
+                                ) {
+                                    Text(if (isBusy) "Merging..." else "Merge", fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
         }
     }
 }

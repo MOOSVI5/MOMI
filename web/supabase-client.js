@@ -586,6 +586,97 @@ export async function deleteSupabaseRows(
   return res.ok;
 }
 
+export async function mergeSupabaseProfileIntoTarget(
+  cfg = SUPABASE_WEB_CONFIG,
+  sourceUserId = '',
+  targetProfile = {},
+  fetchImpl = globalThis.fetch
+) {
+  const baseUrl = normalizeSupabaseUrl(cfg?.url);
+  const cleanSource = String(sourceUserId || '').trim();
+  const cleanTarget = String(targetProfile?.userId || '').trim();
+  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey) || !cleanSource || !cleanTarget || cleanSource === cleanTarget) {
+    return { movedPosts: 0 };
+  }
+  const anonKey = String(cfg.anonKey).trim();
+  const token = await ensureFreshWebAccessToken(cfg, fetchImpl);
+  const headers = buildSupabaseAuthHeaders(anonKey, token);
+  const encSource = encodeURIComponent(cleanSource);
+
+  const targetRow = {
+    user_id: cleanTarget,
+    username: String(targetProfile.username || 'momi.user').slice(0, 50),
+    email: String(targetProfile.email || '').trim().toLowerCase().slice(0, 160),
+    display_name: String(targetProfile.displayName || targetProfile.username || 'Momi Creator').slice(0, 80),
+    category: String(targetProfile.category || '').slice(0, 80),
+    bio: String(targetProfile.bio || '').slice(0, 300),
+    website: String(targetProfile.website || '').slice(0, 200),
+    avatar_key: String(targetProfile.avatarKey || 'avatar_aria').slice(0, 64),
+    avatar_url: targetProfile.avatarUrl || null,
+    is_verified: Boolean(targetProfile.isVerified)
+  };
+  await patchSupabaseRows(cfg, 'profiles', `user_id=eq.${encSource}`, { email: '' }, fetchImpl).catch(() => {});
+  await upsertSupabaseTable(cfg, 'profiles', [targetRow], token, fetchImpl, 'user_id');
+
+  const countRes = await fetchImpl(`${baseUrl}/rest/v1/posts?select=id&user_id=eq.${encSource}`, { headers }).catch(() => null);
+  const sourcePosts = countRes && countRes.ok ? await countRes.json() : [];
+  const movedPosts = Array.isArray(sourcePosts) ? sourcePosts.length : 0;
+
+  await patchSupabaseRows(cfg, 'posts', `user_id=eq.${encSource}`, {
+    user_id: cleanTarget,
+    author_username: targetRow.username,
+    author_display_name: targetRow.display_name,
+    author_avatar_key: targetRow.avatar_key,
+    author_avatar_url: targetRow.avatar_url,
+    author_verified: targetRow.is_verified
+  }, fetchImpl);
+  await patchSupabaseRows(cfg, 'stories', `user_id=eq.${encSource}`, {
+    user_id: cleanTarget,
+    username: targetRow.username,
+    avatar_key: targetRow.avatar_key
+  }, fetchImpl);
+  await patchSupabaseRows(cfg, 'comments', `user_id=eq.${encSource}`, {
+    user_id: cleanTarget,
+    author_username: targetRow.username,
+    author_avatar_key: targetRow.avatar_key
+  }, fetchImpl);
+  await patchSupabaseRows(cfg, 'pages', `owner_uid=eq.${encSource}`, { owner_uid: cleanTarget, owner_username: targetRow.username }, fetchImpl).catch(() => {});
+  await patchSupabaseRows(cfg, 'groups', `owner_uid=eq.${encSource}`, { owner_uid: cleanTarget, owner_username: targetRow.username }, fetchImpl).catch(() => {});
+  await patchSupabaseRows(cfg, 'market_products', `seller_uid=eq.${encSource}`, { seller_uid: cleanTarget, seller_username: targetRow.username }, fetchImpl).catch(() => {});
+  await patchSupabaseRows(cfg, 'merchants', `user_id=eq.${encSource}`, { user_id: cleanTarget, owner_username: targetRow.username }, fetchImpl).catch(() => {});
+  await patchSupabaseRows(cfg, 'notifications', `user_id=eq.${encSource}`, { user_id: cleanTarget }, fetchImpl).catch(() => {});
+
+  const edgesRes = await fetchImpl(
+    `${baseUrl}/rest/v1/follows?select=*&or=(follower_uid.eq.${encSource},target_uid.eq.${encSource})`,
+    { headers }
+  ).catch(() => null);
+  if (edgesRes && edgesRes.ok) {
+    const edges = await edgesRes.json();
+    if (Array.isArray(edges) && edges.length > 0) {
+      const migratedEdges = [];
+      for (const edge of edges) {
+        const nextFollower = edge.follower_uid === cleanSource ? cleanTarget : edge.follower_uid;
+        const nextTarget = edge.target_uid === cleanSource ? cleanTarget : edge.target_uid;
+        if (!nextFollower || !nextTarget || nextFollower === nextTarget) continue;
+        migratedEdges.push({
+          id: `${nextFollower}_${nextTarget}`,
+          follower_uid: nextFollower,
+          target_uid: nextTarget,
+          follower_username: edge.follower_uid === cleanSource ? targetRow.username : edge.follower_username,
+          target_username: edge.target_uid === cleanSource ? targetRow.username : edge.target_username,
+          created_at: edge.created_at || new Date().toISOString()
+        });
+      }
+      if (migratedEdges.length > 0) {
+        await upsertSupabaseTable(cfg, 'follows', migratedEdges, token, fetchImpl, 'id', true).catch(() => {});
+      }
+    }
+  }
+
+  await deleteSupabaseRows(cfg, 'profiles', `user_id=eq.${encSource}`, fetchImpl);
+  return { movedPosts };
+}
+
 export async function uploadWebFileToStorage(
   cfg = SUPABASE_WEB_CONFIG,
   bucket = 'momi-media',

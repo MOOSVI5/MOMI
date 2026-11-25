@@ -28,6 +28,12 @@ ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS announcement_body text NO
 ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS latest_version_name text NOT NULL DEFAULT '2.3';
 ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS release_notes text NOT NULL DEFAULT '';
 
+INSERT INTO public.app_config (id, latest_version_name)
+VALUES ('monetization', '2.3')
+ON CONFLICT (id) DO UPDATE
+SET latest_version_name = '2.3'
+WHERE coalesce(public.app_config.latest_version_name, '') IN ('', '1.0', '2.0', '2.1', '2.2');
+
 -- 2. Pages, Page Follows, Groups, Group Members & Showcase Starters Tables
 CREATE TABLE IF NOT EXISTS public.pages (
   id text PRIMARY KEY,
