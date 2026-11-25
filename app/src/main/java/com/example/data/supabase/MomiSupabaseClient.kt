@@ -1926,70 +1926,74 @@ class MomiSupabaseClient(
         }
     }
 
+    internal fun parsePostRecord(o: JSONObject): Post? {
+        val id = o.optString("id")
+        if (id.isBlank()) return null
+        return Post(
+            id = id,
+            userId = o.optString("user_id"),
+            authorUsername = o.optString("author_username", "momi.creator"),
+            authorDisplayName = o.optString("author_display_name", "Momi Creator"),
+            authorAvatarKey = o.optString("author_avatar_key", "avatar_aria"),
+            authorVerified = o.optBoolean("author_verified", false),
+            location = o.optString("location"),
+            imageKey = o.optString("image_key", "img_post_coastal"),
+            imageUrl = o.optCleanString("image_url"),
+            imageData = o.optCleanString("image_data"),
+            extraImageUrls = o.optStringList("extra_image_urls"),
+            extraImageDatas = o.optStringList("extra_image_datas"),
+            mediaType = o.optString("media_type", "IMAGE"),
+            videoUrl = o.optCleanString("video_url"),
+            videoData = o.optCleanString("video_data"),
+            videoDurationMs = o.optLong("video_duration_ms", 0L),
+            filterTag = o.optString("filter_tag", "NONE"),
+            aspectRatio = o.optString("aspect_ratio", "1:1"),
+            taggedUsernames = o.optStringList("tagged_usernames"),
+            hashtags = o.optStringList("hashtags"),
+            caption = o.optString("caption"),
+            likesCount = o.optLong("likes_count", 0L),
+            viewsCount = o.optLong("views_count", 0L),
+            commentsCount = o.optLong("comments_count", 0L),
+            category = o.optString("category", "For You"),
+            isReel = o.optBoolean("is_reel", false),
+            audioTitle = o.optString("audio_title"),
+            audioUrl = o.optCleanString("audio_url"),
+            audioData = o.optCleanString("audio_data"),
+            isBoosted = o.optBoolean("is_boosted", false),
+            boostTier = o.optString("boost_tier"),
+            recommendedLabel = o.optString("recommended_label"),
+            pageId = o.optCleanString("page_id"),
+            groupId = o.optCleanString("group_id"),
+            communityName = o.optString("community_name"),
+            createdAt = parseIsoTimestamp(o.optString("created_at"))
+        )
+    }
+
     private fun parsePosts(arr: JSONArray): List<Post> = buildList {
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
-            val id = o.optString("id")
-            if (id.isBlank()) continue
-            add(
-                Post(
-                    id = id,
-                    userId = o.optString("user_id"),
-                    authorUsername = o.optString("author_username", "momi.creator"),
-                    authorDisplayName = o.optString("author_display_name", "Momi Creator"),
-                    authorAvatarKey = o.optString("author_avatar_key", "avatar_aria"),
-                    authorVerified = o.optBoolean("author_verified", false),
-                    location = o.optString("location"),
-                    imageKey = o.optString("image_key", "img_post_coastal"),
-                    imageUrl = o.optCleanString("image_url"),
-                    imageData = o.optCleanString("image_data"),
-                    extraImageUrls = o.optStringList("extra_image_urls"),
-                    extraImageDatas = o.optStringList("extra_image_datas"),
-                    mediaType = o.optString("media_type", "IMAGE"),
-                    videoUrl = o.optCleanString("video_url"),
-                    videoData = o.optCleanString("video_data"),
-                    videoDurationMs = o.optLong("video_duration_ms", 0L),
-                    filterTag = o.optString("filter_tag", "NONE"),
-                    aspectRatio = o.optString("aspect_ratio", "1:1"),
-                    taggedUsernames = o.optStringList("tagged_usernames"),
-                    hashtags = o.optStringList("hashtags"),
-                    caption = o.optString("caption"),
-                    likesCount = o.optLong("likes_count", 0L),
-                    viewsCount = o.optLong("views_count", 0L),
-                    commentsCount = o.optLong("comments_count", 0L),
-                    category = o.optString("category", "For You"),
-                    isReel = o.optBoolean("is_reel", false),
-                    audioTitle = o.optString("audio_title"),
-                    audioUrl = o.optCleanString("audio_url"),
-                    audioData = o.optCleanString("audio_data"),
-                    isBoosted = o.optBoolean("is_boosted", false),
-                    boostTier = o.optString("boost_tier"),
-                    recommendedLabel = o.optString("recommended_label"),
-                    pageId = o.optCleanString("page_id"),
-                    groupId = o.optCleanString("group_id"),
-                    communityName = o.optString("community_name"),
-                    createdAt = parseIsoTimestamp(o.optString("created_at"))
-                )
-            )
+            parsePostRecord(o)?.let { add(it) }
         }
+    }
+
+    internal fun parseCommentRecord(o: JSONObject): Comment? {
+        val id = o.optString("id")
+        if (id.isBlank()) return null
+        return Comment(
+            id = id,
+            userId = o.optString("user_id"),
+            authorUsername = o.optString("author_username", "momi.creator"),
+            authorAvatarKey = o.optString("author_avatar_key", "avatar_aria"),
+            text = o.optString("text"),
+            likesCount = o.optLong("likes_count", 0L),
+            createdAt = parseIsoTimestamp(o.optString("created_at"))
+        )
     }
 
     private fun parseComments(arr: JSONArray): List<Comment> = buildList {
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
-            val id = o.optString("id")
-            if (id.isBlank()) continue
-            add(
-                Comment(
-                    id = id,
-                    userId = o.optString("user_id"),
-                    authorUsername = o.optString("author_username", "momi.creator"),
-                    authorAvatarKey = o.optString("author_avatar_key", "avatar_aria"),
-                    text = o.optString("text"),
-                    likesCount = o.optLong("likes_count", 0L),
-                    createdAt = parseIsoTimestamp(o.optString("created_at"))
-                )
-            )
+            parseCommentRecord(o)?.let { add(it) }
         }
     }
 

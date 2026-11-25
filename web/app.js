@@ -165,6 +165,8 @@ const state = {
   realtimeClient: null,
   realtimeState: 'idle',
   activePostModalId: null,
+  activeEngagersPostId: null,
+  activeEngagersRefresh: null,
   activeLiveRoomRefresh: null,
   livePollTimer: null,
   liveTimer: null,
@@ -477,6 +479,8 @@ function closeModal() {
     state.livePollTimer = null;
   }
   state.activePostModalId = null;
+  state.activeEngagersPostId = null;
+  state.activeEngagersRefresh = null;
   state.activeLiveRoomRefresh = null;
   modalBackdrop.classList.add('hidden');
   modalContent.innerHTML = '';
@@ -740,6 +744,8 @@ function cleanupSubscriptions() {
     state.livePollTimer = null;
   }
   state.activePostModalId = null;
+  state.activeEngagersPostId = null;
+  state.activeEngagersRefresh = null;
   state.activeLiveRoomRefresh = null;
   state.realtimeState = 'idle';
   state.pollTimers.forEach((id) => clearInterval(id));
@@ -905,6 +911,7 @@ async function bootstrapSupabaseAuth() {
       }
       if (saved) {
         applyAuthSession(saved);
+        state.realtimeClient?.updateAccessToken(saved.accessToken);
         return;
       }
     }
@@ -926,10 +933,10 @@ async function bootstrapSupabaseAuth() {
 bootstrapSupabaseAuth();
 
 async function initializeSupabaseWorkspace(user) {
+  registerDatabaseListenersOnLogin(user);
+  startSupabasePolling(user.uid);
   await ensureUserSeededInSupabase(user);
   await refreshAllFromSupabase({ showErrors: true });
-  startSupabaseRealtime(user.uid);
-  startSupabasePolling(user.uid);
 }
 
 async function ensureUserSeededInSupabase(user) {
@@ -1256,6 +1263,123 @@ function scheduleRealtimeFeedRefresh() {
   }, 350);
 }
 
+function refreshUiImmediatelyFromRealtime() {
+  if (!state.user) return;
+  updateBadges();
+  renderRightRail();
+  if (!shouldDeferDomRefresh()) {
+    renderMainStage();
+  }
+}
+
+function applyRealtimePostEvent(evt) {
+  const type = String(evt?.eventType || '').toUpperCase();
+  const pm = state.pendingMutations;
+  if (type === 'DELETE') {
+    const deletedId = String(evt?.oldRecord?.id || evt?.record?.id || '').trim();
+    if (!deletedId) return;
+    state.posts = state.posts.filter((p) => p.id !== deletedId);
+    if (state.user?.uid) saveCachedWebWorkspace(state.user.uid);
+    refreshUiImmediatelyFromRealtime();
+    return;
+  }
+  if (!evt?.record) return;
+  const mapped = mapSupabasePostToWeb(evt.record);
+  if (!mapped?.id || pm.deletedPostIds.has(mapped.id)) return;
+  const minV = pm.minViews.get(mapped.id)?.value || 0;
+  const minL = pm.minLikes.get(mapped.id)?.value || 0;
+  const merged = {
+    ...mapped,
+    viewsCount: Math.max(mapped.viewsCount || 0, minV),
+    likesCount: Math.max(mapped.likesCount || 0, minL)
+  };
+  const idx = state.posts.findIndex((p) => p.id === merged.id);
+  const next = idx >= 0
+    ? state.posts.map((p, i) => (i === idx ? merged : p))
+    : [merged, ...state.posts];
+  state.posts = sortFeedWithBoostPriority(next);
+  if (state.user?.uid) saveCachedWebWorkspace(state.user.uid);
+  refreshUiImmediatelyFromRealtime();
+}
+
+function applyRealtimeCommentEvent(evt) {
+  const type = String(evt?.eventType || '').toUpperCase();
+  const postId = String(evt?.record?.post_id || evt?.oldRecord?.post_id || '').trim();
+  if (postId) {
+    const post = state.posts.find((p) => p.id === postId);
+    if (post && type === 'INSERT') {
+      post.commentsCount = (post.commentsCount || 0) + 1;
+      refreshUiImmediatelyFromRealtime();
+    } else if (post && type === 'DELETE') {
+      post.commentsCount = Math.max(0, (post.commentsCount || 0) - 1);
+      refreshUiImmediatelyFromRealtime();
+    }
+  }
+  if (state.activePostModalId && (!postId || postId === state.activePostModalId)) {
+    refreshOpenPostModalComments(state.activePostModalId);
+  }
+}
+
+function applyRealtimeLikeOrInteractionEvent(evt) {
+  const type = String(evt?.eventType || '').toUpperCase();
+  const isDelete = type === 'DELETE';
+  const row = isDelete ? (evt?.oldRecord || evt?.record || {}) : (evt?.record || {});
+  const table = String(evt?.table || '').toLowerCase();
+  const targetType = table === 'likes'
+    ? 'LIKED_POST'
+    : String(row.target_type || '').trim().toUpperCase();
+  const targetId = String(row.target_id || row.post_id || '').trim();
+  const actorUid = String(row.user_id || '').trim();
+  if (!targetId) return;
+
+  if (targetType === 'LIKED_POST' && actorUid) {
+    if (!state.postLikersByPostId.has(targetId)) {
+      state.postLikersByPostId.set(targetId, new Set());
+    }
+    const likersSet = state.postLikersByPostId.get(targetId);
+    const hadUser = likersSet.has(actorUid);
+    let changed = false;
+    if (isDelete && hadUser) {
+      likersSet.delete(actorUid);
+      changed = true;
+    } else if (!isDelete && !hadUser) {
+      likersSet.add(actorUid);
+      changed = true;
+    }
+    if (actorUid === state.user?.uid && !state.pendingMutations.likes.has(targetId)) {
+      if (isDelete) state.likedIds.delete(targetId);
+      else state.likedIds.add(targetId);
+    }
+    if (changed) {
+      const post = state.posts.find((p) => p.id === targetId);
+      if (post && !state.pendingMutations.minLikes.has(targetId)) {
+        post.likesCount = Math.max(0, (post.likesCount || 0) + (isDelete ? -1 : 1));
+      }
+      refreshUiImmediatelyFromRealtime();
+      if (state.activeEngagersPostId === targetId && typeof state.activeEngagersRefresh === 'function') {
+        state.activeEngagersRefresh();
+      }
+    }
+  } else if (targetType === 'VIEWED_POST' && actorUid && !isDelete) {
+    if (!state.postViewersByPostId.has(targetId)) {
+      state.postViewersByPostId.set(targetId, new Set());
+    }
+    state.postViewersByPostId.get(targetId).add(actorUid);
+    if (state.activeEngagersPostId === targetId && typeof state.activeEngagersRefresh === 'function') {
+      state.activeEngagersRefresh();
+    }
+  } else if (targetType === 'BOOKMARK' && actorUid === state.user?.uid && !state.pendingMutations.bookmarks.has(targetId)) {
+    if (isDelete) state.bookmarkIds.delete(targetId);
+    else state.bookmarkIds.add(targetId);
+    refreshUiImmediatelyFromRealtime();
+  }
+}
+
+function registerDatabaseListenersOnLogin(user) {
+  if (!user?.uid) return;
+  startSupabaseRealtime(user.uid);
+}
+
 function startSupabaseRealtime(uid) {
   if (state.realtimeClient) {
     state.realtimeClient.stop();
@@ -1290,15 +1414,25 @@ function startSupabaseRealtime(uid) {
         }
         return;
       }
-      if (table === 'comments') {
-        const postId = evt?.record?.post_id || evt?.oldRecord?.post_id || '';
-        if (state.activePostModalId && (!postId || postId === state.activePostModalId)) {
-          refreshOpenPostModalComments(state.activePostModalId);
-        }
-        scheduleRealtimeFeedRefresh();
-        return;
-      }
       scheduleRealtimeFeedRefresh();
+    }
+  });
+  client.registerTableListeners({
+    posts: (evt) => {
+      if (state.user?.uid !== uid) return;
+      applyRealtimePostEvent(evt);
+    },
+    comments: (evt) => {
+      if (state.user?.uid !== uid) return;
+      applyRealtimeCommentEvent(evt);
+    },
+    user_interactions: (evt) => {
+      if (state.user?.uid !== uid) return;
+      applyRealtimeLikeOrInteractionEvent(evt);
+    },
+    likes: (evt) => {
+      if (state.user?.uid !== uid) return;
+      applyRealtimeLikeOrInteractionEvent(evt);
     }
   });
   state.realtimeClient = client;
@@ -3740,6 +3874,8 @@ function openPostEngagersModal(postId, initialTab = 0) {
     });
     bindUserAndFollowButtons(modalContent);
   };
+  state.activeEngagersPostId = postId;
+  state.activeEngagersRefresh = renderEngagersBody;
   renderEngagersBody();
 }
 

@@ -258,6 +258,12 @@ class SupabaseMigrationTest {
         assertTrue(joinPayload.contains("\"topic\":\"realtime:public\""))
         assertTrue(joinPayload.contains("\"access_token\":\"jwt_abc\""))
         assertTrue(joinPayload.contains("\"postgres_changes\""))
+        assertTrue(joinPayload.contains("\"table\":\"posts\""))
+        assertTrue(joinPayload.contains("\"table\":\"comments\""))
+        assertTrue(joinPayload.contains("\"table\":\"user_interactions\""))
+
+        val wildcardPayload = SupabaseRealtimeClient.buildJoinPayload(ref = "4", tables = emptyList())
+        assertTrue(wildcardPayload.contains("""[{"event":"*","schema":"public"}]"""))
 
         val parsed = SupabaseRealtimeClient.parseRealtimeChangeMessage(
             """
@@ -279,6 +285,28 @@ class SupabaseMigrationTest {
         assertEquals("chat_messages", parsed?.table)
         assertEquals("INSERT", parsed?.eventType)
         assertEquals("u1__u2", parsed?.recordFields?.get("thread_id"))
+
+        val parsedUnlike = SupabaseRealtimeClient.parseRealtimeChangeMessage(
+            """
+            {
+              "topic": "realtime:public",
+              "event": "postgres_changes",
+              "payload": {
+                "data": {
+                  "schema": "public",
+                  "table": "user_interactions",
+                  "type": "DELETE",
+                  "old_record": { "user_id": "u2", "target_type": "LIKED_POST", "target_id": "post_99" }
+                }
+              }
+            }
+            """.trimIndent()
+        )
+        assertNotNull(parsedUnlike)
+        assertEquals("user_interactions", parsedUnlike?.table)
+        assertEquals("DELETE", parsedUnlike?.eventType)
+        assertEquals("LIKED_POST", parsedUnlike?.oldRecordFields?.get("target_type"))
+        assertEquals("post_99", parsedUnlike?.oldRecordFields?.get("target_id"))
 
         assertEquals(6, ShowcaseCatalog.PERSONAS.size)
         assertTrue(ShowcaseCatalog.COMMENTS.size >= 4)

@@ -41,7 +41,9 @@ data class SupabaseRealtimeEvent(
     val table: String,
     val eventType: String,
     val recordJson: JSONObject? = null,
-    val recordFields: Map<String, String> = emptyMap()
+    val recordFields: Map<String, String> = emptyMap(),
+    val oldRecordJson: JSONObject? = null,
+    val oldRecordFields: Map<String, String> = emptyMap()
 )
 
 class SupabaseRealtimeClient(
@@ -52,7 +54,7 @@ class SupabaseRealtimeClient(
     private val _connectionState = MutableStateFlow(SupabaseRealtimeStatus())
     val connectionState: StateFlow<SupabaseRealtimeStatus> = _connectionState.asStateFlow()
 
-    private val _events = MutableSharedFlow<SupabaseRealtimeEvent>(extraBufferCapacity = 64)
+    private val _events = MutableSharedFlow<SupabaseRealtimeEvent>(extraBufferCapacity = 128)
     val events: SharedFlow<SupabaseRealtimeEvent> = _events.asSharedFlow()
 
     private val refCounter = AtomicInteger(1)
@@ -63,11 +65,13 @@ class SupabaseRealtimeClient(
     @Volatile private var reconnectJob: Job? = null
     @Volatile private var stopped = true
     @Volatile private var reconnectAttempts = 0
+    @Volatile private var usedWildcardFallback = false
 
     fun isConfigured(): Boolean = MomiSupabaseSchema.isConfigured(rawBaseUrl, rawAnonKey)
 
     fun connect(
         scope: CoroutineScope,
+        forceReconnect: Boolean = false,
         accessTokenProvider: () -> String? = { MomiSupabaseClient.activeSession?.accessToken }
     ) {
         if (!isConfigured()) {
@@ -77,11 +81,37 @@ class SupabaseRealtimeClient(
             )
             return
         }
+        val alreadyRunning = !stopped && activeSocket != null &&
+            _connectionState.value.state != SupabaseRealtimeConnectionState.DISCONNECTED
         activeScope = scope
         tokenProvider = accessTokenProvider
+        if (alreadyRunning && !forceReconnect) {
+            updateAccessToken(accessTokenProvider())
+            return
+        }
         stopped = false
         reconnectAttempts = 0
+        usedWildcardFallback = false
         openSocket()
+    }
+
+    /**
+     * Registers a coroutine collector for specific Postgres tables (e.g. posts, comments,
+     * user_interactions / likes) upon user login, ensuring instant UI synchronization.
+     */
+    fun registerTableListeners(
+        scope: CoroutineScope,
+        tables: Collection<String>,
+        onEvent: (SupabaseRealtimeEvent) -> Unit
+    ): Job {
+        val watched = tables.map { it.trim().lowercase() }.filter { it.isNotEmpty() }.toSet()
+        return scope.launch {
+            events.collect { event ->
+                if (watched.isEmpty() || event.table.trim().lowercase() in watched) {
+                    onEvent(event)
+                }
+            }
+        }
     }
 
     fun updateAccessToken(accessToken: String?) {
@@ -138,19 +168,21 @@ class SupabaseRealtimeClient(
         activeSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 reconnectAttempts = 0
+                usedWildcardFallback = false
                 val token = tokenProvider()?.trim().takeUnless { it.isNullOrEmpty() }
                     ?: rawAnonKey.trim().takeIf { MomiSupabaseSchema.isLegacyJwtKey(it) }
                 val joinMsg = buildJoinPayload(
                     topic = REALTIME_TOPIC,
                     ref = refCounter.getAndIncrement().toString(),
-                    accessToken = token
+                    accessToken = token,
+                    tables = MomiSupabaseSchema.TABLES.toList()
                 )
                 webSocket.send(joinMsg)
                 startHeartbeat(webSocket)
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                handleIncomingMessage(text)
+                handleIncomingMessage(webSocket, text)
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -212,18 +244,32 @@ class SupabaseRealtimeClient(
         }
     }
 
-    private fun handleIncomingMessage(rawText: String) {
+    private fun handleIncomingMessage(webSocket: WebSocket, rawText: String) {
         val json = runCatching { JSONObject(rawText) }.getOrNull() ?: return
         val eventName = json.optString("event")
         when (eventName) {
             "phx_reply" -> {
                 val topic = json.optString("topic")
                 val status = json.optJSONObject("payload")?.optString("status")
-                if (topic == REALTIME_TOPIC && status == "ok") {
-                    _connectionState.value = SupabaseRealtimeStatus(
-                        state = SupabaseRealtimeConnectionState.CONNECTED,
-                        detail = "Realtime WebSocket Live (Postgres CDC)"
-                    )
+                if (topic == REALTIME_TOPIC) {
+                    if (status == "ok") {
+                        _connectionState.value = SupabaseRealtimeStatus(
+                            state = SupabaseRealtimeConnectionState.CONNECTED,
+                            detail = "Realtime WebSocket Live (Posts, Comments & Likes)"
+                        )
+                    } else if (!usedWildcardFallback && !stopped && webSocket == activeSocket) {
+                        usedWildcardFallback = true
+                        val token = tokenProvider()?.trim().takeUnless { it.isNullOrEmpty() }
+                            ?: rawAnonKey.trim().takeIf { MomiSupabaseSchema.isLegacyJwtKey(it) }
+                        webSocket.send(
+                            buildJoinPayload(
+                                topic = REALTIME_TOPIC,
+                                ref = refCounter.getAndIncrement().toString(),
+                                accessToken = token,
+                                tables = emptyList()
+                            )
+                        )
+                    }
                 }
             }
             "postgres_changes" -> {
@@ -241,6 +287,13 @@ class SupabaseRealtimeClient(
         private const val TAG = "SupabaseRealtime"
         const val REALTIME_TOPIC = "realtime:public"
         private const val HEARTBEAT_INTERVAL_MS = 30_000L
+
+        val SOCIAL_ENGAGEMENT_TABLES: List<String> = listOf(
+            "posts",
+            "comments",
+            "user_interactions",
+            "likes"
+        )
 
         private val defaultWebSocketClient: OkHttpClient by lazy {
             OkHttpClient.Builder()
@@ -278,7 +331,8 @@ class SupabaseRealtimeClient(
         fun buildJoinPayload(
             topic: String = REALTIME_TOPIC,
             ref: String = "1",
-            accessToken: String? = null
+            accessToken: String? = null,
+            tables: List<String> = MomiSupabaseSchema.TABLES.toList()
         ): String {
             val cleanToken = accessToken?.trim()?.takeIf { it.isNotEmpty() }
             val tokenPart = if (cleanToken != null) {
@@ -286,7 +340,28 @@ class SupabaseRealtimeClient(
             } else {
                 ""
             }
-            return """{"topic":"${escapeJsonString(topic)}","event":"phx_join","payload":{"config":{"broadcast":{"self":false},"presence":{"key":""},"postgres_changes":[{"event":"*","schema":"public"}]}$tokenPart},"ref":"${escapeJsonString(ref)}"}"""
+            val cleanTables = tables.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            val postgresChangesJson = if (cleanTables.isEmpty()) {
+                """[{"event":"*","schema":"public"}]"""
+            } else {
+                cleanTables.joinToString(prefix = "[", postfix = "]", separator = ",") { tbl ->
+                    """{"event":"*","schema":"public","table":"${escapeJsonString(tbl)}"}"""
+                }
+            }
+            return """{"topic":"${escapeJsonString(topic)}","event":"phx_join","payload":{"config":{"broadcast":{"self":false},"presence":{"key":""},"postgres_changes":$postgresChangesJson}$tokenPart},"ref":"${escapeJsonString(ref)}"}"""
+        }
+
+        private fun extractRecordFields(obj: JSONObject?): Map<String, String> = buildMap {
+            if (obj != null) {
+                val keys = obj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val v = obj.opt(k)
+                    if (v != null && v != JSONObject.NULL) {
+                        put(k, v.toString())
+                    }
+                }
+            }
         }
 
         fun parseRealtimeChangeEvent(json: JSONObject): SupabaseRealtimeEvent? {
@@ -300,23 +375,14 @@ class SupabaseRealtimeClient(
                 .ifBlank { "UPDATE" }
                 .uppercase()
             val record = data.optJSONObject("record") ?: data.optJSONObject("new")
-            val fields = buildMap {
-                if (record != null) {
-                    val keys = record.keys()
-                    while (keys.hasNext()) {
-                        val k = keys.next()
-                        val v = record.opt(k)
-                        if (v != null && v != JSONObject.NULL) {
-                            put(k, v.toString())
-                        }
-                    }
-                }
-            }
+            val oldRecord = data.optJSONObject("old_record") ?: data.optJSONObject("old")
             return SupabaseRealtimeEvent(
                 table = table,
                 eventType = type,
                 recordJson = record,
-                recordFields = fields
+                recordFields = extractRecordFields(record),
+                oldRecordJson = oldRecord,
+                oldRecordFields = extractRecordFields(oldRecord)
             )
         }
 
@@ -336,9 +402,9 @@ class SupabaseRealtimeClient(
                     ?: Regex(""""eventType"\s*:\s*"([^"]+)"""").find(rawText)?.groupValues?.getOrNull(1)
                     ?: "UPDATE"
                 ).trim().uppercase()
-            val fields = buildMap {
-                val recordMatch = Regex(""""(?:record|new)"\s*:\s*\{([^}]*)\}""").find(rawText)
-                val body = recordMatch?.groupValues?.getOrNull(1).orEmpty()
+            fun parseFieldsFor(pattern: String): Map<String, String> = buildMap {
+                val match = Regex(pattern).find(rawText)
+                val body = match?.groupValues?.getOrNull(1).orEmpty()
                 Regex(""""([^"]+)"\s*:\s*"([^"]*)"""").findAll(body).forEach { m ->
                     put(m.groupValues[1], m.groupValues[2])
                 }
@@ -347,7 +413,9 @@ class SupabaseRealtimeClient(
                 table = table,
                 eventType = type,
                 recordJson = null,
-                recordFields = fields
+                recordFields = parseFieldsFor(""""(?:record|new)"\s*:\s*\{([^}]*)\}"""),
+                oldRecordJson = null,
+                oldRecordFields = parseFieldsFor(""""(?:old_record|old)"\s*:\s*\{([^}]*)\}""")
             )
         }
     }

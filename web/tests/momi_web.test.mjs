@@ -46,6 +46,7 @@ import {
   buildSupabaseRealtimeJoinMessage,
   buildSupabaseRealtimeWsUrl,
   checkSupabaseHealth,
+  createSupabaseRealtimeClient,
   extractSupabaseJwtExpiryMs,
   isSafeSupabaseAnonKey,
   isSupabaseClientReady,
@@ -63,6 +64,7 @@ import {
   normalizeSupabaseUrl,
   parseSupabaseOAuthCallback,
   parseSupabaseRealtimeMessage,
+  SOCIAL_REALTIME_TABLES,
   supabaseResendSignupOtp,
   supabaseVerifyEmailOtp,
   syncBundleToSupabase
@@ -207,6 +209,10 @@ test('starter showcase personas, OTP auth, AI assistant, engagers modal, and Sup
   const appJs = fs.readFileSync(path.join(REPO_ROOT, 'web', 'app.js'), 'utf8');
   assert.equal(/firebase|monetag|gamezop/i.test(appJs), false);
   assert.ok(appJs.includes('createSupabaseRealtimeClient'));
+  assert.ok(appJs.includes('registerDatabaseListenersOnLogin'));
+  assert.ok(appJs.includes('applyRealtimePostEvent'));
+  assert.ok(appJs.includes('applyRealtimeCommentEvent'));
+  assert.ok(appJs.includes('applyRealtimeLikeOrInteractionEvent'));
   assert.ok(appJs.includes('handleSyncError'));
   assert.ok(appJs.includes('removeAllShowcaseContent'));
   assert.ok(appJs.includes('publishShowcaseBurst'));
@@ -455,7 +461,14 @@ test('Supabase Realtime CDC WebSocket helpers and SQL publication cover all publ
   assert.equal(joinMsg.event, 'phx_join');
   assert.equal(joinMsg.ref, '7');
   assert.equal(joinMsg.payload.access_token, 'user_jwt_123');
-  assert.deepEqual(joinMsg.payload.config.postgres_changes, [{ event: '*', schema: 'public' }]);
+  const joinedTables = joinMsg.payload.config.postgres_changes.map((entry) => entry.table);
+  assert.ok(joinedTables.includes('posts'));
+  assert.ok(joinedTables.includes('comments'));
+  assert.ok(joinedTables.includes('user_interactions'));
+
+  const wildcardJoin = buildSupabaseRealtimeJoinMessage('8', '', []);
+  assert.deepEqual(wildcardJoin.payload.config.postgres_changes, [{ event: '*', schema: 'public' }]);
+  assert.deepEqual(SOCIAL_REALTIME_TABLES, ['posts', 'comments', 'user_interactions', 'likes']);
 
   const parsedChange = parseSupabaseRealtimeMessage(JSON.stringify({
     topic: 'realtime:public',
@@ -482,6 +495,52 @@ test('Supabase Realtime CDC WebSocket helpers and SQL publication cover all publ
   }));
   assert.equal(parsedReply.kind, 'phx_reply');
   assert.equal(parsedReply.status, 'ok');
+
+  let mockSocketInstance = null;
+  class MockWebSocket {
+    constructor(url) {
+      this.url = url;
+      this.readyState = 1;
+      this.sent = [];
+      mockSocketInstance = this;
+    }
+    send(data) {
+      this.sent.push(JSON.parse(data));
+    }
+    close() {
+      this.readyState = 3;
+    }
+  }
+  const seenEvents = [];
+  const rtClient = createSupabaseRealtimeClient(
+    {
+      url: 'https://qotuvugkapaspowhbsbf.supabase.co',
+      anonKey: 'sb_publishable_LbrQBbU_4qH18qjopmNwIg_ALsMhlln'
+    },
+    {
+      getAccessToken: () => 'jwt_login_1',
+      WebSocketImpl: MockWebSocket
+    }
+  );
+  rtClient.registerTableListeners({
+    posts: (e) => seenEvents.push(`posts:${e.eventType}`),
+    comments: (e) => seenEvents.push(`comments:${e.eventType}`),
+    user_interactions: (e) => seenEvents.push(`user_interactions:${e.eventType}`),
+    likes: (e) => seenEvents.push(`likes:${e.eventType}`)
+  });
+  rtClient.start();
+  mockSocketInstance.onopen();
+  for (const [table, eventType] of [['posts', 'INSERT'], ['comments', 'INSERT'], ['user_interactions', 'DELETE'], ['likes', 'INSERT']]) {
+    mockSocketInstance.onmessage({
+      data: JSON.stringify({
+        topic: 'realtime:public',
+        event: 'postgres_changes',
+        payload: { data: { schema: 'public', table, type: eventType, record: { id: 'x1' }, old_record: { id: 'x1' } } }
+      })
+    });
+  }
+  assert.deepEqual(seenEvents, ['posts:INSERT', 'comments:INSERT', 'user_interactions:DELETE', 'likes:INSERT']);
+  rtClient.stop();
 
   for (const sqlRel of ['supabase/enable_sync.sql', 'supabase/schema.sql']) {
     const sqlText = fs.readFileSync(path.join(REPO_ROOT, sqlRel), 'utf8');

@@ -1332,6 +1332,8 @@ export async function supabaseSignOut(cfg = SUPABASE_WEB_CONFIG, accessToken = '
 // Supabase Realtime CDC WebSocket Client (Phoenix Protocol)
 // ---------------------------------------------------------------------------
 
+export const SOCIAL_REALTIME_TABLES = ['posts', 'comments', 'user_interactions', 'likes'];
+
 export function buildSupabaseRealtimeWsUrl(cfg = SUPABASE_WEB_CONFIG) {
   const baseUrl = normalizeSupabaseUrl(cfg?.url);
   if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) return '';
@@ -1340,12 +1342,22 @@ export function buildSupabaseRealtimeWsUrl(cfg = SUPABASE_WEB_CONFIG) {
   return `${wsBase}/realtime/v1/websocket?apikey=${anonKey}&vsn=1.0.0`;
 }
 
-export function buildSupabaseRealtimeJoinMessage(ref = '1', accessToken = '') {
+export function buildSupabaseRealtimeJoinMessage(
+  ref = '1',
+  accessToken = '',
+  tables = SUPABASE_SCHEMA_TABLES
+) {
+  const cleanTables = Array.isArray(tables)
+    ? [...new Set(tables.map((t) => String(t || '').trim()).filter(Boolean))]
+    : [];
+  const postgresChanges = cleanTables.length > 0
+    ? cleanTables.map((table) => ({ event: '*', schema: 'public', table }))
+    : [{ event: '*', schema: 'public' }];
   const payload = {
     config: {
       broadcast: { self: false },
       presence: { key: '' },
-      postgres_changes: [{ event: '*', schema: 'public' }]
+      postgres_changes: postgresChanges
     }
   };
   const token = String(accessToken || '').trim();
@@ -1414,6 +1426,7 @@ export function createSupabaseRealtimeClient(
     getAccessToken = getActiveSupabaseAccessToken,
     onTableChange = () => undefined,
     onStatusChange = () => undefined,
+    tables = SUPABASE_SCHEMA_TABLES,
     WebSocketImpl = globalThis.WebSocket
   } = {}
 ) {
@@ -1423,6 +1436,8 @@ export function createSupabaseRealtimeClient(
   let reconnectDelayMs = 1500;
   let heartbeatTimer = null;
   let reconnectTimer = null;
+  let usedWildcardFallback = false;
+  const tableListeners = new Map();
 
   const nextRef = () => {
     refSeq += 1;
@@ -1448,6 +1463,21 @@ export function createSupabaseRealtimeClient(
     } catch {
       return false;
     }
+  };
+
+  const dispatchTableEvent = (parsed) => {
+    const tbl = String(parsed?.table || '').trim().toLowerCase();
+    const handlers = tableListeners.get(tbl);
+    if (handlers && handlers.size > 0) {
+      for (const fn of handlers) {
+        try {
+          fn(parsed);
+        } catch (err) {
+          console.warn(`[Momi Web] Realtime listener error (${tbl}):`, err);
+        }
+      }
+    }
+    onTableChange(parsed);
   };
 
   const scheduleReconnect = () => {
@@ -1493,8 +1523,9 @@ export function createSupabaseRealtimeClient(
         return;
       }
       reconnectDelayMs = 1500;
+      usedWildcardFallback = false;
       const token = String(getAccessToken?.() || '').trim();
-      sendFrame(buildSupabaseRealtimeJoinMessage(nextRef(), token));
+      sendFrame(buildSupabaseRealtimeJoinMessage(nextRef(), token, tables));
       heartbeatTimer = setInterval(() => {
         sendFrame({
           topic: 'phoenix',
@@ -1509,10 +1540,14 @@ export function createSupabaseRealtimeClient(
       const parsed = parseSupabaseRealtimeMessage(evt?.data);
       if (!parsed) return;
       if (parsed.kind === 'postgres_changes') {
-        onTableChange(parsed);
+        dispatchTableEvent(parsed);
       } else if (parsed.kind === 'phx_reply' && parsed.topic === 'realtime:public') {
         if (parsed.status === 'ok') {
-          onStatusChange('connected', 'Supabase Realtime Live (WebSocket)');
+          onStatusChange('connected', 'Supabase Realtime Live (Posts, Comments & Likes)');
+        } else if (!usedWildcardFallback && Array.isArray(tables) && tables.length > 0) {
+          usedWildcardFallback = true;
+          const token = String(getAccessToken?.() || '').trim();
+          sendFrame(buildSupabaseRealtimeJoinMessage(nextRef(), token, []));
         } else {
           onStatusChange('error', `Realtime channel status: ${parsed.status || 'rejected'}`);
         }
@@ -1535,6 +1570,16 @@ export function createSupabaseRealtimeClient(
     };
   };
 
+  const onTable = (tableName, handler) => {
+    const key = String(tableName || '').trim().toLowerCase();
+    if (!key || typeof handler !== 'function') return () => undefined;
+    if (!tableListeners.has(key)) tableListeners.set(key, new Set());
+    tableListeners.get(key).add(handler);
+    return () => {
+      tableListeners.get(key)?.delete(handler);
+    };
+  };
+
   return {
     start() {
       if (!stopped) return;
@@ -1544,6 +1589,7 @@ export function createSupabaseRealtimeClient(
     stop() {
       stopped = true;
       clearTimers();
+      tableListeners.clear();
       try {
         ws?.close(1000, 'client_stop');
       } catch {
@@ -1551,6 +1597,13 @@ export function createSupabaseRealtimeClient(
       }
       ws = null;
       onStatusChange('disconnected', 'Supabase Realtime stopped');
+    },
+    onTable,
+    registerTableListeners(listenerMap = {}) {
+      const unsubs = Object.entries(listenerMap).map(([tbl, fn]) => onTable(tbl, fn));
+      return () => {
+        unsubs.forEach((unsub) => unsub());
+      };
     },
     updateAccessToken(token = '') {
       const clean = String(token || '').trim();

@@ -41,9 +41,11 @@ import com.example.data.model.UserWallet
 import com.example.data.model.sortFeedWithBoostPriority
 import com.example.data.supabase.MomiSupabaseClient
 import com.example.data.supabase.MomiSupabaseSchema
+import com.example.data.supabase.SupabaseAuthSession
 import com.example.data.supabase.SupabasePrimaryBackend
 import com.example.data.supabase.SupabaseRealtimeClient
 import com.example.data.supabase.SupabaseRealtimeConnectionState
+import com.example.data.supabase.SupabaseRealtimeEvent
 import com.example.ui.components.AiAssistantTurn
 import com.example.ui.components.AiAssistantUiState
 import com.example.ui.theme.AppColorScheme
@@ -226,6 +228,8 @@ class MomiViewModel(
     @Volatile private var activeChatThreadId: String? = null
     @Volatile private var activeLiveRoomId: String? = null
     private var realtimeRefreshJob: Job? = null
+    private var realtimeListenersJob: Job? = null
+    @Volatile private var registeredRealtimeUid: String? = null
 
     // Optimistic UI overlays + 12s pending mutation protection so background sync NEVER reverts recent edits
     private val optimisticPostLikes = MutableStateFlow<Map<String, Boolean>>(emptyMap())
@@ -246,14 +250,18 @@ class MomiViewModel(
     init {
         viewModelScope.launch {
             if (supabaseClient.isConfigured()) {
-                refreshFromSupabase(forceEnsureProfile = true)
-                realtimeClient.connect(viewModelScope) { MomiSupabaseClient.activeSession?.accessToken }
+                // Register Realtime DB listeners immediately on login without waiting for HTTP seed/fetch
+                registerDatabaseListenersOnLogin(MomiSupabaseClient.activeSession)
+
+                launch {
+                    refreshFromSupabase(forceEnsureProfile = true)
+                }
 
                 launch {
                     realtimeClient.connectionState.collect { rtStatus ->
                         _supabaseStatus.value = when (rtStatus.state) {
                             SupabaseRealtimeConnectionState.CONNECTED ->
-                                "Supabase Realtime Live (WebSocket) • Postgres & Storage primary."
+                                "Supabase Realtime Live (WebSocket) • Posts, Comments & Likes synced."
                             SupabaseRealtimeConnectionState.CONNECTING ->
                                 "Connecting Supabase Realtime WebSocket..."
                             SupabaseRealtimeConnectionState.RECONNECTING ->
@@ -265,16 +273,14 @@ class MomiViewModel(
                 }
 
                 launch {
-                    realtimeClient.events.collect { event ->
-                        handleRealtimeEvent(event.table)
-                    }
-                }
-
-                launch {
                     MomiSupabaseClient.sessionFlow.collect { updatedSession ->
-                        val freshToken = updatedSession?.accessToken
-                        if (!freshToken.isNullOrBlank()) {
-                            realtimeClient.updateAccessToken(freshToken)
+                        if (updatedSession == null) {
+                            registeredRealtimeUid = null
+                            realtimeListenersJob?.cancel()
+                            realtimeListenersJob = null
+                            realtimeClient.disconnect()
+                        } else {
+                            registerDatabaseListenersOnLogin(updatedSession)
                         }
                     }
                 }
@@ -296,18 +302,48 @@ class MomiViewModel(
         }
     }
 
-    private fun handleRealtimeEvent(table: String) {
-        when (table) {
-            "comments" -> {
-                val postId = _activeCommentPostId.value
-                if (!postId.isNullOrBlank()) {
-                    viewModelScope.launch {
-                        supabaseClient.fetchComments(postId).onSuccess { remote ->
-                            supaCommentsByPost.update { it + (postId to remote) }
-                        }
-                    }
-                }
+    /**
+     * Registers Supabase Realtime WebSocket listeners for 'posts', 'comments', 'user_interactions'
+     * ('likes'), and workspace tables as soon as the user logs in.
+     */
+    private fun registerDatabaseListenersOnLogin(session: SupabaseAuthSession?) {
+        if (!supabaseClient.isConfigured()) return
+        val uid = session?.userId ?: currentUserId
+        val freshToken = session?.accessToken
+
+        val needsListenerRegistration =
+            realtimeListenersJob?.isActive != true || registeredRealtimeUid != uid
+
+        if (needsListenerRegistration) {
+            registeredRealtimeUid = uid
+            realtimeListenersJob?.cancel()
+            val watchedTables = (
+                SupabaseRealtimeClient.SOCIAL_ENGAGEMENT_TABLES + MomiSupabaseSchema.TABLES
+                ).distinct()
+            realtimeListenersJob = realtimeClient.registerTableListeners(
+                scope = viewModelScope,
+                tables = watchedTables
+            ) { event ->
+                handleRealtimeEvent(event)
             }
+            realtimeClient.connect(
+                scope = viewModelScope,
+                forceReconnect = true
+            ) { MomiSupabaseClient.activeSession?.accessToken }
+        } else {
+            realtimeClient.connect(viewModelScope) { MomiSupabaseClient.activeSession?.accessToken }
+            if (!freshToken.isNullOrBlank()) {
+                realtimeClient.updateAccessToken(freshToken)
+            }
+        }
+    }
+
+    private fun handleRealtimeEvent(event: SupabaseRealtimeEvent) {
+        val table = event.table.trim().lowercase()
+        when (table) {
+            "posts" -> applyRealtimePostEvent(event)
+            "comments" -> applyRealtimeCommentEvent(event)
+            "user_interactions", "likes" -> applyRealtimeInteractionOrLikeEvent(event)
             "chat_messages" -> {
                 val threadId = activeChatThreadId
                 if (!threadId.isNullOrBlank()) {
@@ -329,6 +365,225 @@ class MomiViewModel(
         }
         if (table != "live_frames") {
             triggerDebouncedSupabaseRefresh()
+        }
+    }
+
+    private fun applyRealtimePostEvent(event: SupabaseRealtimeEvent) {
+        val type = event.eventType.uppercase()
+        if (type == "DELETE") {
+            val deletedId = event.oldRecordJson?.optString("id")?.takeIf { it.isNotBlank() }
+                ?: event.recordJson?.optString("id")?.takeIf { it.isNotBlank() }
+                ?: event.oldRecordFields["id"]?.takeIf { it.isNotBlank() }
+                ?: event.recordFields["id"]?.takeIf { it.isNotBlank() }
+                ?: return
+            supaPosts.update { list -> list.filterNot { it.id == deletedId } }
+            cachedRawPosts.value = supaPosts.value
+            return
+        }
+        val parsed = event.recordJson?.let { supabaseClient.parsePostRecord(it) } ?: return
+        if (pendingDeletedPostIds.containsKey(parsed.id)) return
+        val minV = pendingMinViews[parsed.id]?.first ?: 0L
+        val minL = pendingMinLikes[parsed.id]?.first ?: 0L
+        val mergedPost = parsed.copy(
+            viewsCount = maxOf(parsed.viewsCount, minV),
+            likesCount = maxOf(parsed.likesCount, minL)
+        )
+        supaPosts.update { current ->
+            val idx = current.indexOfFirst { it.id == mergedPost.id }
+            if (idx >= 0) {
+                current.toMutableList().apply { set(idx, mergedPost) }
+            } else {
+                listOf(mergedPost) + current
+            }
+        }
+        cachedRawPosts.value = supaPosts.value
+    }
+
+    private fun applyRealtimeCommentEvent(event: SupabaseRealtimeEvent) {
+        val type = event.eventType.uppercase()
+        val postId = event.recordJson?.optString("post_id")?.takeIf { it.isNotBlank() }
+            ?: event.oldRecordJson?.optString("post_id")?.takeIf { it.isNotBlank() }
+            ?: event.recordFields["post_id"]?.takeIf { it.isNotBlank() }
+            ?: event.oldRecordFields["post_id"]?.takeIf { it.isNotBlank() }
+            ?: ""
+
+        if (postId.isNotBlank()) {
+            when (type) {
+                "INSERT" -> {
+                    val newComment = event.recordJson?.let { supabaseClient.parseCommentRecord(it) }
+                    if (newComment != null) {
+                        var insertedNew = false
+                        supaCommentsByPost.update { map ->
+                            val existing = map[postId].orEmpty()
+                            if (existing.any { it.id == newComment.id }) {
+                                map
+                            } else {
+                                insertedNew = true
+                                map + (postId to (existing + newComment))
+                            }
+                        }
+                        if (insertedNew) {
+                            supaPosts.update { posts ->
+                                posts.map { p ->
+                                    if (p.id == postId) {
+                                        p.copy(commentsCount = (p.commentsCount + 1L).coerceAtLeast(1L))
+                                    } else {
+                                        p
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                "UPDATE" -> {
+                    val updated = event.recordJson?.let { supabaseClient.parseCommentRecord(it) }
+                    if (updated != null) {
+                        supaCommentsByPost.update { map ->
+                            val existing = map[postId].orEmpty()
+                            val idx = existing.indexOfFirst { it.id == updated.id }
+                            if (idx >= 0) {
+                                map + (postId to existing.toMutableList().apply { set(idx, updated) })
+                            } else {
+                                map
+                            }
+                        }
+                    }
+                }
+                "DELETE" -> {
+                    val deletedCommentId = event.oldRecordJson?.optString("id")?.takeIf { it.isNotBlank() }
+                        ?: event.recordJson?.optString("id")?.takeIf { it.isNotBlank() }
+                        ?: event.oldRecordFields["id"]?.takeIf { it.isNotBlank() }
+                        ?: event.recordFields["id"]?.takeIf { it.isNotBlank() }
+                    if (!deletedCommentId.isNullOrBlank()) {
+                        var removed = false
+                        supaCommentsByPost.update { map ->
+                            val existing = map[postId].orEmpty()
+                            if (existing.any { it.id == deletedCommentId }) {
+                                removed = true
+                                map + (postId to existing.filterNot { it.id == deletedCommentId })
+                            } else {
+                                map
+                            }
+                        }
+                        if (removed) {
+                            supaPosts.update { posts ->
+                                posts.map { p ->
+                                    if (p.id == postId) {
+                                        p.copy(commentsCount = (p.commentsCount - 1L).coerceAtLeast(0L))
+                                    } else {
+                                        p
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        val activePostId = _activeCommentPostId.value
+        if (!activePostId.isNullOrBlank() && (postId.isBlank() || postId == activePostId)) {
+            viewModelScope.launch {
+                supabaseClient.fetchComments(activePostId).onSuccess { remote ->
+                    supaCommentsByPost.update { it + (activePostId to remote) }
+                }
+            }
+        }
+    }
+
+    private fun applyRealtimeInteractionOrLikeEvent(event: SupabaseRealtimeEvent) {
+        val type = event.eventType.uppercase()
+        val isDelete = type == "DELETE"
+        val sourceFields = if (isDelete && event.oldRecordFields.isNotEmpty()) {
+            event.oldRecordFields
+        } else {
+            event.recordFields.ifEmpty { event.oldRecordFields }
+        }
+        val sourceJson = if (isDelete) event.oldRecordJson ?: event.recordJson else event.recordJson
+
+        val actorUid = sourceJson?.optString("user_id")?.takeIf { it.isNotBlank() }
+            ?: sourceFields["user_id"].orEmpty().trim()
+        val targetId = sourceJson?.optString("target_id")?.takeIf { it.isNotBlank() }
+            ?: sourceJson?.optString("post_id")?.takeIf { it.isNotBlank() }
+            ?: sourceFields["target_id"]?.takeIf { it.isNotBlank() }
+            ?: sourceFields["post_id"].orEmpty().trim()
+        val targetType = when (event.table.trim().lowercase()) {
+            "likes" -> "LIKED_POST"
+            else -> sourceJson?.optString("target_type")?.takeIf { it.isNotBlank() }
+                ?: sourceFields["target_type"].orEmpty().trim().uppercase()
+        }
+
+        if (targetId.isBlank()) return
+
+        when (targetType) {
+            "LIKED_POST" -> {
+                if (actorUid.isNotBlank()) {
+                    var changed = false
+                    supaPostLikersByPostId.update { map ->
+                        val currentList = map[targetId].orEmpty()
+                        val nextList = if (isDelete) {
+                            if (actorUid in currentList) {
+                                changed = true
+                                currentList.filterNot { it == actorUid }
+                            } else {
+                                currentList
+                            }
+                        } else {
+                            if (actorUid !in currentList) {
+                                changed = true
+                                currentList + actorUid
+                            } else {
+                                currentList
+                            }
+                        }
+                        if (changed) map + (targetId to nextList) else map
+                    }
+                    if (actorUid == currentUserId && !pendingLikes.containsKey(targetId)) {
+                        supaLikedPostIds.update { set ->
+                            if (isDelete) set - targetId else set + targetId
+                        }
+                    }
+                    if (changed) {
+                        val delta = if (isDelete) -1L else 1L
+                        supaPosts.update { posts ->
+                            posts.map { p ->
+                                if (p.id == targetId && !pendingMinLikes.containsKey(targetId)) {
+                                    p.copy(likesCount = (p.likesCount + delta).coerceAtLeast(0L))
+                                } else {
+                                    p
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "VIEWED_POST" -> {
+                if (actorUid.isNotBlank() && !isDelete) {
+                    supaPostViewersByPostId.update { map ->
+                        val currentList = map[targetId].orEmpty()
+                        if (actorUid in currentList) map else map + (targetId to (currentList + actorUid))
+                    }
+                }
+            }
+            "LIKED_COMMENT" -> {
+                if (actorUid == currentUserId) {
+                    supaLikedCommentIds.update { set ->
+                        if (isDelete) set - targetId else set + targetId
+                    }
+                }
+            }
+            "BOOKMARK" -> {
+                if (actorUid == currentUserId && !pendingBookmarks.containsKey(targetId)) {
+                    supaBookmarkedPostIds.update { set ->
+                        if (isDelete) set - targetId else set + targetId
+                    }
+                }
+            }
+            "SEEN_STORY" -> {
+                if (actorUid == currentUserId && !isDelete) {
+                    supaSeenStoryIds.update { it + targetId }
+                }
+            }
         }
     }
 
@@ -359,6 +614,7 @@ class MomiViewModel(
     override fun onCleared() {
         super.onCleared()
         realtimeRefreshJob?.cancel()
+        realtimeListenersJob?.cancel()
         realtimeClient.disconnect()
     }
 
