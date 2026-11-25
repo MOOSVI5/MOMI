@@ -27,6 +27,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -182,6 +184,64 @@ object MomiSupabaseSchema {
             headers["Authorization"] = "Bearer $bearer"
         }
         return headers
+    }
+
+    private fun decodeBase64UrlToUtf8(segment: String): String? {
+        if (segment.isBlank()) return null
+        val clean = segment.replace('-', '+').replace('_', '/')
+        val padLen = (4 - clean.length % 4) % 4
+        val padded = clean + "=".repeat(padLen)
+        val out = ByteArray((padded.length * 3) / 4)
+        var outIdx = 0
+        var i = 0
+        fun valForChar(c: Char): Int = when (c) {
+            in 'A'..'Z' -> c.code - 'A'.code
+            in 'a'..'z' -> c.code - 'a'.code + 26
+            in '0'..'9' -> c.code - '0'.code + 52
+            '+' -> 62
+            '/' -> 63
+            '=' -> -2
+            else -> -1
+        }
+        while (i + 3 < padded.length) {
+            val c0 = valForChar(padded[i++])
+            val c1 = valForChar(padded[i++])
+            val c2 = valForChar(padded[i++])
+            val c3 = valForChar(padded[i++])
+            if (c0 < 0 || c1 < 0 || c2 == -1 || c3 == -1) return null
+            out[outIdx++] = ((c0 shl 2) or (c1 shr 4)).toByte()
+            if (c2 >= 0) {
+                out[outIdx++] = (((c1 and 0x0F) shl 4) or (c2 shr 2)).toByte()
+                if (c3 >= 0) {
+                    out[outIdx++] = (((c2 and 0x03) shl 6) or c3).toByte()
+                }
+            }
+        }
+        return runCatching { String(out, 0, outIdx, Charsets.UTF_8) }.getOrNull()
+    }
+
+    fun extractJwtExpiryEpochMs(jwt: String?): Long? {
+        val parts = jwt?.trim()?.split('.') ?: return null
+        if (parts.size < 2) return null
+        val payloadJson = decodeBase64UrlToUtf8(parts[1]) ?: return null
+        val expSec = Regex(""""exp"\s*:\s*(\d+)""")
+            .find(payloadJson)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toLongOrNull()
+            ?: return null
+        return expSec * 1000L
+    }
+
+    fun isJwtExpiredOrExpiringSoon(
+        jwt: String?,
+        nowMs: Long = System.currentTimeMillis(),
+        skewMs: Long = 60_000L
+    ): Boolean {
+        val clean = jwt?.trim().orEmpty()
+        if (clean.isEmpty()) return false
+        val expMs = extractJwtExpiryEpochMs(clean) ?: return false
+        return nowMs + skewMs >= expMs
     }
 
     fun isConfigured(baseUrl: String?, anonKey: String?): Boolean =
@@ -707,6 +767,58 @@ class MomiSupabaseClient(
     private fun resolvedAccessToken(explicit: String?): String? =
         explicit?.trim()?.takeIf { it.isNotEmpty() } ?: activeSession?.accessToken?.takeIf { it.isNotBlank() }
 
+    suspend fun ensureFreshAccessToken(
+        explicit: String? = null,
+        forceRefresh: Boolean = false
+    ): String? {
+        if (!explicit.isNullOrBlank()) return explicit.trim()
+        val current = activeSession ?: return null
+        val needsRefresh = forceRefresh || MomiSupabaseSchema.isJwtExpiredOrExpiringSoon(current.accessToken)
+        if (!needsRefresh) return current.accessToken
+
+        return refreshMutex.withLock {
+            val latest = activeSession ?: return@withLock null
+            val stillNeedsRefresh = forceRefresh || MomiSupabaseSchema.isJwtExpiredOrExpiringSoon(latest.accessToken)
+            if (!stillNeedsRefresh) {
+                return@withLock latest.accessToken
+            }
+            if (forceRefresh && latest.accessToken != current.accessToken &&
+                !MomiSupabaseSchema.isJwtExpiredOrExpiringSoon(latest.accessToken)
+            ) {
+                return@withLock latest.accessToken
+            }
+            val rt = latest.refreshToken
+            if (rt.isBlank()) {
+                return@withLock if (MomiSupabaseSchema.isJwtExpiredOrExpiringSoon(latest.accessToken, skewMs = 0L)) {
+                    null
+                } else {
+                    latest.accessToken
+                }
+            }
+            val refreshed = refreshSession(rt)
+            refreshed.getOrNull()?.let { fresh ->
+                return@withLock fresh.accessToken
+            }
+            val errMsg = refreshed.exceptionOrNull()?.message.orEmpty()
+            if (errMsg.startsWith("AUTH_EXPIRED:")) {
+                setActiveSessionAndPersist(null)
+                return@withLock null
+            }
+            if (MomiSupabaseSchema.isJwtExpiredOrExpiringSoon(latest.accessToken, skewMs = 0L)) {
+                null
+            } else {
+                latest.accessToken
+            }
+        }
+    }
+
+    private fun isJwtExpiredHttpResponse(statusCode: Int, responseBody: String): Boolean {
+        if (statusCode != 401) return false
+        return responseBody.contains("JWT expired", ignoreCase = true) ||
+            responseBody.contains("PGRST303", ignoreCase = true) ||
+            responseBody.contains("invalid JWT", ignoreCase = true)
+    }
+
     suspend fun checkConnection(): SupabaseHealthResult = withContext(Dispatchers.IO) {
         if (!isConfigured()) {
             return@withContext SupabaseHealthResult(
@@ -716,41 +828,62 @@ class MomiSupabaseClient(
             )
         }
         val startMs = System.currentTimeMillis()
-        val requestBuilder = Request.Builder()
-            .url("$baseUrl/rest/v1/app_config?select=id&limit=1")
-            .header("Accept", "application/json")
-            .get()
-        MomiSupabaseSchema.buildAuthHeaders(anonKey, activeSession?.accessToken).forEach { (k, v) ->
-            requestBuilder.header(k, v)
+        var token = ensureFreshAccessToken()
+
+        fun buildHealthRequest(bearerToken: String?): Request {
+            val requestBuilder = Request.Builder()
+                .url("$baseUrl/rest/v1/app_config?select=id&limit=1")
+                .header("Accept", "application/json")
+                .get()
+            MomiSupabaseSchema.buildAuthHeaders(anonKey, bearerToken).forEach { (k, v) ->
+                requestBuilder.header(k, v)
+            }
+            return requestBuilder.build()
         }
-        val request = requestBuilder.build()
 
         runCatching {
-            httpClient.newCall(request).execute().use { response ->
-                val latency = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
-                val code = response.code
-                if (response.isSuccessful) {
-                    SupabaseHealthResult(
-                        configured = true,
-                        connected = true,
-                        statusCode = code,
-                        latencyMs = latency,
-                        message = "Connected to Supabase ($latency ms) — Cloud Sync & Storage active."
-                    )
-                } else {
-                    val hint = when (code) {
-                        404 -> "Connected to project, but run supabase/schema.sql + supabase/enable_sync.sql in SQL Editor."
-                        401, 403 -> "Supabase rejected key/permissions — run supabase/enable_sync.sql in SQL Editor."
-                        else -> "Supabase responded HTTP $code."
-                    }
-                    SupabaseHealthResult(
-                        configured = true,
-                        connected = false,
-                        statusCode = code,
-                        latencyMs = latency,
-                        message = hint
-                    )
+            var code = 0
+            var rawBody = ""
+            var succeeded = false
+            httpClient.newCall(buildHealthRequest(token)).execute().use { response ->
+                code = response.code
+                rawBody = response.body?.string().orEmpty()
+                succeeded = response.isSuccessful
+            }
+            if (!succeeded && isJwtExpiredHttpResponse(code, rawBody)) {
+                token = ensureFreshAccessToken(forceRefresh = true)
+                httpClient.newCall(buildHealthRequest(token)).execute().use { retryResponse ->
+                    code = retryResponse.code
+                    rawBody = retryResponse.body?.string().orEmpty()
+                    succeeded = retryResponse.isSuccessful
                 }
+            }
+            val latency = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
+            if (succeeded) {
+                SupabaseHealthResult(
+                    configured = true,
+                    connected = true,
+                    statusCode = code,
+                    latencyMs = latency,
+                    message = "Connected to Supabase ($latency ms) — Cloud Sync & Storage active."
+                )
+            } else {
+                val hint = when {
+                    isJwtExpiredHttpResponse(code, rawBody) ->
+                        "Session token expired — sign out and sign back in to refresh your Supabase session."
+                    code == 404 ->
+                        "Connected to project, but run supabase/schema.sql + supabase/enable_sync.sql in SQL Editor."
+                    code == 401 || code == 403 ->
+                        "Supabase rejected key/permissions — run supabase/enable_sync.sql in SQL Editor."
+                    else -> "Supabase responded HTTP $code."
+                }
+                SupabaseHealthResult(
+                    configured = true,
+                    connected = false,
+                    statusCode = code,
+                    latencyMs = latency,
+                    message = hint
+                )
             }
         }.getOrElse { error ->
             SupabaseHealthResult(
@@ -839,7 +972,7 @@ class MomiSupabaseClient(
                         error(hint)
                     }
                     val session = parseAuthSession(JSONObject(rawBody), displayNameHint, avatarUrlHint)
-                    activeSession = session
+                    setActiveSessionAndPersist(session)
                     session
                 }
             }
@@ -872,7 +1005,7 @@ class MomiSupabaseClient(
                         error(detail)
                     }
                     val session = parseAuthSession(JSONObject(rawBody))
-                    activeSession = session
+                    setActiveSessionAndPersist(session)
                     session
                 }
             }
@@ -916,7 +1049,7 @@ class MomiSupabaseClient(
                 val access = json.optString("access_token")
                 if (access.isNotBlank()) {
                     val session = parseAuthSession(json, displayNameHint = cleanName)
-                    activeSession = session
+                    setActiveSessionAndPersist(session)
                     SupabaseSignUpResult(session = session, confirmationRequired = false, email = cleanEmail)
                 } else {
                     SupabaseSignUpResult(session = null, confirmationRequired = true, email = cleanEmail)
@@ -946,7 +1079,7 @@ class MomiSupabaseClient(
                         error("AUTH_EXPIRED:${response.code}:$detail")
                     }
                     val session = parseAuthSession(JSONObject(rawBody))
-                    activeSession = session
+                    setActiveSessionAndPersist(session)
                     session
                 }
             }
@@ -954,7 +1087,7 @@ class MomiSupabaseClient(
 
     suspend fun signOutSession(accessToken: String? = null) = withContext(Dispatchers.IO) {
         val token = resolvedAccessToken(accessToken)
-        activeSession = null
+        setActiveSessionAndPersist(null)
         if (!isConfigured() || token.isNullOrBlank()) return@withContext
         val request = Request.Builder()
             .url("$baseUrl/auth/v1/logout")
@@ -985,26 +1118,43 @@ class MomiSupabaseClient(
         }.orEmpty()
 
         val jsonBody = MomiSupabaseSchema.toJsonString(rows)
-        val requestBuilder = Request.Builder()
-            .url("$baseUrl/rest/v1/$table$conflictQuery")
-            .header("Content-Type", "application/json")
-            .header("Prefer", "resolution=merge-duplicates,return=minimal")
-            .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
-        MomiSupabaseSchema.buildAuthHeaders(anonKey, resolvedAccessToken(accessToken)).forEach { (k, v) ->
-            requestBuilder.header(k, v)
+        var token = ensureFreshAccessToken(explicit = accessToken)
+
+        fun buildUpsertReq(bearerToken: String?): Request {
+            val requestBuilder = Request.Builder()
+                .url("$baseUrl/rest/v1/$table$conflictQuery")
+                .header("Content-Type", "application/json")
+                .header("Prefer", "resolution=merge-duplicates,return=minimal")
+                .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+            MomiSupabaseSchema.buildAuthHeaders(anonKey, bearerToken).forEach { (k, v) ->
+                requestBuilder.header(k, v)
+            }
+            return requestBuilder.build()
         }
-        val request = requestBuilder.build()
 
         runCatching {
-            httpClient.newCall(request).execute().use { response ->
-                val bodyString = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    android.util.Log.e("MomiSupabase", "Upsert into $table failed HTTP ${response.code}: $bodyString")
-                    val detail = bodyString.take(160).takeIf { it.isNotBlank() }?.let { " — $it" }.orEmpty()
-                    error("Upsert into $table failed (HTTP ${response.code})$detail")
-                }
-                rows.size
+            var code = 0
+            var bodyString = ""
+            var ok = false
+            httpClient.newCall(buildUpsertReq(token)).execute().use { response ->
+                code = response.code
+                bodyString = response.body?.string().orEmpty()
+                ok = response.isSuccessful
             }
+            if (!ok && accessToken.isNullOrBlank() && code == 401) {
+                token = ensureFreshAccessToken(forceRefresh = true)
+                httpClient.newCall(buildUpsertReq(token)).execute().use { retry ->
+                    code = retry.code
+                    bodyString = retry.body?.string().orEmpty()
+                    ok = retry.isSuccessful
+                }
+            }
+            if (!ok) {
+                android.util.Log.e("MomiSupabase", "Upsert into $table failed HTTP $code: $bodyString")
+                val detail = bodyString.take(160).takeIf { it.isNotBlank() }?.let { " — $it" }.orEmpty()
+                error("Upsert into $table failed (HTTP $code)$detail")
+            }
+            rows.size
         }
     }
 
@@ -1025,23 +1175,42 @@ class MomiSupabaseClient(
             return@withContext Result.failure(IllegalArgumentException("Filter query required for patch"))
         }
         val jsonBody = MomiSupabaseSchema.toJsonString(fields)
-        val requestBuilder = Request.Builder()
-            .url("$baseUrl/rest/v1/$table?$cleanQuery")
-            .header("Content-Type", "application/json")
-            .header("Prefer", "return=minimal")
-            .patch(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
-        MomiSupabaseSchema.buildAuthHeaders(anonKey, resolvedAccessToken(accessToken)).forEach { (k, v) ->
-            requestBuilder.header(k, v)
-        }
-        runCatching {
-            httpClient.newCall(requestBuilder.build()).execute().use { response ->
-                val bodyString = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    android.util.Log.e("MomiSupabase", "Patch $table failed HTTP ${response.code}: $bodyString")
-                    error("Update $table failed (HTTP ${response.code})")
-                }
-                Unit
+        var token = ensureFreshAccessToken(explicit = accessToken)
+
+        fun buildPatchReq(bearerToken: String?): Request {
+            val requestBuilder = Request.Builder()
+                .url("$baseUrl/rest/v1/$table?$cleanQuery")
+                .header("Content-Type", "application/json")
+                .header("Prefer", "return=minimal")
+                .patch(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+            MomiSupabaseSchema.buildAuthHeaders(anonKey, bearerToken).forEach { (k, v) ->
+                requestBuilder.header(k, v)
             }
+            return requestBuilder.build()
+        }
+
+        runCatching {
+            var code = 0
+            var bodyString = ""
+            var ok = false
+            httpClient.newCall(buildPatchReq(token)).execute().use { response ->
+                code = response.code
+                bodyString = response.body?.string().orEmpty()
+                ok = response.isSuccessful
+            }
+            if (!ok && accessToken.isNullOrBlank() && code == 401) {
+                token = ensureFreshAccessToken(forceRefresh = true)
+                httpClient.newCall(buildPatchReq(token)).execute().use { retry ->
+                    code = retry.code
+                    bodyString = retry.body?.string().orEmpty()
+                    ok = retry.isSuccessful
+                }
+            }
+            if (!ok) {
+                android.util.Log.e("MomiSupabase", "Patch $table failed HTTP $code: $bodyString")
+                error("Update $table failed (HTTP $code)")
+            }
+            Unit
         }
     }
 
@@ -1060,22 +1229,41 @@ class MomiSupabaseClient(
         if (cleanQuery.isBlank()) {
             return@withContext Result.failure(IllegalArgumentException("Filter query required for delete"))
         }
-        val requestBuilder = Request.Builder()
-            .url("$baseUrl/rest/v1/$table?$cleanQuery")
-            .header("Prefer", "return=minimal")
-            .delete()
-        MomiSupabaseSchema.buildAuthHeaders(anonKey, resolvedAccessToken(accessToken)).forEach { (k, v) ->
-            requestBuilder.header(k, v)
-        }
-        runCatching {
-            httpClient.newCall(requestBuilder.build()).execute().use { response ->
-                val bodyString = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    android.util.Log.e("MomiSupabase", "Delete $table failed HTTP ${response.code}: $bodyString")
-                    error("Delete $table failed (HTTP ${response.code})")
-                }
-                Unit
+        var token = ensureFreshAccessToken(explicit = accessToken)
+
+        fun buildDeleteReq(bearerToken: String?): Request {
+            val requestBuilder = Request.Builder()
+                .url("$baseUrl/rest/v1/$table?$cleanQuery")
+                .header("Prefer", "return=minimal")
+                .delete()
+            MomiSupabaseSchema.buildAuthHeaders(anonKey, bearerToken).forEach { (k, v) ->
+                requestBuilder.header(k, v)
             }
+            return requestBuilder.build()
+        }
+
+        runCatching {
+            var code = 0
+            var bodyString = ""
+            var ok = false
+            httpClient.newCall(buildDeleteReq(token)).execute().use { response ->
+                code = response.code
+                bodyString = response.body?.string().orEmpty()
+                ok = response.isSuccessful
+            }
+            if (!ok && accessToken.isNullOrBlank() && code == 401) {
+                token = ensureFreshAccessToken(forceRefresh = true)
+                httpClient.newCall(buildDeleteReq(token)).execute().use { retry ->
+                    code = retry.code
+                    bodyString = retry.body?.string().orEmpty()
+                    ok = retry.isSuccessful
+                }
+            }
+            if (!ok) {
+                android.util.Log.e("MomiSupabase", "Delete $table failed HTTP $code: $bodyString")
+                error("Delete $table failed (HTTP $code)")
+            }
+            Unit
         }
     }
 
@@ -1103,24 +1291,41 @@ class MomiSupabaseClient(
         }
 
         val mediaType = contentType.toMediaType()
-        val requestBuilder = Request.Builder()
-            .url("$baseUrl/storage/v1/object/$bucket/$safePath")
-            .header("x-upsert", "true")
-            .post(bytes.toRequestBody(mediaType))
-        MomiSupabaseSchema.buildAuthHeaders(anonKey, resolvedAccessToken(accessToken)).forEach { (k, v) ->
-            requestBuilder.header(k, v)
+        var token = ensureFreshAccessToken(explicit = accessToken)
+
+        fun buildUploadReq(bearerToken: String?): Request {
+            val requestBuilder = Request.Builder()
+                .url("$baseUrl/storage/v1/object/$bucket/$safePath")
+                .header("x-upsert", "true")
+                .post(bytes.toRequestBody(mediaType))
+            MomiSupabaseSchema.buildAuthHeaders(anonKey, bearerToken).forEach { (k, v) ->
+                requestBuilder.header(k, v)
+            }
+            return requestBuilder.build()
         }
-        val request = requestBuilder.build()
 
         runCatching {
-            httpClient.newCall(request).execute().use { response ->
-                val errBody = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    android.util.Log.e("MomiSupabase", "Storage upload $bucket/$safePath failed HTTP ${response.code}: $errBody")
-                    error("Storage upload failed (HTTP ${response.code})")
-                }
-                "$baseUrl/storage/v1/object/public/$bucket/$safePath"
+            var code = 0
+            var errBody = ""
+            var ok = false
+            httpClient.newCall(buildUploadReq(token)).execute().use { response ->
+                code = response.code
+                errBody = response.body?.string().orEmpty()
+                ok = response.isSuccessful
             }
+            if (!ok && accessToken.isNullOrBlank() && code == 401) {
+                token = ensureFreshAccessToken(forceRefresh = true)
+                httpClient.newCall(buildUploadReq(token)).execute().use { retry ->
+                    code = retry.code
+                    errBody = retry.body?.string().orEmpty()
+                    ok = retry.isSuccessful
+                }
+            }
+            if (!ok) {
+                android.util.Log.e("MomiSupabase", "Storage upload $bucket/$safePath failed HTTP $code: $errBody")
+                error("Storage upload failed (HTTP $code)")
+            }
+            "$baseUrl/storage/v1/object/public/$bucket/$safePath"
         }
     }
 
@@ -1449,24 +1654,43 @@ class MomiSupabaseClient(
         }
     }
 
-    private fun fetchJsonArray(url: String, strict: Boolean = false): JSONArray {
-        val requestBuilder = Request.Builder()
-            .url(url)
-            .header("Accept", "application/json")
-            .get()
-        MomiSupabaseSchema.buildAuthHeaders(anonKey, activeSession?.accessToken).forEach { (k, v) ->
-            requestBuilder.header(k, v)
-        }
-        httpClient.newCall(requestBuilder.build()).execute().use { response ->
-            val text = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                if (strict) {
-                    error("Supabase read failed HTTP ${response.code}: ${text.take(120)}")
-                }
-                return JSONArray()
+    private suspend fun fetchJsonArray(url: String, strict: Boolean = false): JSONArray {
+        var token = ensureFreshAccessToken()
+
+        fun buildGet(bearerToken: String?): Request {
+            val requestBuilder = Request.Builder()
+                .url(url)
+                .header("Accept", "application/json")
+                .get()
+            MomiSupabaseSchema.buildAuthHeaders(anonKey, bearerToken).forEach { (k, v) ->
+                requestBuilder.header(k, v)
             }
-            return if (text.trimStart().startsWith("[")) JSONArray(text) else JSONArray()
+            return requestBuilder.build()
         }
+
+        var code = 0
+        var text = ""
+        var ok = false
+        httpClient.newCall(buildGet(token)).execute().use { response ->
+            code = response.code
+            text = response.body?.string().orEmpty()
+            ok = response.isSuccessful
+        }
+        if (!ok && code == 401) {
+            token = ensureFreshAccessToken(forceRefresh = true)
+            httpClient.newCall(buildGet(token)).execute().use { retry ->
+                code = retry.code
+                text = retry.body?.string().orEmpty()
+                ok = retry.isSuccessful
+            }
+        }
+        if (!ok) {
+            if (strict) {
+                error("Supabase read failed HTTP $code: ${text.take(120)}")
+            }
+            return JSONArray()
+        }
+        return if (text.trimStart().startsWith("[")) JSONArray(text) else JSONArray()
     }
 
     private fun parseIsoTimestamp(raw: String?): Timestamp? {
@@ -2049,14 +2273,23 @@ class MomiSupabaseClient(
     }
 
     companion object {
+        private val refreshMutex = Mutex()
         private val _sessionFlow = MutableStateFlow<SupabaseAuthSession?>(null)
         val sessionFlow: StateFlow<SupabaseAuthSession?> = _sessionFlow.asStateFlow()
+
+        @Volatile
+        var sessionPersister: ((SupabaseAuthSession?) -> Unit)? = null
 
         var activeSession: SupabaseAuthSession?
             get() = _sessionFlow.value
             set(value) {
                 _sessionFlow.value = value
             }
+
+        internal fun setActiveSessionAndPersist(session: SupabaseAuthSession?) {
+            activeSession = session
+            sessionPersister?.invoke(session)
+        }
 
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private val defaultHttpClient: OkHttpClient by lazy {

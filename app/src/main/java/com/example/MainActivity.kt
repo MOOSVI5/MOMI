@@ -254,8 +254,42 @@ private fun AppNavigation(
     val credentialManager = remember(context) { CredentialManager.create(context) }
 
     LaunchedEffect(context) {
+        MomiSupabaseClient.sessionPersister = { updated ->
+            if (updated == null) {
+                AppearancePrefs.clearSupabaseSession(context)
+            } else {
+                AppearancePrefs.saveSupabaseSession(
+                    context = context,
+                    accessToken = updated.accessToken,
+                    refreshToken = updated.refreshToken,
+                    userId = updated.userId,
+                    email = updated.email,
+                    displayName = updated.displayName,
+                    avatarUrl = updated.avatarUrl
+                )
+            }
+        }
         if (MomiSupabaseClient.activeSession == null) {
-            AppearancePrefs.restoreSupabaseSession(context)
+            val saved = AppearancePrefs.loadSavedSupabaseSession(context)
+            if (saved != null) {
+                if (com.example.data.supabase.MomiSupabaseSchema.isJwtExpiredOrExpiringSoon(saved.accessToken)) {
+                    if (saved.refreshToken.isNotBlank()) {
+                        val refreshed = MomiSupabaseClient().refreshSession(saved.refreshToken)
+                        if (refreshed.isFailure) {
+                            val msg = refreshed.exceptionOrNull()?.message.orEmpty()
+                            if (msg.startsWith("AUTH_EXPIRED:")) {
+                                AppearancePrefs.clearSupabaseSession(context)
+                            } else {
+                                MomiSupabaseClient.activeSession = saved
+                            }
+                        }
+                    } else {
+                        AppearancePrefs.clearSupabaseSession(context)
+                    }
+                } else {
+                    MomiSupabaseClient.activeSession = saved
+                }
+            }
         }
     }
     val currentSession by MomiSupabaseClient.sessionFlow.collectAsStateWithLifecycle()

@@ -122,6 +122,63 @@ export function getActiveSupabaseAccessToken() {
   return String(loadSupabaseAuthSession()?.accessToken || '').trim();
 }
 
+export function extractSupabaseJwtExpiryMs(token = '') {
+  const parts = String(token || '').trim().split('.');
+  if (parts.length < 2 || !parts[1]) return null;
+  try {
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const pad = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+    const jsonText = typeof globalThis.atob === 'function'
+      ? globalThis.atob(pad)
+      : Buffer.from(pad, 'base64').toString('utf8');
+    const payload = JSON.parse(jsonText);
+    return typeof payload?.exp === 'number' ? payload.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+export function isSupabaseJwtExpiringSoon(token = '', skewMs = 60_000, nowMs = Date.now()) {
+  const clean = String(token || '').trim();
+  if (!clean) return false;
+  const expMs = extractSupabaseJwtExpiryMs(clean);
+  if (expMs == null) return false;
+  return nowMs + skewMs >= expMs;
+}
+
+let inFlightWebRefresh = null;
+
+export async function ensureFreshWebAccessToken(
+  cfg = SUPABASE_WEB_CONFIG,
+  fetchImpl = globalThis.fetch,
+  forceRefresh = false,
+  explicitToken = ''
+) {
+  const explicit = String(explicitToken || '').trim();
+  const session = loadSupabaseAuthSession();
+  if (explicit && (!forceRefresh || explicit !== session?.accessToken)) {
+    if (!isSupabaseJwtExpiringSoon(explicit)) return explicit;
+    if (!session?.refreshToken) return explicit;
+  }
+  if (!session?.accessToken) return explicit;
+  const expSoon = forceRefresh ||
+    isSupabaseJwtExpiringSoon(session.accessToken) ||
+    (typeof session.expiresAt === 'number' && Date.now() + 60_000 >= session.expiresAt);
+  if (!expSoon) return session.accessToken;
+  if (!session.refreshToken) {
+    return isSupabaseJwtExpiringSoon(session.accessToken, 0) ? '' : session.accessToken;
+  }
+  if (!inFlightWebRefresh) {
+    inFlightWebRefresh = supabaseRefreshSession(cfg, session.refreshToken, fetchImpl)
+      .finally(() => { inFlightWebRefresh = null; });
+  }
+  const refreshed = await inFlightWebRefresh;
+  if (refreshed?.accessToken) return refreshed.accessToken;
+  const current = loadSupabaseAuthSession();
+  if (!current?.accessToken) return '';
+  return isSupabaseJwtExpiringSoon(current.accessToken, 0) ? '' : current.accessToken;
+}
+
 export function isSupabaseClientReady(cfg = SUPABASE_WEB_CONFIG) {
   return Boolean(normalizeSupabaseUrl(cfg?.url) && isSafeSupabaseAnonKey(cfg?.anonKey));
 }
@@ -388,13 +445,24 @@ export async function selectSupabaseTable(
   const anonKey = String(cfg.anonKey).trim();
   const cleanQuery = String(queryString || 'select=*').replace(/^\?/, '');
   try {
-    const res = await fetchImpl(`${baseUrl}/rest/v1/${table}?${cleanQuery}`, {
+    let token = await ensureFreshWebAccessToken(cfg, fetchImpl);
+    let res = await fetchImpl(`${baseUrl}/rest/v1/${table}?${cleanQuery}`, {
       method: 'GET',
       headers: {
-        ...buildSupabaseAuthHeaders(anonKey, getActiveSupabaseAccessToken()),
+        ...buildSupabaseAuthHeaders(anonKey, token),
         Accept: 'application/json'
       }
     });
+    if (res.status === 401) {
+      token = await ensureFreshWebAccessToken(cfg, fetchImpl, true);
+      res = await fetchImpl(`${baseUrl}/rest/v1/${table}?${cleanQuery}`, {
+        method: 'GET',
+        headers: {
+          ...buildSupabaseAuthHeaders(anonKey, token),
+          Accept: 'application/json'
+        }
+      });
+    }
     if (!res.ok) return [];
     const data = await res.json();
     return Array.isArray(data) ? data : [];
@@ -422,8 +490,8 @@ export async function upsertSupabaseTable(
 
   const conflictQuery = onConflict ? `?on_conflict=${encodeURIComponent(onConflict)}` : '';
   const anonKey = String(cfg.anonKey).trim();
-  const effectiveToken = String(accessToken || getActiveSupabaseAccessToken()).trim();
-  const res = await fetchImpl(`${baseUrl}/rest/v1/${table}${conflictQuery}`, {
+  let effectiveToken = await ensureFreshWebAccessToken(cfg, fetchImpl, false, accessToken);
+  let res = await fetchImpl(`${baseUrl}/rest/v1/${table}${conflictQuery}`, {
     method: 'POST',
     headers: {
       ...buildSupabaseAuthHeaders(anonKey, effectiveToken),
@@ -432,6 +500,18 @@ export async function upsertSupabaseTable(
     },
     body: JSON.stringify(rows)
   });
+  if (res.status === 401 && !accessToken) {
+    effectiveToken = await ensureFreshWebAccessToken(cfg, fetchImpl, true);
+    res = await fetchImpl(`${baseUrl}/rest/v1/${table}${conflictQuery}`, {
+      method: 'POST',
+      headers: {
+        ...buildSupabaseAuthHeaders(anonKey, effectiveToken),
+        'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates,return=minimal'
+      },
+      body: JSON.stringify(rows)
+    });
+  }
   if (!res.ok) {
     let detail = '';
     try {
@@ -456,15 +536,28 @@ export async function patchSupabaseRows(
   if (!SUPABASE_SCHEMA_TABLES.includes(table)) return false;
   const anonKey = String(cfg.anonKey).trim();
   const cleanFilter = String(filterQuery).replace(/^\?/, '');
-  const res = await fetchImpl(`${baseUrl}/rest/v1/${table}?${cleanFilter}`, {
+  let token = await ensureFreshWebAccessToken(cfg, fetchImpl);
+  let res = await fetchImpl(`${baseUrl}/rest/v1/${table}?${cleanFilter}`, {
     method: 'PATCH',
     headers: {
-      ...buildSupabaseAuthHeaders(anonKey, getActiveSupabaseAccessToken()),
+      ...buildSupabaseAuthHeaders(anonKey, token),
       'Content-Type': 'application/json',
       Prefer: 'return=minimal'
     },
     body: JSON.stringify(patch)
   });
+  if (res.status === 401) {
+    token = await ensureFreshWebAccessToken(cfg, fetchImpl, true);
+    res = await fetchImpl(`${baseUrl}/rest/v1/${table}?${cleanFilter}`, {
+      method: 'PATCH',
+      headers: {
+        ...buildSupabaseAuthHeaders(anonKey, token),
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal'
+      },
+      body: JSON.stringify(patch)
+    });
+  }
   return res.ok;
 }
 
@@ -479,13 +572,24 @@ export async function deleteSupabaseRows(
   if (!SUPABASE_SCHEMA_TABLES.includes(table)) return false;
   const anonKey = String(cfg.anonKey).trim();
   const cleanFilter = String(filterQuery).replace(/^\?/, '');
-  const res = await fetchImpl(`${baseUrl}/rest/v1/${table}?${cleanFilter}`, {
+  let token = await ensureFreshWebAccessToken(cfg, fetchImpl);
+  let res = await fetchImpl(`${baseUrl}/rest/v1/${table}?${cleanFilter}`, {
     method: 'DELETE',
     headers: {
-      ...buildSupabaseAuthHeaders(anonKey, getActiveSupabaseAccessToken()),
+      ...buildSupabaseAuthHeaders(anonKey, token),
       Prefer: 'return=minimal'
     }
   });
+  if (res.status === 401) {
+    token = await ensureFreshWebAccessToken(cfg, fetchImpl, true);
+    res = await fetchImpl(`${baseUrl}/rest/v1/${table}?${cleanFilter}`, {
+      method: 'DELETE',
+      headers: {
+        ...buildSupabaseAuthHeaders(anonKey, token),
+        Prefer: 'return=minimal'
+      }
+    });
+  }
   return res.ok;
 }
 
@@ -506,15 +610,28 @@ export async function uploadWebFileToStorage(
     .map((seg) => encodeURIComponent(seg))
     .join('/');
   try {
-    const res = await fetchImpl(`${baseUrl}/storage/v1/object/${bucket}/${safePath}`, {
+    let token = await ensureFreshWebAccessToken(cfg, fetchImpl);
+    let res = await fetchImpl(`${baseUrl}/storage/v1/object/${bucket}/${safePath}`, {
       method: 'POST',
       headers: {
-        ...buildSupabaseAuthHeaders(anonKey, getActiveSupabaseAccessToken()),
+        ...buildSupabaseAuthHeaders(anonKey, token),
         'Content-Type': contentType || blobOrFile.type || 'application/octet-stream',
         'x-upsert': 'true'
       },
       body: blobOrFile
     });
+    if (res.status === 401) {
+      token = await ensureFreshWebAccessToken(cfg, fetchImpl, true);
+      res = await fetchImpl(`${baseUrl}/storage/v1/object/${bucket}/${safePath}`, {
+        method: 'POST',
+        headers: {
+          ...buildSupabaseAuthHeaders(anonKey, token),
+          'Content-Type': contentType || blobOrFile.type || 'application/octet-stream',
+          'x-upsert': 'true'
+        },
+        body: blobOrFile
+      });
+    }
     if (!res.ok) return null;
     return `${baseUrl}/storage/v1/object/public/${bucket}/${safePath}`;
   } catch {
@@ -1118,22 +1235,31 @@ export async function supabaseRefreshSession(cfg = SUPABASE_WEB_CONFIG, refreshT
   const baseUrl = normalizeSupabaseUrl(cfg?.url);
   if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey) || !refreshToken) return null;
   const anonKey = String(cfg.anonKey).trim();
-  const res = await fetchImpl(`${baseUrl}/auth/v1/token?grant_type=refresh_token`, {
-    method: 'POST',
-    headers: { apikey: anonKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ refresh_token: refreshToken })
-  });
-  if (!res.ok) return null;
-  const data = await res.json();
-  if (!data?.access_token || !data?.user?.id) return null;
-  const session = {
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token || refreshToken,
-    expiresAt: Date.now() + Number(data.expires_in || 3600) * 1000,
-    user: mapSupabaseAuthUserToWeb(data.user)
-  };
-  saveSupabaseAuthSession(session);
-  return session;
+  try {
+    const res = await fetchImpl(`${baseUrl}/auth/v1/token?grant_type=refresh_token`, {
+      method: 'POST',
+      headers: { apikey: anonKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refreshToken })
+    });
+    if (!res.ok) {
+      if (res.status === 400 || res.status === 401) {
+        clearSupabaseAuthSession();
+      }
+      return null;
+    }
+    const data = await res.json();
+    if (!data?.access_token || !data?.user?.id) return null;
+    const session = {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token || refreshToken,
+      expiresAt: Date.now() + Number(data.expires_in || 3600) * 1000,
+      user: mapSupabaseAuthUserToWeb(data.user)
+    };
+    saveSupabaseAuthSession(session);
+    return session;
+  } catch {
+    return null;
+  }
 }
 
 export async function supabaseSignOut(cfg = SUPABASE_WEB_CONFIG, accessToken = '', fetchImpl = globalThis.fetch) {

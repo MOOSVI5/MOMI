@@ -262,6 +262,15 @@ class MomiViewModel(
                 }
 
                 launch {
+                    MomiSupabaseClient.sessionFlow.collect { updatedSession ->
+                        val freshToken = updatedSession?.accessToken
+                        if (!freshToken.isNullOrBlank()) {
+                            realtimeClient.updateAccessToken(freshToken)
+                        }
+                    }
+                }
+
+                launch {
                     while (true) {
                         val intervalMs = if (
                             realtimeClient.connectionState.value.state == SupabaseRealtimeConnectionState.CONNECTED

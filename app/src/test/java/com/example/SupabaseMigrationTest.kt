@@ -283,4 +283,23 @@ class SupabaseMigrationTest {
         assertEquals(6, ShowcaseCatalog.PERSONAS.size)
         assertTrue(ShowcaseCatalog.COMMENTS.size >= 4)
     }
+
+    @Test
+    fun jwtExpiryDetectionIdentifiesExpiredAndFreshTokens() {
+        fun encodeB64Url(text: String): String {
+            val encoded = java.util.Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(text.toByteArray(Charsets.UTF_8))
+            return encoded
+        }
+        val header = encodeB64Url("""{"alg":"HS256","typ":"JWT"}""")
+        val pastExpSec = 1_700_000_000L
+        val futureExpSec = (System.currentTimeMillis() / 1000L) + 3_600L
+        val expiredJwt = "$header.${encodeB64Url("""{"sub":"u1","exp":$pastExpSec}""")}.sig"
+        val freshJwt = "$header.${encodeB64Url("""{"sub":"u1","exp":$futureExpSec}""")}.sig"
+
+        assertEquals(pastExpSec * 1000L, MomiSupabaseSchema.extractJwtExpiryEpochMs(expiredJwt))
+        assertTrue(MomiSupabaseSchema.isJwtExpiredOrExpiringSoon(expiredJwt))
+        assertFalse(MomiSupabaseSchema.isJwtExpiredOrExpiringSoon(freshJwt))
+        assertFalse(MomiSupabaseSchema.isJwtExpiredOrExpiringSoon(""))
+    }
 }

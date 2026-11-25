@@ -42,23 +42,34 @@ fun attemptAutoSignIn(
     onUnauthenticated: () -> Unit,
     scope: CoroutineScope
 ) {
-    val restored = AppearancePrefs.restoreSupabaseSession(context)
+    val restored = AppearancePrefs.loadSavedSupabaseSession(context)
     if (restored != null) {
         AppearancePrefs.setAutoSignInEnabled(context, true)
+        if (!com.example.data.supabase.MomiSupabaseSchema.isJwtExpiredOrExpiringSoon(restored.accessToken)) {
+            MomiSupabaseClient.activeSession = restored
+            onAuthSuccess()
+            return
+        }
         if (restored.refreshToken.isNotBlank()) {
             scope.launch {
-                MomiSupabaseClient().refreshSession(restored.refreshToken)
-                    .onSuccess { refreshed -> persistSession(context, refreshed) }
-                    .onFailure { err ->
-                        if (err.message?.startsWith("AUTH_EXPIRED:") == true) {
-                            AppearancePrefs.clearSupabaseSession(context)
-                            MomiSupabaseClient.activeSession = null
-                        }
+                val res = MomiSupabaseClient().refreshSession(restored.refreshToken)
+                res.onSuccess { refreshed ->
+                    persistSession(context, refreshed)
+                    onAuthSuccess()
+                }.onFailure { err ->
+                    if (err.message?.startsWith("AUTH_EXPIRED:") == true) {
+                        AppearancePrefs.clearSupabaseSession(context)
+                        MomiSupabaseClient.activeSession = null
+                        onUnauthenticated()
+                    } else {
+                        MomiSupabaseClient.activeSession = restored
+                        onAuthSuccess()
                     }
+                }
             }
+            return
         }
-        onAuthSuccess()
-        return
+        AppearancePrefs.clearSupabaseSession(context)
     }
 
     if (!AppearancePrefs.isAutoSignInEnabled(context)) {

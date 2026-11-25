@@ -171,9 +171,9 @@ object AppearancePrefs {
         return listOf(access, refresh, userId, email, displayName, avatarUrl)
     }
 
-    fun restoreSupabaseSession(context: Context): com.example.data.supabase.SupabaseAuthSession? {
+    fun loadSavedSupabaseSession(context: Context): com.example.data.supabase.SupabaseAuthSession? {
         val parts = loadSupabaseSessionRaw(context) ?: return null
-        val session = com.example.data.supabase.SupabaseAuthSession(
+        return com.example.data.supabase.SupabaseAuthSession(
             accessToken = parts[0].orEmpty(),
             refreshToken = parts[1].orEmpty(),
             userId = parts[2].orEmpty(),
@@ -181,6 +181,10 @@ object AppearancePrefs {
             displayName = parts.getOrNull(4),
             avatarUrl = parts.getOrNull(5)
         )
+    }
+
+    fun restoreSupabaseSession(context: Context): com.example.data.supabase.SupabaseAuthSession? {
+        val session = loadSavedSupabaseSession(context) ?: return null
         com.example.data.supabase.MomiSupabaseClient.activeSession = session
         return session
     }

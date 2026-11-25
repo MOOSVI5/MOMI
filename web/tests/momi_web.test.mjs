@@ -48,8 +48,10 @@ import {
   buildSupabaseRealtimeJoinMessage,
   buildSupabaseRealtimeWsUrl,
   checkSupabaseHealth,
+  extractSupabaseJwtExpiryMs,
   isSafeSupabaseAnonKey,
   isSupabaseClientReady,
+  isSupabaseJwtExpiringSoon,
   mapFirestoreSnapshotToSupabaseBundle,
   mapSupabaseAuthUserToWeb,
   mapSupabaseConfigToWeb,
@@ -482,4 +484,21 @@ test('Supabase Realtime CDC WebSocket helpers and SQL publication cover all 24 p
       assert.ok(sqlText.includes(`'${tbl}'`), `Missing Realtime table entry '${tbl}' in ${sqlRel}`);
     }
   }
+});
+
+test('JWT expiry detection flags expired PGRST303 tokens and preserves fresh tokens', () => {
+  const toB64Url = (obj) => Buffer.from(JSON.stringify(obj), 'utf8')
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+  const pastSec = 1700000000;
+  const futureSec = Math.floor(Date.now() / 1000) + 3600;
+  const expiredJwt = `${toB64Url({ alg: 'HS256' })}.${toB64Url({ sub: 'u1', exp: pastSec })}.sig`;
+  const freshJwt = `${toB64Url({ alg: 'HS256' })}.${toB64Url({ sub: 'u1', exp: futureSec })}.sig`;
+
+  assert.equal(extractSupabaseJwtExpiryMs(expiredJwt), pastSec * 1000);
+  assert.equal(isSupabaseJwtExpiringSoon(expiredJwt), true);
+  assert.equal(isSupabaseJwtExpiringSoon(freshJwt), false);
+  assert.equal(isSupabaseJwtExpiringSoon(''), false);
 });
