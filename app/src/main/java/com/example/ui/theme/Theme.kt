@@ -20,34 +20,24 @@ enum class AppColorScheme(
     val subtitle: String,
     val gradientColors: List<Color>
 ) {
-    MIDNIGHT_SUNSET(
-        displayName = "Midnight Sunset",
-        subtitle = "OLED Black & Rose Amber",
-        gradientColors = LumaGradientColors
-    ),
-    EMERALD_GOLD(
-        displayName = "Emerald & Gold",
-        subtitle = "Teal & Warm Gold",
-        gradientColors = EmeraldGradientColors
-    ),
-    COBALT_INDIGO(
-        displayName = "Electric Indigo",
-        subtitle = "Cobalt Blue & Coral",
-        gradientColors = IndigoGradientColors
-    ),
-    SILK_MAROON(
-        displayName = "Silk & Maroon",
-        subtitle = "Classic Momi Palette",
-        gradientColors = ClassicGradientColors
-    ),
     WHITE_GREY(
-        displayName = "White & Grey",
+        displayName = "White + Grey",
         subtitle = "Crisp Minimal Studio",
         gradientColors = WhiteGreyGradientColors
+    ),
+    EMERALD_MAROON(
+        displayName = "Emerald Green + Maroon",
+        subtitle = "Deep Emerald & Rich Maroon",
+        gradientColors = EmeraldMaroonGradientColors
+    ),
+    GOLD_EMERALD(
+        displayName = "Gold + Emerald Green",
+        subtitle = "Warm Gold & Deep Emerald",
+        gradientColors = GoldEmeraldGradientColors
     )
 }
 
-val LocalMomiBrandGradient = staticCompositionLocalOf { LumaGradientColors }
+val LocalMomiBrandGradient = staticCompositionLocalOf { EmeraldMaroonGradientColors }
 
 object AppearancePrefs {
     private const val PREFS_NAME = "momi_appearance_prefs"
@@ -63,6 +53,9 @@ object AppearancePrefs {
     private const val KEY_SUPA_EMAIL = "supabase_email"
     private const val KEY_SUPA_DISPLAY_NAME = "supabase_display_name"
     private const val KEY_SUPA_AVATAR_URL = "supabase_avatar_url"
+    private const val KEY_USER_GEMINI_API_KEY = "user_gemini_api_key"
+    private const val KEY_CACHED_PROFILE_PREFIX = "cached_profile_json_"
+    private const val KEY_CACHED_FEED_POSTS = "cached_feed_posts_json"
 
     fun loadThemePreference(context: Context): ThemePreference {
         val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -80,9 +73,15 @@ object AppearancePrefs {
 
     fun loadColorScheme(context: Context): AppColorScheme {
         val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getString(KEY_COLOR_SCHEME, AppColorScheme.MIDNIGHT_SUNSET.name)
-        return runCatching { AppColorScheme.valueOf(raw ?: AppColorScheme.MIDNIGHT_SUNSET.name) }
-            .getOrDefault(AppColorScheme.MIDNIGHT_SUNSET)
+            .getString(KEY_COLOR_SCHEME, AppColorScheme.EMERALD_MAROON.name)
+            ?.trim()
+            .orEmpty()
+        return when (raw) {
+            "WHITE_GREY" -> AppColorScheme.WHITE_GREY
+            "EMERALD_MAROON", "SILK_MAROON" -> AppColorScheme.EMERALD_MAROON
+            "GOLD_EMERALD", "EMERALD_GOLD" -> AppColorScheme.GOLD_EMERALD
+            else -> AppColorScheme.EMERALD_MAROON
+        }
     }
 
     fun saveColorScheme(context: Context, scheme: AppColorScheme) {
@@ -138,6 +137,48 @@ object AppearancePrefs {
             .edit()
             .putBoolean(KEY_NOTIF_PERM_PROMPTED, true)
             .apply()
+    }
+
+    fun loadUserGeminiApiKey(context: Context): String {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_USER_GEMINI_API_KEY, "")
+            .orEmpty()
+            .trim()
+    }
+
+    fun saveUserGeminiApiKey(context: Context, apiKey: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_USER_GEMINI_API_KEY, apiKey.trim())
+            .apply()
+    }
+
+    fun saveCachedProfileJson(context: Context, userId: String, profileJson: String) {
+        if (userId.isBlank() || profileJson.isBlank()) return
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString("$KEY_CACHED_PROFILE_PREFIX$userId", profileJson)
+            .apply()
+    }
+
+    fun loadCachedProfileJson(context: Context, userId: String): String? {
+        if (userId.isBlank()) return null
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString("$KEY_CACHED_PROFILE_PREFIX$userId", null)
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    fun saveCachedFeedPostsJson(context: Context, postsJson: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_CACHED_FEED_POSTS, postsJson)
+            .apply()
+    }
+
+    fun loadCachedFeedPostsJson(context: Context): String? {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_CACHED_FEED_POSTS, null)
+            ?.takeIf { it.isNotBlank() }
     }
 
     fun saveSupabaseSession(
@@ -202,174 +243,6 @@ object AppearancePrefs {
     }
 }
 
-private val SunsetDarkColorScheme = darkColorScheme(
-    primary = SunsetRoseBright,
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFF4C0D22),
-    onPrimaryContainer = Color(0xFFFFD9E2),
-    secondary = SunsetAmber,
-    onSecondary = Color(0xFF281100),
-    secondaryContainer = Color(0xFF1A1A20),
-    onSecondaryContainer = Color(0xFFF5F5F7),
-    tertiary = SunsetRoseBright,
-    onTertiary = Color.White,
-    background = Color(0xFF000000),
-    onBackground = Color(0xFFF5F5F7),
-    surface = Color(0xFF0D0D11),
-    onSurface = Color(0xFFF5F5F7),
-    surfaceVariant = Color(0xFF1A1A22),
-    onSurfaceVariant = Color(0xFFA8A8B8),
-    outline = Color(0xFF2B2B36),
-    outlineVariant = Color(0xFF262630)
-)
-
-private val SunsetLightColorScheme = lightColorScheme(
-    primary = SunsetRose,
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFFFFE4EC),
-    onPrimaryContainer = Color(0xFF6B0B26),
-    secondary = SunsetAmber,
-    onSecondary = Color.White,
-    secondaryContainer = Color(0xFFF3F4F6),
-    onSecondaryContainer = Color(0xFF111827),
-    tertiary = SunsetRose,
-    onTertiary = Color.White,
-    background = Color(0xFFFFFFFF),
-    onBackground = Color(0xFF111827),
-    surface = Color(0xFFFFFFFF),
-    onSurface = Color(0xFF111827),
-    surfaceVariant = Color(0xFFF3F4F6),
-    onSurfaceVariant = Color(0xFF4B5563),
-    outline = Color(0xFFE5E7EB),
-    outlineVariant = Color(0xFFE5E7EB)
-)
-
-private val EmeraldDarkColorScheme = darkColorScheme(
-    primary = EmeraldBright,
-    onPrimary = Color(0xFF032623),
-    primaryContainer = Color(0xFF0F3F3A),
-    onPrimaryContainer = Color(0xFFCCFBF1),
-    secondary = GoldBright,
-    onSecondary = Color(0xFF261900),
-    secondaryContainer = Color(0xFF162422),
-    onSecondaryContainer = Color(0xFFECFEFF),
-    tertiary = GoldBright,
-    onTertiary = Color(0xFF261900),
-    background = Color(0xFF071110),
-    onBackground = Color(0xFFEEF7F6),
-    surface = Color(0xFF0E1B1A),
-    onSurface = Color(0xFFEEF7F6),
-    surfaceVariant = Color(0xFF172B29),
-    onSurfaceVariant = Color(0xFF9BC2BE),
-    outline = Color(0xFF26423F),
-    outlineVariant = Color(0xFF213A37)
-)
-
-private val EmeraldLightColorScheme = lightColorScheme(
-    primary = EmeraldPrimary,
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFFCCFBF1),
-    onPrimaryContainer = Color(0xFF0B4641),
-    secondary = GoldAccent,
-    onSecondary = Color.White,
-    secondaryContainer = Color(0xFFF1F5F3),
-    onSecondaryContainer = Color(0xFF11211F),
-    tertiary = GoldAccent,
-    onTertiary = Color.White,
-    background = Color(0xFFFAF9F5),
-    onBackground = Color(0xFF11211F),
-    surface = Color(0xFFFFFFFF),
-    onSurface = Color(0xFF11211F),
-    surfaceVariant = Color(0xFFEEF3F0),
-    onSurfaceVariant = Color(0xFF48615D),
-    outline = Color(0xFFD5E1DD),
-    outlineVariant = Color(0xFFD5E1DD)
-)
-
-private val IndigoDarkColorScheme = darkColorScheme(
-    primary = IndigoBright,
-    onPrimary = Color(0xFF061B3E),
-    primaryContainer = Color(0xFF173166),
-    onPrimaryContainer = Color(0xFFDBEAFE),
-    secondary = CoralBright,
-    onSecondary = Color.White,
-    secondaryContainer = Color(0xFF161E31),
-    onSecondaryContainer = Color(0xFFF1F5F9),
-    tertiary = CoralBright,
-    onTertiary = Color.White,
-    background = Color(0xFF080D1A),
-    onBackground = Color(0xFFF1F5F9),
-    surface = Color(0xFF101729),
-    onSurface = Color(0xFFF1F5F9),
-    surfaceVariant = Color(0xFF1A243D),
-    onSurfaceVariant = Color(0xFF94A3B8),
-    outline = Color(0xFF283554),
-    outlineVariant = Color(0xFF232E4A)
-)
-
-private val IndigoLightColorScheme = lightColorScheme(
-    primary = IndigoPrimary,
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFFDBEAFE),
-    onPrimaryContainer = Color(0xFF1E3A8A),
-    secondary = CoralAccent,
-    onSecondary = Color.White,
-    secondaryContainer = Color(0xFFF1F5F9),
-    onSecondaryContainer = Color(0xFF0F172A),
-    tertiary = CoralAccent,
-    onTertiary = Color.White,
-    background = Color(0xFFF8FAFC),
-    onBackground = Color(0xFF0F172A),
-    surface = Color(0xFFFFFFFF),
-    onSurface = Color(0xFF0F172A),
-    surfaceVariant = Color(0xFFEEF2F6),
-    onSurfaceVariant = Color(0xFF475569),
-    outline = Color(0xFFD6DFEB),
-    outlineVariant = Color(0xFFD6DFEB)
-)
-
-private val LumaDarkColorScheme = darkColorScheme(
-    primary = SilkBlueLight,
-    onPrimary = Color(0xFF081F36),
-    primaryContainer = Color(0xFF1A3A59),
-    onPrimaryContainer = SilkBlueSoft,
-    secondary = MaroonBright,
-    onSecondary = Color.White,
-    secondaryContainer = DarkSurfaceVariant,
-    onSecondaryContainer = DarkTextPrimary,
-    tertiary = MaroonBright,
-    onTertiary = Color.White,
-    background = DarkBackground,
-    onBackground = DarkTextPrimary,
-    surface = DarkSurface,
-    onSurface = DarkTextPrimary,
-    surfaceVariant = DarkSurfaceVariant,
-    onSurfaceVariant = DarkTextSecondary,
-    outline = DarkOutline,
-    outlineVariant = DarkOutline
-)
-
-private val LumaLightColorScheme = lightColorScheme(
-    primary = SilkBlue,
-    onPrimary = Color.White,
-    primaryContainer = SilkBlueSoft,
-    onPrimaryContainer = SilkBlueDeep,
-    secondary = MaroonDeep,
-    onSecondary = Color.White,
-    secondaryContainer = LightSurfaceVariant,
-    onSecondaryContainer = LightTextPrimary,
-    tertiary = MaroonVibrant,
-    onTertiary = Color.White,
-    background = LightBackground,
-    onBackground = LightTextPrimary,
-    surface = LightSurface,
-    onSurface = LightTextPrimary,
-    surfaceVariant = LightSurfaceVariant,
-    onSurfaceVariant = LightTextSecondary,
-    outline = LightOutline,
-    outlineVariant = LightOutline
-)
-
 private val WhiteGreyDarkColorScheme = darkColorScheme(
     primary = WhiteGreyPrimaryBright,
     onPrimary = Color(0xFF111827),
@@ -412,21 +285,103 @@ private val WhiteGreyLightColorScheme = lightColorScheme(
     outlineVariant = Color(0xFFE5E7EB)
 )
 
+private val EmeraldMaroonDarkColorScheme = darkColorScheme(
+    primary = EmeraldGreenBright,
+    onPrimary = Color(0xFF022C22),
+    primaryContainer = Color(0xFF064E3B),
+    onPrimaryContainer = Color(0xFFD1FAE5),
+    secondary = MaroonAccentBright,
+    onSecondary = Color(0xFF2B0410),
+    secondaryContainer = Color(0xFF3B0D1D),
+    onSecondaryContainer = Color(0xFFFFE4E6),
+    tertiary = MaroonAccentBright,
+    onTertiary = Color.White,
+    background = Color(0xFF06110E),
+    onBackground = Color(0xFFECFDF5),
+    surface = Color(0xFF0C1A16),
+    onSurface = Color(0xFFECFDF5),
+    surfaceVariant = Color(0xFF142822),
+    onSurfaceVariant = Color(0xFFA7C4BA),
+    outline = Color(0xFF223F36),
+    outlineVariant = Color(0xFF1D352E)
+)
+
+private val EmeraldMaroonLightColorScheme = lightColorScheme(
+    primary = EmeraldGreenPrimary,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFD1FAE5),
+    onPrimaryContainer = Color(0xFF064E3B),
+    secondary = MaroonAccent,
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFFFE4E6),
+    onSecondaryContainer = Color(0xFF4C0519),
+    tertiary = MaroonAccent,
+    onTertiary = Color.White,
+    background = Color(0xFFF8FBF9),
+    onBackground = Color(0xFF0E211B),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF0E211B),
+    surfaceVariant = Color(0xFFECF3EF),
+    onSurfaceVariant = Color(0xFF446158),
+    outline = Color(0xFFCFE0D8),
+    outlineVariant = Color(0xFFD9E6DF)
+)
+
+private val GoldEmeraldDarkColorScheme = darkColorScheme(
+    primary = GoldBright,
+    onPrimary = Color(0xFF261900),
+    primaryContainer = Color(0xFF4B3200),
+    onPrimaryContainer = Color(0xFFFEF3C7),
+    secondary = EmeraldBright,
+    onSecondary = Color(0xFF032623),
+    secondaryContainer = Color(0xFF0F3F3A),
+    onSecondaryContainer = Color(0xFFCCFBF1),
+    tertiary = EmeraldBright,
+    onTertiary = Color(0xFF032623),
+    background = Color(0xFF081210),
+    onBackground = Color(0xFFF4F7F2),
+    surface = Color(0xFF0F1C19),
+    onSurface = Color(0xFFF4F7F2),
+    surfaceVariant = Color(0xFF182B27),
+    onSurfaceVariant = Color(0xFFA8C2BA),
+    outline = Color(0xFF2A423B),
+    outlineVariant = Color(0xFF223832)
+)
+
+private val GoldEmeraldLightColorScheme = lightColorScheme(
+    primary = GoldAccent,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFFEF3C7),
+    onPrimaryContainer = Color(0xFF78350F),
+    secondary = EmeraldPrimary,
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFCCFBF1),
+    onSecondaryContainer = Color(0xFF0B4641),
+    tertiary = EmeraldPrimary,
+    onTertiary = Color.White,
+    background = Color(0xFFFAF9F4),
+    onBackground = Color(0xFF14211D),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF14211D),
+    surfaceVariant = Color(0xFFF2EFE5),
+    onSurfaceVariant = Color(0xFF4F5E58),
+    outline = Color(0xFFDCD8CA),
+    outlineVariant = Color(0xFFE5E1D4)
+)
+
 private fun resolveColorScheme(
     appColorScheme: AppColorScheme,
     darkTheme: Boolean
 ): ColorScheme = when (appColorScheme) {
-    AppColorScheme.MIDNIGHT_SUNSET -> if (darkTheme) SunsetDarkColorScheme else SunsetLightColorScheme
-    AppColorScheme.EMERALD_GOLD -> if (darkTheme) EmeraldDarkColorScheme else EmeraldLightColorScheme
-    AppColorScheme.COBALT_INDIGO -> if (darkTheme) IndigoDarkColorScheme else IndigoLightColorScheme
-    AppColorScheme.SILK_MAROON -> if (darkTheme) LumaDarkColorScheme else LumaLightColorScheme
     AppColorScheme.WHITE_GREY -> if (darkTheme) WhiteGreyDarkColorScheme else WhiteGreyLightColorScheme
+    AppColorScheme.EMERALD_MAROON -> if (darkTheme) EmeraldMaroonDarkColorScheme else EmeraldMaroonLightColorScheme
+    AppColorScheme.GOLD_EMERALD -> if (darkTheme) GoldEmeraldDarkColorScheme else GoldEmeraldLightColorScheme
 }
 
 @Composable
 fun LumaTheme(
     themePreference: ThemePreference = ThemePreference.SYSTEM,
-    appColorScheme: AppColorScheme = AppColorScheme.MIDNIGHT_SUNSET,
+    appColorScheme: AppColorScheme = AppColorScheme.EMERALD_MAROON,
     content: @Composable () -> Unit,
 ) {
     val darkTheme = when (themePreference) {

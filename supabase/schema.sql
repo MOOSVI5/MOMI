@@ -45,13 +45,14 @@ END;
 $$;
 
 -- ----------------------------------------------------------------------------
--- 2. Tables (1:1 Parity with Momi Firestore Collections)
+-- 2. Tables (Core Momi Supabase PostgreSQL Schema)
 -- ----------------------------------------------------------------------------
 
--- 2.1 Public Creator Profiles (no PII)
+-- 2.1 Public Creator Profiles (single profile per unique email/username)
 CREATE TABLE IF NOT EXISTS public.profiles (
   user_id text PRIMARY KEY CHECK (length(user_id) BETWEEN 1 AND 128),
   username text NOT NULL UNIQUE CHECK (length(username) BETWEEN 1 AND 50),
+  email text NOT NULL DEFAULT '' CHECK (length(email) <= 160),
   display_name text NOT NULL CHECK (length(display_name) BETWEEN 1 AND 80),
   category text NOT NULL DEFAULT '' CHECK (length(category) <= 80),
   bio text NOT NULL DEFAULT '' CHECK (length(bio) <= 300),
@@ -70,6 +71,9 @@ CREATE TABLE IF NOT EXISTS public.profiles (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_email_lower
+  ON public.profiles(lower(email))
+  WHERE email <> '';
 
 CREATE OR REPLACE FUNCTION public.is_staff_with_scope(scope_name text)
 RETURNS boolean
@@ -184,10 +188,10 @@ CREATE TABLE IF NOT EXISTS public.follows (
 CREATE INDEX IF NOT EXISTS idx_follows_follower ON public.follows(follower_uid);
 CREATE INDEX IF NOT EXISTS idx_follows_target ON public.follows(target_uid);
 
--- 2.6 Per-User Interaction Markers (Liked Posts, Bookmarks, Seen Stories, Liked Comments)
+-- 2.6 Per-User Interaction Markers (Liked Posts, Viewed Posts, Bookmarks, Seen Stories, Liked Comments)
 CREATE TABLE IF NOT EXISTS public.user_interactions (
   user_id text NOT NULL REFERENCES public.profiles(user_id) ON DELETE CASCADE,
-  target_type text NOT NULL CHECK (target_type IN ('LIKED_POST', 'BOOKMARK', 'SEEN_STORY', 'LIKED_COMMENT')),
+  target_type text NOT NULL CHECK (target_type IN ('LIKED_POST', 'VIEWED_POST', 'BOOKMARK', 'SEEN_STORY', 'LIKED_COMMENT')),
   target_id text NOT NULL CHECK (length(target_id) BETWEEN 1 AND 128),
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (user_id, target_type, target_id)
@@ -422,7 +426,7 @@ CREATE TABLE IF NOT EXISTS public.credit_transactions (
 CREATE INDEX IF NOT EXISTS idx_credit_tx_sender ON public.credit_transactions(sender_uid, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_credit_tx_recipient ON public.credit_transactions(recipient_uid, created_at DESC);
 
--- 2.14 Remote Monetization Configuration (AdMob, Start.io, Monetag & Gamezop)
+-- 2.14 Remote Monetization & Release Configuration (AdMob & Start.io)
 CREATE TABLE IF NOT EXISTS public.app_config (
   id text PRIMARY KEY DEFAULT 'monetization',
   admob_enabled boolean NOT NULL DEFAULT true,
@@ -430,25 +434,13 @@ CREATE TABLE IF NOT EXISTS public.app_config (
   admob_mrec_unit_id text NOT NULL DEFAULT '' CHECK (length(admob_mrec_unit_id) <= 120),
   admob_interstitial_unit_id text NOT NULL DEFAULT '' CHECK (length(admob_interstitial_unit_id) <= 120),
   start_io_enabled boolean NOT NULL DEFAULT true,
-  monetag_enabled boolean NOT NULL DEFAULT true,
-  monetag_direct_link_url text NOT NULL DEFAULT '' CHECK (
-    monetag_direct_link_url = '' OR monetag_direct_link_url ~ '^https://'
-  ),
-  monetag_web_zone_id text NOT NULL DEFAULT '' CHECK (length(monetag_web_zone_id) <= 40),
-  monetag_web_meta_tag text NOT NULL DEFAULT '' CHECK (length(monetag_web_meta_tag) <= 120),
   partner_promo_title text NOT NULL DEFAULT 'Featured Creator Deals & Partner Showcase',
   partner_promo_subtitle text NOT NULL DEFAULT 'Explore verified creator collections, partner offers & exclusive community perks.',
   partner_promo_cta text NOT NULL DEFAULT 'Explore Partner',
-  gamezop_enabled boolean NOT NULL DEFAULT false,
-  gamezop_portal_url text NOT NULL DEFAULT '' CHECK (
-    gamezop_portal_url = '' OR gamezop_portal_url ~ '^https://'
-  ),
-  gamezop_publisher_id text NOT NULL DEFAULT '' CHECK (length(gamezop_publisher_id) <= 40),
-  gamezop_banner_title text NOT NULL DEFAULT 'Momi Arcade · Play Instant Games',
   announcement_id text NOT NULL DEFAULT '',
   announcement_title text NOT NULL DEFAULT '',
   announcement_body text NOT NULL DEFAULT '',
-  latest_version_name text NOT NULL DEFAULT '2.1',
+  latest_version_name text NOT NULL DEFAULT '2.3',
   release_notes text NOT NULL DEFAULT '',
   updated_by_email text NOT NULL DEFAULT '',
   updated_at timestamptz NOT NULL DEFAULT now()
@@ -659,12 +651,20 @@ CREATE POLICY follows_insert_owner ON public.follows FOR INSERT TO authenticated
 DROP POLICY IF EXISTS follows_delete_owner ON public.follows;
 CREATE POLICY follows_delete_owner ON public.follows FOR DELETE TO authenticated USING (follower_uid = auth.uid()::text);
 
--- User Interactions (owner-only)
+-- User Interactions (owner-write; likers & viewers readable publicly for post transparency)
 DROP POLICY IF EXISTS interactions_owner_all ON public.user_interactions;
-CREATE POLICY interactions_owner_all ON public.user_interactions
-  FOR ALL TO authenticated
-  USING (user_id = auth.uid()::text)
+DROP POLICY IF EXISTS interactions_select_public ON public.user_interactions;
+CREATE POLICY interactions_select_public ON public.user_interactions
+  FOR SELECT TO anon, authenticated
+  USING (user_id = auth.uid()::text OR target_type IN ('LIKED_POST', 'VIEWED_POST'));
+DROP POLICY IF EXISTS interactions_owner_write ON public.user_interactions;
+CREATE POLICY interactions_owner_write ON public.user_interactions
+  FOR INSERT TO authenticated
   WITH CHECK (user_id = auth.uid()::text);
+DROP POLICY IF EXISTS interactions_owner_delete ON public.user_interactions;
+CREATE POLICY interactions_owner_delete ON public.user_interactions
+  FOR DELETE TO authenticated
+  USING (user_id = auth.uid()::text);
 
 -- Notifications (owner-read/update/delete, actor-insert)
 DROP POLICY IF EXISTS notifications_select_owner ON public.notifications;
@@ -771,7 +771,7 @@ DROP POLICY IF EXISTS app_config_admin_write ON public.app_config;
 CREATE POLICY app_config_admin_write ON public.app_config FOR ALL TO authenticated USING (public.is_momi_admin()) WITH CHECK (public.is_momi_admin());
 
 -- ----------------------------------------------------------------------------
--- 4. Atomic Server-Side RPCs (Replace Client-Side Firestore Multi-Doc Batches)
+-- 4. Atomic Server-Side RPCs
 -- ----------------------------------------------------------------------------
 
 -- 4.1 Boost Post with Wallet Credits

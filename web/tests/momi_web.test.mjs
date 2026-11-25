@@ -10,37 +10,35 @@ import {
   aspectRatioCss,
   buildPostShareUrl,
   buildProfileShareUrl,
+  COLOR_SCHEMES,
   compareSemanticVersions,
+  DEFAULT_MONETIZATION_CONFIG,
   escapeHtml,
   extractHashtags,
   extractMentions,
+  filterActiveStories24h,
   FILTER_OPTIONS,
   filterCssForTag,
-  FIREBASE_WEB_CONFIG,
-  FIRESTORE_DATABASE_ID,
   formatCount,
   initialsForUsername,
   isOwnerEmail,
-  normalizeMonetagDirectUrl,
+  normalizeColorScheme,
   normalizeUsername,
   parseDeepLinkFromLocation,
   POST_BOOST_OPTIONS,
   PRESET_IMAGE_OPTIONS,
   renderRichCaptionHtml,
-  resolveGamezopUrl,
   resolveImageSrc,
-  sanitizeGamezopPublisherId,
-  sanitizeMonetagZoneId,
   SHOWCASE_COMMENTS,
   SHOWCASE_PERSONAS,
   sortFeedWithBoostPriority,
+  STORY_TTL_MS,
+  SUPABASE_WEB_CONFIG,
   tierForTotalPurchased,
   verificationTierForPerks,
   WEB_APP_URL,
-  WEB_PERK_CATALOG,
-  DEFAULT_MONETIZATION_CONFIG,
-  SUPABASE_WEB_CONFIG
-} from '../firebase-config.js';
+  WEB_PERK_CATALOG
+} from '../app-config.js';
 import {
   SUPABASE_SCHEMA_TABLES,
   buildSupabaseAuthHeaders,
@@ -52,7 +50,7 @@ import {
   isSafeSupabaseAnonKey,
   isSupabaseClientReady,
   isSupabaseJwtExpiringSoon,
-  mapFirestoreSnapshotToSupabaseBundle,
+  mapMomiSnapshotToSupabaseBundle,
   mapSupabaseAuthUserToWeb,
   mapSupabaseConfigToWeb,
   mapSupabaseGroupToWeb,
@@ -65,33 +63,46 @@ import {
   normalizeSupabaseUrl,
   parseSupabaseOAuthCallback,
   parseSupabaseRealtimeMessage,
+  supabaseResendSignupOtp,
+  supabaseVerifyEmailOtp,
   syncBundleToSupabase
 } from '../supabase-client.js';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
 
-test('Firebase web config matches google-services.json and firebase_applet_config.xml', () => {
-  const googleServices = JSON.parse(
-    fs.readFileSync(path.join(REPO_ROOT, 'app', 'google-services.json'), 'utf8')
-  );
-  const appletConfigXml = fs.readFileSync(
-    path.join(REPO_ROOT, 'app', 'src', 'main', 'res', 'values', 'firebase_applet_config.xml'),
-    'utf8'
-  );
+test('Momi v2.3 config limits color styles to 3 palettes and enforces 24-hour story TTL', () => {
+  assert.equal(APP_VERSION_NAME, '2.3');
+  assert.equal(APP_VERSION_CODE, 14);
+  assert.equal(STORY_TTL_MS, 86_400_000);
 
-  assert.equal(FIREBASE_WEB_CONFIG.projectId, googleServices.project_info.project_id);
-  assert.equal(FIREBASE_WEB_CONFIG.messagingSenderId, googleServices.project_info.project_number);
-  assert.equal(FIREBASE_WEB_CONFIG.storageBucket, googleServices.project_info.storage_bucket);
-  assert.ok(appletConfigXml.includes(`>${FIRESTORE_DATABASE_ID}<`));
+  assert.deepEqual(
+    COLOR_SCHEMES.map((s) => s.id),
+    ['WHITE_GREY', 'EMERALD_MAROON', 'GOLD_EMERALD']
+  );
+  assert.equal(normalizeColorScheme('SILK_MAROON'), 'EMERALD_MAROON');
+  assert.equal(normalizeColorScheme('EMERALD_GOLD'), 'GOLD_EMERALD');
+  assert.equal(normalizeColorScheme('UNKNOWN'), 'EMERALD_MAROON');
+
+  const now = Date.now();
+  const active = filterActiveStories24h(
+    [
+      { id: 'fresh', createdAtMs: now - 3_600_000 },
+      { id: 'expired', createdAtMs: now - STORY_TTL_MS - 60_000 },
+      { id: 'future_ok', createdAtMs: now - 10_000 }
+    ],
+    now
+  );
+  assert.deepEqual(active.map((s) => s.id), ['fresh', 'future_ok']);
 });
 
-test('Web shell assets, PWA manifest, and hosting files exist', () => {
+test('Web shell assets, PWA manifest, and hosting files exist without Firebase leftovers', () => {
   const required = [
     'web/index.html',
     'web/styles.css',
     'web/app.js',
     'web/studio.js',
-    'web/firebase-config.js',
+    'web/app-config.js',
+    'web/supabase-client.js',
     'web/manifest.webmanifest',
     'web/sw.js',
     'web/version.json',
@@ -105,6 +116,8 @@ test('Web shell assets, PWA manifest, and hosting files exist', () => {
   for (const rel of required) {
     assert.ok(fs.existsSync(path.join(REPO_ROOT, rel)), `Missing web asset: ${rel}`);
   }
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, 'web', 'firebase-config.js')), false);
+
   const versionManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'web', 'version.json'), 'utf8'));
   assert.equal(versionManifest.versionName, APP_VERSION_NAME);
   assert.equal(versionManifest.versionCode, APP_VERSION_CODE);
@@ -118,7 +131,7 @@ test('extractHashtags and extractMentions parse, deduplicate, and normalize tags
   assert.deepEqual(extractMentions(caption, ['@aria.studio']), ['aria.studio', 'elena.studio', 'kenji_photo']);
 });
 
-test('all 10 filter options and aspect ratios match Firestore schema', () => {
+test('all 10 filter options and aspect ratios work as expected', () => {
   assert.equal(FILTER_OPTIONS.length, 10);
   assert.equal(PRESET_IMAGE_OPTIONS.length, 4);
   assert.equal(filterCssForTag('NONE'), 'none');
@@ -146,13 +159,13 @@ test('username, count formatting, and image resolution utilities work accurately
   assert.equal(escapeHtml('"a&b"'), '&quot;a&amp;b&quot;');
 });
 
-test('share URL builders, deep-link parser, version comparison, and Android app recommendation links work properly', () => {
+test('share URL builders, deep-link parser, version comparison, and Android APK links work properly', () => {
   assert.equal(WEB_APP_URL, 'https://moosvi5.github.io/MOMI/');
   assert.equal(ANDROID_APK_URL, 'https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-latest.apk');
   assert.equal(ANDROID_RELEASES_URL, 'https://github.com/MOOSVI5/MOMI/releases/latest');
-  assert.equal(compareSemanticVersions('2.2', '2.1'), 1);
-  assert.equal(compareSemanticVersions('2.2.0', '2.2'), 0);
-  assert.equal(compareSemanticVersions('2.1', '2.2'), -1);
+  assert.equal(compareSemanticVersions('2.3', '2.2'), 1);
+  assert.equal(compareSemanticVersions('2.3.0', '2.3'), 0);
+  assert.equal(compareSemanticVersions('2.2', '2.3'), -1);
 
   const postUrl = buildPostShareUrl('post_17321_abc');
   assert.equal(postUrl, 'https://moosvi5.github.io/MOMI/?post=post_17321_abc');
@@ -174,9 +187,11 @@ test('share URL builders, deep-link parser, version comparison, and Android app 
 
   const indexHtml = fs.readFileSync(path.join(REPO_ROOT, 'web', 'index.html'), 'utf8');
   assert.ok(indexHtml.includes(ANDROID_APK_URL));
+  assert.ok(indexHtml.includes('id="verifyOtpBtn"'));
+  assert.ok(indexHtml.includes('id="resendOtpBtn"'));
 });
 
-test('starter showcase personas and Firestore Web sync resilience are configured correctly', () => {
+test('starter showcase personas, OTP auth, AI assistant, engagers modal, and Supabase sync are wired', () => {
   const validFilters = new Set(FILTER_OPTIONS.map((f) => f.tag));
   assert.equal(SHOWCASE_PERSONAS.length, 6);
   assert.ok(SHOWCASE_COMMENTS.length >= 4);
@@ -190,33 +205,34 @@ test('starter showcase personas and Firestore Web sync resilience are configured
   }
 
   const appJs = fs.readFileSync(path.join(REPO_ROOT, 'web', 'app.js'), 'utf8');
-  assert.equal(appJs.includes('firebase-app.js'), false);
-  assert.equal(appJs.includes('firebase-firestore.js'), false);
-  assert.equal(appJs.includes('firebase-auth.js'), false);
-  assert.equal(appJs.includes('initializeFirestore'), false);
-  assert.equal(appJs.includes('mirrorFirestoreBestEffort'), false);
+  assert.equal(/firebase|monetag|gamezop/i.test(appJs), false);
   assert.ok(appJs.includes('createSupabaseRealtimeClient'));
   assert.ok(appJs.includes('handleSyncError'));
   assert.ok(appJs.includes('removeAllShowcaseContent'));
   assert.ok(appJs.includes('publishShowcaseBurst'));
-  assert.ok(appJs.includes('syncMonetagWebIntegration'));
+  assert.ok(appJs.includes('openPostEngagersModal'));
+  assert.ok(appJs.includes('openAiAssistantModal'));
+  assert.ok(appJs.includes('supabaseVerifyEmailOtp'));
+  assert.ok(appJs.includes('supabaseResendSignupOtp'));
+  assert.ok(appJs.includes('ensureUserSeededInSupabase'));
   assert.ok(appJs.includes('supabaseSignInWithPassword'));
   assert.ok(appJs.includes('supabaseSignUpWithEmail'));
   assert.ok(appJs.includes('buildSupabaseGoogleOAuthUrl'));
   assert.ok(appJs.includes('parseSupabaseOAuthCallback'));
   assert.ok(appJs.includes('saveSupabaseAuthSession'));
+  assert.equal(typeof supabaseVerifyEmailOtp, 'function');
+  assert.equal(typeof supabaseResendSignupOtp, 'function');
 
   const swJs = fs.readFileSync(path.join(REPO_ROOT, 'web', 'sw.js'), 'utf8');
-  assert.ok(swJs.includes('momi-web-v8'));
+  assert.ok(swJs.includes('momi-web-v9'));
 });
 
-test('monetization config defaults, URL sanitization, boost sorting, and web perks align with Firestore rules', () => {
+test('boost sorting, monetization defaults, and web perks stay clean without Monetag/Gamezop', () => {
   assert.equal(DEFAULT_MONETIZATION_CONFIG.admobEnabled, true);
-  assert.equal(DEFAULT_MONETIZATION_CONFIG.monetagEnabled, true);
-  assert.equal(normalizeMonetagDirectUrl('  https://otieu.com/4/9001234 '), 'https://otieu.com/4/9001234');
-  assert.equal(normalizeMonetagDirectUrl('http://insecure.example.com'), '');
-  assert.equal(normalizeMonetagDirectUrl('javascript:alert(1)'), '');
-  assert.equal(sanitizeMonetagZoneId(' 9012345;alert(1) '), '9012345alert1');
+  assert.equal(DEFAULT_MONETIZATION_CONFIG.startIoEnabled, true);
+  assert.equal(DEFAULT_MONETIZATION_CONFIG.latestVersionName, '2.3');
+  assert.equal('monetagEnabled' in DEFAULT_MONETIZATION_CONFIG, false);
+  assert.equal('gamezopEnabled' in DEFAULT_MONETIZATION_CONFIG, false);
 
   const sorted = sortFeedWithBoostPriority([
     { id: 'showcase_1', isBoosted: true, boostTier: 'OWNER_RECOMMENDED' },
@@ -231,25 +247,9 @@ test('monetization config defaults, URL sanitization, boost sorting, and web per
   assert.deepEqual(WEB_PERK_CATALOG.map((p) => p.cost), [100, 250, 500, 1000]);
   assert.equal(tierForTotalPurchased(0, ['VIP_PATRON_PASS']), 'VIP');
   assert.equal(verificationTierForPerks('NONE', ['PRIORITY_VERIFICATION']), 'PENDING_PERK');
-
-  assert.equal(DEFAULT_MONETIZATION_CONFIG.gamezopEnabled, false);
-  assert.equal(resolveGamezopUrl(DEFAULT_MONETIZATION_CONFIG), '');
-  assert.equal(sanitizeGamezopPublisherId(' 9012;drop '), '9012drop');
-  assert.equal(
-    resolveGamezopUrl({ gamezopEnabled: true, gamezopPublisherId: '9012' }),
-    'https://www.gamezop.com/?id=9012'
-  );
-  assert.equal(
-    resolveGamezopUrl({ gamezopEnabled: true, gamezopPublisherId: '9012', gamezopPortalUrl: 'https://4829.play.gamezop.com' }),
-    'https://4829.play.gamezop.com'
-  );
-  assert.equal(
-    resolveGamezopUrl({ gamezopEnabled: true, gamezopPublisherId: '9012', gamezopPortalUrl: 'http://insecure.gamezop.com' }),
-    'https://www.gamezop.com/?id=9012'
-  );
 });
 
-test('Supabase migration schema SQL, URL safety, and Firestore bundle mapping match 1:1', () => {
+test('Supabase migration schema SQL, URL safety, and snapshot bundle mapping match 1:1', () => {
   const schemaPath = path.join(REPO_ROOT, 'supabase', 'schema.sql');
   assert.ok(fs.existsSync(schemaPath), 'Missing supabase/schema.sql');
   const schemaSql = fs.readFileSync(schemaPath, 'utf8');
@@ -264,23 +264,24 @@ test('Supabase migration schema SQL, URL safety, and Firestore bundle mapping ma
   assert.equal(isSafeSupabaseAnonKey('sb_publishable_ok_123456'), true);
   assert.equal(isSupabaseClientReady({ url: 'https://demo.supabase.co', anonKey: 'sb_publishable_ok_123456' }), true);
 
-  const bundle = mapFirestoreSnapshotToSupabaseBundle({
-    profile: { userId: 'u1', username: 'ali', displayName: 'Ali', partnerConsent: true },
+  const bundle = mapMomiSnapshotToSupabaseBundle({
+    profile: { userId: 'u1', email: 'ali@momi.app', username: 'ali', displayName: 'Ali', partnerConsent: true },
     creators: [],
     posts: [
       { id: 'p1', userId: 'u1', authorUsername: 'ali', authorDisplayName: 'Ali', isBoosted: true, boostTier: 'OWNER_RECOMMENDED' },
       { id: 'showcase_1', userId: 'u1', authorUsername: 'elena', authorDisplayName: 'Elena' }
     ],
     stories: [{ id: 's1', userId: 'u1', username: 'ali', caption: 'Hi' }],
-    monetizationConfig: { ...DEFAULT_MONETIZATION_CONFIG, gamezopEnabled: true, gamezopPublisherId: '9012' },
+    monetizationConfig: { ...DEFAULT_MONETIZATION_CONFIG, latestVersionName: '2.3' },
     wallet: { userId: 'u1', balance: 250, accountTier: 'CREATOR_PRO', unlockedPerks: ['CREATOR_BOOST'] }
   });
 
   assert.equal(bundle.schemaVersion, 'momi_supabase_v1');
   assert.equal(bundle.tables.profiles.length, 1);
+  assert.equal(bundle.tables.profiles[0].email, 'ali@momi.app');
   assert.equal(bundle.tables.posts.length, 1);
   assert.equal(bundle.tables.posts[0].boost_tier, 'OWNER_RECOMMENDED');
-  assert.equal(bundle.tables.app_config[0].gamezop_publisher_id, '9012');
+  assert.equal(bundle.tables.app_config[0].latest_version_name, '2.3');
   assert.equal(bundle.tables.wallets[0].balance, 250);
 });
 
@@ -323,18 +324,19 @@ test('syncBundleToSupabase deduplicates usernames, orders profiles before child 
   const enableSyncSql = fs.readFileSync(path.join(REPO_ROOT, 'supabase', 'enable_sync.sql'), 'utf8');
   assert.equal(enableSyncSql.includes('CREATE POLICY IF NOT EXISTS'), false);
   assert.ok(enableSyncSql.includes('DROP POLICY IF EXISTS'));
+  assert.ok(enableSyncSql.includes('idx_profiles_email_lower'));
 
-  const bundle = mapFirestoreSnapshotToSupabaseBundle({
+  const bundle = mapMomiSnapshotToSupabaseBundle({
     creators: [
-      { userId: 'u1', username: 'ali.studio', displayName: 'Ali' },
-      { userId: 'u2', username: 'ALI.STUDIO', displayName: 'Duplicate Username' }
+      { userId: 'u1', email: 'ali@momi.app', username: 'ali.studio', displayName: 'Ali' },
+      { userId: 'u2', email: 'dup@momi.app', username: 'ALI.STUDIO', displayName: 'Duplicate Username' }
     ],
     posts: [
       { id: 'p1', userId: 'u1', authorUsername: 'ali.studio', authorDisplayName: 'Ali', caption: 'Hi' },
       { id: 'p_orphan', userId: 'u_missing', authorUsername: 'ghost', authorDisplayName: 'Ghost', caption: 'Skip' }
     ],
     stories: [{ id: 's1', userId: 'u1', username: 'ali.studio', caption: 'Story' }],
-    monetizationConfig: { ...DEFAULT_MONETIZATION_CONFIG, gamezopEnabled: true, gamezopPublisherId: '9012' }
+    monetizationConfig: { ...DEFAULT_MONETIZATION_CONFIG, latestVersionName: '2.3' }
   });
 
   const calls = [];
@@ -357,7 +359,8 @@ test('syncBundleToSupabase deduplicates usernames, orders profiles before child 
   assert.equal(mapSupabasePostToWeb(bundle.tables.posts[0]).caption, 'Hi');
   assert.equal(mapSupabaseStoryToWeb(bundle.tables.stories[0]).caption, 'Story');
   assert.equal(mapSupabaseProfileToWeb(bundle.tables.profiles[0]).username, 'ali.studio');
-  assert.equal(mapSupabaseConfigToWeb(bundle.tables.app_config[0]).gamezopPublisherId, '9012');
+  assert.equal(mapSupabaseProfileToWeb(bundle.tables.profiles[0]).email, 'ali@momi.app');
+  assert.equal(mapSupabaseConfigToWeb(bundle.tables.app_config[0]).latestVersionName, '2.3');
   assert.equal(mapSupabaseProductToWeb({ id: 'pr1', seller_uid: 'u1', price_usd: 25 }).priceUsd, 25);
 });
 
@@ -392,14 +395,14 @@ test('Supabase Auth helpers build Google OAuth URLs, parse callbacks, and map us
   assert.equal(mappedUser.emailVerified, true);
 });
 
-test('Owner admin email helper, Pages & Groups, Showcase Starters, Announcements, and zero competitor mentions work correctly', () => {
+test('Owner admin email helper, Pages & Groups, Showcase Starters, Announcements, and zero forbidden terms work', () => {
   assert.equal(isOwnerEmail('syali6511@gmail.com'), true);
   assert.equal(isOwnerEmail('  SYALI6511@GMAIL.COM  '), true);
   assert.equal(isOwnerEmail('other@example.com'), false);
   assert.equal(isOwnerEmail(''), false);
 
   const enableSyncSql = fs.readFileSync(path.join(REPO_ROOT, 'supabase', 'enable_sync.sql'), 'utf8');
-  for (const tbl of ['pages', 'page_follows', 'groups', 'group_members', 'showcase_accounts']) {
+  for (const tbl of ['pages', 'page_follows', 'groups', 'group_members', 'showcase_accounts', 'user_interactions']) {
     assert.ok(SUPABASE_SCHEMA_TABLES.includes(tbl), `Missing ${tbl} in SUPABASE_SCHEMA_TABLES`);
     assert.ok(enableSyncSql.includes(`public.${tbl}`), `Missing public.${tbl} in enable_sync.sql`);
   }
@@ -420,20 +423,24 @@ test('Owner admin email helper, Pages & Groups, Showcase Starters, Announcements
     announcement_id: 'ann_1',
     announcement_title: 'In-App Update',
     announcement_body: 'Live now!',
-    latest_version_name: '2.2',
+    latest_version_name: '2.3',
     release_notes: 'Pages & Groups added'
   });
   assert.equal(cfg.announcementId, 'ann_1');
-  assert.equal(cfg.latestVersionName, '2.2');
+  assert.equal(cfg.latestVersionName, '2.3');
 
-  const webFiles = ['index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'firebase-config.js', 'supabase-client.js'];
+  const webFiles = ['index.html', 'styles.css', 'app.js', 'studio.js', 'manifest.webmanifest', 'app-config.js', 'supabase-client.js'];
   for (const rel of webFiles) {
     const content = fs.readFileSync(path.join(REPO_ROOT, 'web', rel), 'utf8');
-    assert.equal(/\b(instagram|facebook|rednote|tiktok)\b/i.test(content), false, `Competitor mention found in web/${rel}`);
+    assert.equal(
+      /\b(instagram|facebook|rednote|tiktok|monetag|gamezop|firebase|firestore)\b/i.test(content),
+      false,
+      `Forbidden mention found in web/${rel}`
+    );
   }
 });
 
-test('Supabase Realtime CDC WebSocket helpers and SQL publication cover all 24 public tables', () => {
+test('Supabase Realtime CDC WebSocket helpers and SQL publication cover all public tables', () => {
   const wsUrl = buildSupabaseRealtimeWsUrl({
     url: 'https://qotuvugkapaspowhbsbf.supabase.co',
     anonKey: 'sb_publishable_LbrQBbU_4qH18qjopmNwIg_ALsMhlln'

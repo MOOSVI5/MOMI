@@ -37,9 +37,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION_NAME="$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')"
-          VERSION_NAME="${VERSION_NAME:-2.2}"
+          VERSION_NAME="${VERSION_NAME:-2.3}"
           VERSION_CODE="$(grep -m1 'versionCode' app/build.gradle.kts | sed -E 's/.*=\s*([0-9]+).*/\1/')"
-          VERSION_CODE="${VERSION_CODE:-13}"
+          VERSION_CODE="${VERSION_CODE:-14}"
           SHORT_SHA="$(echo "${{ github.sha }}" | cut -c1-7)"
           BUILD_NUM="${{ github.run_number }}"
           BUILT_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -102,5 +102,5 @@ jobs:
             echo "### Momi Web App Live URL"
             echo "$SITE_URL"
             echo ""
-            echo "Add \`${{ github.repository_owner }}.github.io\` under Firebase Console -> Authentication -> Settings -> Authorized domains if Google Sign-In prompts for domain authorization."
+            echo "Ensure \`$SITE_URL\` is listed under Supabase Dashboard -> Authentication -> URL Configuration -> Redirect URLs."
           } >> "$GITHUB_STEP_SUMMARY"

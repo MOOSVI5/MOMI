@@ -14,25 +14,24 @@ import {
   extractHashtags,
   extractMentions,
   FILTER_OPTIONS,
+  filterActiveStories24h,
   filterCssForTag,
   formatCount,
   initialsForUsername,
   isOwnerEmail,
   MAX_IMAGE_BASE64_CHARS,
-  normalizeMonetagDirectUrl,
+  normalizeColorScheme,
   normalizeUsername,
   parseDeepLinkFromLocation,
   POST_BOOST_OPTIONS,
   PRESET_IMAGE_OPTIONS,
   renderRichCaptionHtml,
-  resolveGamezopUrl,
   resolveImageSrc,
   resolveVideoSrc,
-  sanitizeGamezopPublisherId,
-  sanitizeMonetagZoneId,
   SHOWCASE_COMMENTS,
   SHOWCASE_PERSONAS,
   sortFeedWithBoostPriority,
+  STORY_TTL_MS,
   SUPABASE_WEB_CONFIG,
   tierForTotalPurchased,
   TRENDING_HASHTAGS,
@@ -40,7 +39,7 @@ import {
   WEB_APP_URL,
   WEB_PERK_CATALOG,
   aspectRatioCss
-} from './firebase-config.js';
+} from './app-config.js';
 import {
   buildSupabaseGoogleOAuthUrl,
   checkSupabaseHealth,
@@ -51,7 +50,7 @@ import {
   fetchUserSupabaseWorkspace,
   isSupabaseClientReady,
   loadSupabaseAuthSession,
-  mapFirestoreSnapshotToSupabaseBundle,
+  mapMomiSnapshotToSupabaseBundle,
   mapSupabaseChatMessageToWeb,
   mapSupabaseConfigToWeb,
   mapSupabaseGroupToWeb,
@@ -75,9 +74,11 @@ import {
   SUPABASE_SCHEMA_TABLES,
   supabaseFetchAuthUser,
   supabaseRefreshSession,
+  supabaseResendSignupOtp,
   supabaseSignInWithPassword,
   supabaseSignOut,
   supabaseSignUpWithEmail,
+  supabaseVerifyEmailOtp,
   syncBundleToSupabase,
   uploadWebFileToStorage,
   upsertSupabaseTable
@@ -114,6 +115,8 @@ const state = {
   bookmarkIds: new Set(),
   seenStoryIds: new Set(),
   followingUids: new Set(),
+  postLikersByPostId: new Map(),
+  postViewersByPostId: new Map(),
   merchants: [],
   products: [],
   orders: [],
@@ -152,8 +155,12 @@ const state = {
   carouselIndex: {},
   videoCache: {},
   themeMode: localStorage.getItem('momi_theme') || 'dark',
-  scheme: localStorage.getItem('momi_scheme') || 'MIDNIGHT_SUNSET',
+  scheme: normalizeColorScheme(localStorage.getItem('momi_scheme') || 'EMERALD_MAROON'),
   soundEnabled: localStorage.getItem('momi_sound') !== 'false',
+  aiChatHistory: [
+    { role: 'assistant', text: 'Hi! I am Momi AI. Ask me for photo captions, video hooks, bio ideas, Page/Group growth tips, or Momi feature help anytime.' }
+  ],
+  aiBusy: false,
   pollTimers: [],
   realtimeClient: null,
   realtimeState: 'idle',
@@ -497,9 +504,15 @@ const authEmailInput = document.getElementById('authEmailInput');
 const authPasswordInput = document.getElementById('authPasswordInput');
 const emailSignInBtn = document.getElementById('emailSignInBtn');
 const toggleAuthModeBtn = document.getElementById('toggleAuthModeBtn');
+const otpVerifyBox = document.getElementById('otpVerifyBox');
+const otpTargetLabel = document.getElementById('otpTargetLabel');
+const authOtpInput = document.getElementById('authOtpInput');
+const verifyOtpBtn = document.getElementById('verifyOtpBtn');
+const resendOtpBtn = document.getElementById('resendOtpBtn');
 
 let signInPending = false;
 let isEmailSignUpMode = false;
+let pendingOtpEmail = '';
 
 function isStandalonePwaMode() {
   return Boolean(
@@ -538,10 +551,28 @@ function clearAuthNotices() {
   authInfoBox?.classList.add('hidden');
 }
 
+function showOtpVerificationPanel(email) {
+  pendingOtpEmail = String(email || '').trim().toLowerCase();
+  if (!otpVerifyBox) return;
+  if (otpTargetLabel) {
+    otpTargetLabel.textContent = `Enter the 6-digit verification code sent to ${pendingOtpEmail}.`;
+  }
+  otpVerifyBox.classList.remove('hidden');
+  authOtpInput?.focus();
+}
+
+function hideOtpVerificationPanel() {
+  pendingOtpEmail = '';
+  if (authOtpInput) authOtpInput.value = '';
+  otpVerifyBox?.classList.add('hidden');
+}
+
 function setSignInBusy(busy) {
   signInPending = busy;
   googleSignInBtn.disabled = busy;
   if (emailSignInBtn) emailSignInBtn.disabled = busy;
+  if (verifyOtpBtn) verifyOtpBtn.disabled = busy;
+  if (resendOtpBtn) resendOtpBtn.disabled = busy;
   if (busy) {
     googleSignInBtn.textContent = 'Connecting to Supabase...';
   } else {
@@ -552,7 +583,7 @@ function setSignInBusy(busy) {
 function updateEmailAuthModeUi() {
   if (!authDisplayNameWrap || !emailSignInBtn || !toggleAuthModeBtn) return;
   authDisplayNameWrap.classList.toggle('hidden', !isEmailSignUpMode);
-  emailSignInBtn.textContent = isEmailSignUpMode ? 'Create Supabase Account' : 'Sign In with Email';
+  emailSignInBtn.textContent = isEmailSignUpMode ? 'Create Momi Account' : 'Sign In with Email';
   toggleAuthModeBtn.textContent = isEmailSignUpMode
     ? 'Already have an account? Sign in'
     : 'Need an account? Create one';
@@ -566,11 +597,13 @@ toggleEmailAuthBtn?.addEventListener('click', () => {
   emailAuthForm?.classList.toggle('hidden');
   const open = !emailAuthForm?.classList.contains('hidden');
   toggleEmailAuthBtn.textContent = open ? 'Hide Email Form' : 'Use Email & Password';
+  if (!open) hideOtpVerificationPanel();
   if (open) authEmailInput?.focus();
 });
 
 toggleAuthModeBtn?.addEventListener('click', () => {
   clearAuthNotices();
+  hideOtpVerificationPanel();
   isEmailSignUpMode = !isEmailSignUpMode;
   updateEmailAuthModeUi();
 });
@@ -578,6 +611,7 @@ toggleAuthModeBtn?.addEventListener('click', () => {
 googleSignInBtn.addEventListener('click', () => {
   if (signInPending) return;
   clearAuthNotices();
+  hideOtpVerificationPanel();
   const redirectTarget = `${window.location.origin}${window.location.pathname}${window.location.search}`;
   const oauthUrl = buildSupabaseGoogleOAuthUrl(SUPABASE_WEB_CONFIG, redirectTarget);
   if (!oauthUrl) {
@@ -593,7 +627,7 @@ emailAuthForm?.addEventListener('submit', async (e) => {
   e.preventDefault();
   if (signInPending) return;
   clearAuthNotices();
-  const email = String(authEmailInput?.value || '').trim();
+  const email = String(authEmailInput?.value || '').trim().toLowerCase();
   const password = String(authPasswordInput?.value || '');
   const displayName = String(authDisplayNameInput?.value || '').trim();
   if (!email.includes('@')) {
@@ -610,21 +644,74 @@ emailAuthForm?.addEventListener('submit', async (e) => {
     if (isEmailSignUpMode) {
       const result = await supabaseSignUpWithEmail(SUPABASE_WEB_CONFIG, email, password, displayName);
       if (result.session) {
+        hideOtpVerificationPanel();
         applyAuthSession(result.session);
       } else {
-        isEmailSignUpMode = false;
-        updateEmailAuthModeUi();
-        showAuthInfo('Account created! Check your inbox to confirm your email, then sign in.');
+        showAuthInfo(`Verification code sent to ${email}. Enter the 6-digit code below to activate your single Momi profile.`);
+        showOtpVerificationPanel(email);
       }
     } else {
       const session = await supabaseSignInWithPassword(SUPABASE_WEB_CONFIG, email, password);
+      hideOtpVerificationPanel();
       applyAuthSession(session);
     }
   } catch (err) {
-    showAuthError(err?.message || 'Supabase email authentication failed.');
+    const msg = err?.message || 'Supabase email authentication failed.';
+    if (/confirm/i.test(msg)) {
+      showAuthInfo('Your email needs verification first. Enter the 6-digit code sent to your inbox or tap Resend Code.');
+      showOtpVerificationPanel(email);
+    } else {
+      showAuthError(msg);
+    }
   } finally {
     setSignInBusy(false);
     updateEmailAuthModeUi();
+  }
+});
+
+verifyOtpBtn?.addEventListener('click', async () => {
+  if (signInPending) return;
+  clearAuthNotices();
+  const email = pendingOtpEmail || String(authEmailInput?.value || '').trim().toLowerCase();
+  const code = String(authOtpInput?.value || '').trim();
+  if (!email.includes('@')) {
+    showAuthError('Enter your email address above first.');
+    return;
+  }
+  if (code.length < 4) {
+    showAuthError('Enter the verification code sent to your email.');
+    return;
+  }
+  setSignInBusy(true);
+  verifyOtpBtn.textContent = 'Verifying...';
+  try {
+    const { session } = await supabaseVerifyEmailOtp(SUPABASE_WEB_CONFIG, email, code, 'signup');
+    hideOtpVerificationPanel();
+    applyAuthSession(session);
+  } catch (err) {
+    showAuthError(err?.message || 'Verification code invalid or expired. Tap Resend Code.');
+  } finally {
+    setSignInBusy(false);
+    verifyOtpBtn.textContent = 'Verify Code & Continue';
+  }
+});
+
+resendOtpBtn?.addEventListener('click', async () => {
+  if (signInPending) return;
+  clearAuthNotices();
+  const email = pendingOtpEmail || String(authEmailInput?.value || '').trim().toLowerCase();
+  if (!email.includes('@')) {
+    showAuthError('Enter your email address above first.');
+    return;
+  }
+  setSignInBusy(true);
+  try {
+    await supabaseResendSignupOtp(SUPABASE_WEB_CONFIG, email);
+    showAuthInfo(`Fresh 6-digit verification code sent to ${email}.`);
+  } catch (err) {
+    showAuthError(err?.message || 'Could not resend verification code.');
+  } finally {
+    setSignInBusy(false);
   }
 });
 
@@ -671,13 +758,62 @@ function handleSyncError(err, label = 'Cloud sync') {
   renderMainStage();
 }
 
+function loadCachedWebWorkspace(uid) {
+  try {
+    const rawProf = localStorage.getItem(`momi_cached_profile_${uid}`);
+    const prof = rawProf ? JSON.parse(rawProf) : null;
+    const rawPosts = localStorage.getItem('momi_cached_posts_v1');
+    const posts = rawPosts ? JSON.parse(rawPosts) : [];
+    const rawStories = localStorage.getItem('momi_cached_stories_v1');
+    const stories = rawStories ? filterActiveStories24h(JSON.parse(rawStories)) : [];
+    return {
+      profile: prof && prof.userId === uid ? prof : null,
+      posts: Array.isArray(posts) ? posts : [],
+      stories: Array.isArray(stories) ? stories : []
+    };
+  } catch {
+    return { profile: null, posts: [], stories: [] };
+  }
+}
+
+function saveCachedWebWorkspace(uid) {
+  try {
+    if (uid && state.profile && state.profile.userId === uid) {
+      localStorage.setItem(`momi_cached_profile_${uid}`, JSON.stringify(state.profile));
+    }
+    if (Array.isArray(state.posts) && state.posts.length > 0) {
+      const compactPosts = state.posts.slice(0, 60).map((p) => ({
+        ...p,
+        imageData: null,
+        videoData: null,
+        extraImageDatas: [],
+        audioData: null
+      }));
+      localStorage.setItem('momi_cached_posts_v1', JSON.stringify(compactPosts));
+    }
+    if (Array.isArray(state.stories)) {
+      const compactStories = filterActiveStories24h(state.stories).slice(0, 30).map((s) => ({
+        ...s,
+        imageData: null,
+        videoData: null,
+        audioData: null
+      }));
+      localStorage.setItem('momi_cached_stories_v1', JSON.stringify(compactStories));
+    }
+  } catch {
+    // Ignore storage quota issues
+  }
+}
+
 function buildFallbackProfile(user) {
-  const username = normalizeUsername(user.email || user.displayName, user.uid);
+  const email = String(user.email || '').trim().toLowerCase();
+  const username = normalizeUsername(email || user.displayName, user.uid);
   const displayName = (user.displayName || username).slice(0, 80);
   const avatarKeys = ['avatar_aria', 'avatar_elena', 'avatar_kenji', 'avatar_nord', 'avatar_matcha', 'avatar_sora'];
   const avatarKey = avatarKeys[Math.abs(user.uid.charCodeAt(0) + user.uid.length) % avatarKeys.length];
   return {
     userId: user.uid,
+    email,
     username,
     displayName,
     category: 'Visual Creator',
@@ -688,8 +824,8 @@ function buildFallbackProfile(user) {
     avatarData: null,
     followersCount: 0,
     followingCount: 0,
-    isVerified: isOwnerEmail(user.email),
-    role: isOwnerEmail(user.email) ? 'OWNER' : 'USER',
+    isVerified: isOwnerEmail(email),
+    role: isOwnerEmail(email) ? 'OWNER' : 'USER',
     moderationScopes: [],
     partnerConsent: false
   };
@@ -708,8 +844,15 @@ function applyAuthSession(session) {
     authGate.classList.remove('hidden');
     return;
   }
-  state.isLoadingFeed = true;
-  state.profile = buildFallbackProfile(user);
+  const cached = loadCachedWebWorkspace(user.uid);
+  state.profile = cached.profile || buildFallbackProfile(user);
+  if (cached.posts.length > 0 && state.posts.length === 0) {
+    state.posts = cached.posts;
+  }
+  if (cached.stories.length > 0 && state.stories.length === 0) {
+    state.stories = cached.stories;
+  }
+  state.isLoadingFeed = state.posts.length === 0;
   authGate.classList.add('hidden');
   mainShell.classList.remove('hidden');
   updateAdminUiVisibility();
@@ -791,19 +934,32 @@ async function initializeSupabaseWorkspace(user) {
 
 async function ensureUserSeededInSupabase(user) {
   const uid = user.uid;
+  const email = String(user.email || '').trim().toLowerCase();
   const fallback = buildFallbackProfile(user);
   try {
+    const queryFilter = email
+      ? `select=*&or=(user_id.eq.${encodeURIComponent(uid)},email.ilike.${encodeURIComponent(email)})&limit=2`
+      : `select=*&user_id=eq.${encodeURIComponent(uid)}&limit=1`;
     const existingProfiles = await selectSupabaseTable(
       SUPABASE_WEB_CONFIG,
       'profiles',
-      `select=*&user_id=eq.${encodeURIComponent(uid)}&limit=1`
+      queryFilter
     );
-    if (existingProfiles.length === 0) {
+    const matched = existingProfiles.find((p) => p.user_id === uid) || existingProfiles[0] || null;
+    if (matched) {
+      const hydrated = mapSupabaseProfileToWeb(matched);
+      state.profile = { ...state.profile, ...hydrated, userId: hydrated.userId || uid };
+      saveCachedWebWorkspace(uid);
+      if (email && !matched.email && matched.user_id === uid) {
+        await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'profiles', `user_id=eq.${encodeURIComponent(uid)}`, { email }).catch(() => undefined);
+      }
+    } else {
       await upsertSupabaseTable(
         SUPABASE_WEB_CONFIG,
         'profiles',
         [{
           user_id: uid,
+          email,
           username: fallback.username,
           display_name: fallback.displayName,
           category: fallback.category,
@@ -815,7 +971,7 @@ async function ensureUserSeededInSupabase(user) {
           followers_count: 0,
           following_count: 0,
           is_verified: fallback.isVerified,
-          role: 'USER',
+          role: fallback.role,
           moderation_scopes: [],
           partner_consent: false
         }],
@@ -915,7 +1071,9 @@ async function refreshAllFromSupabase({ showErrors = false, forceRender = false 
         if (overrideIdx >= 0) mappedCreators[overrideIdx] = { ...mappedCreators[overrideIdx], ...pm.profile.data };
       }
       state.creators = mappedCreators;
-      const mine = mappedCreators.find((p) => p.userId === state.user.uid);
+      const myEmail = String(state.user.email || '').trim().toLowerCase();
+      const mine = mappedCreators.find((p) => p.userId === state.user.uid) ||
+        (myEmail ? mappedCreators.find((p) => p.email === myEmail) : null);
       if (mine) {
         state.profile = { ...state.profile, ...mine, ...(pm.profile?.data || {}) };
       } else if (pm.profile?.data) {
@@ -946,7 +1104,30 @@ async function refreshAllFromSupabase({ showErrors = false, forceRender = false 
       state.posts = sortFeedWithBoostPriority([...pendingCreated, ...serverPosts]);
     }
     if (Array.isArray(feed.stories)) {
-      state.stories = feed.stories.map(mapSupabaseStoryToWeb);
+      state.stories = filterActiveStories24h(feed.stories.map(mapSupabaseStoryToWeb));
+    }
+    if (Array.isArray(feed.postInteractions)) {
+      const likersMap = new Map();
+      const viewersMap = new Map();
+      feed.postInteractions.forEach((row) => {
+        const pid = String(row.target_id || '').trim();
+        const uid = String(row.user_id || '').trim();
+        if (!pid || !uid) return;
+        if (row.target_type === 'LIKED_POST') {
+          if (!likersMap.has(pid)) likersMap.set(pid, new Set());
+          likersMap.get(pid).add(uid);
+        } else if (row.target_type === 'VIEWED_POST') {
+          if (!viewersMap.has(pid)) viewersMap.set(pid, new Set());
+          viewersMap.get(pid).add(uid);
+        }
+      });
+      for (const [pid, entry] of pm.likes.entries()) {
+        if (!likersMap.has(pid)) likersMap.set(pid, new Set());
+        if (entry.value) likersMap.get(pid).add(state.user.uid);
+        else likersMap.get(pid).delete(state.user.uid);
+      }
+      state.postLikersByPostId = likersMap;
+      state.postViewersByPostId = viewersMap;
     }
     if (Array.isArray(feed.products)) {
       state.products = feed.products.map(mapSupabaseProductToWeb);
@@ -984,7 +1165,6 @@ async function refreshAllFromSupabase({ showErrors = false, forceRender = false 
     }
     if (feed.appConfig) {
       state.monetizationConfig = mapSupabaseConfigToWeb(feed.appConfig);
-      syncMonetagWebIntegration(state.monetizationConfig);
     }
 
     if (workspace) {
@@ -1050,6 +1230,7 @@ async function refreshAllFromSupabase({ showErrors = false, forceRender = false 
     }
 
     state.isLoadingFeed = false;
+    saveCachedWebWorkspace(state.user.uid);
     maybeConsumePendingDeepLink();
 
     updateAdminUiVisibility();
@@ -1376,86 +1557,6 @@ function isOwnerAdmin() {
   return isOwnerEmail(state.user?.email);
 }
 
-function syncMonetagWebIntegration(cfg) {
-  const existingMeta = document.querySelector('meta[name="monetag"]');
-  const metaToken = cfg?.monetagEnabled ? String(cfg.monetagWebMetaTag || '').trim() : '';
-  if (metaToken) {
-    const meta = existingMeta || document.createElement('meta');
-    meta.name = 'monetag';
-    meta.content = metaToken.slice(0, 120);
-    if (!existingMeta) document.head.appendChild(meta);
-  } else if (existingMeta) {
-    existingMeta.remove();
-  }
-
-  const zoneId = cfg?.monetagEnabled ? sanitizeMonetagZoneId(cfg.monetagWebZoneId) : '';
-  const activeScript = document.querySelector('script[data-momi-monetag-zone]');
-  if (zoneId) {
-    if (!activeScript || activeScript.dataset.momiMonetagZone !== zoneId) {
-      if (activeScript) activeScript.remove();
-      const script = document.createElement('script');
-      script.async = true;
-      script.dataset.cfasync = 'false';
-      script.dataset.momiMonetagZone = zoneId;
-      script.dataset.zone = zoneId;
-      script.src = 'https://fpyf8.com/88/tag.min.js';
-      document.head.appendChild(script);
-    }
-  } else if (activeScript) {
-    activeScript.remove();
-  }
-}
-
-function renderSponsoredPartnerBannerHtml(placement = 'feed') {
-  const cfg = state.monetizationConfig || DEFAULT_MONETIZATION_CONFIG;
-  const directUrl = cfg.monetagEnabled ? normalizeMonetagDirectUrl(cfg.monetagDirectLinkUrl) : '';
-  if (!directUrl) return '';
-  const title = cfg.partnerPromoTitle || DEFAULT_MONETIZATION_CONFIG.partnerPromoTitle;
-  const subtitle = cfg.partnerPromoSubtitle || DEFAULT_MONETIZATION_CONFIG.partnerPromoSubtitle;
-  const cta = cfg.partnerPromoCta || DEFAULT_MONETIZATION_CONFIG.partnerPromoCta;
-  return `
-    <aside class="partner-sponsor-card" data-partner-placement="${escapeHtml(placement)}">
-      <div class="partner-sponsor-head">
-        <span class="sponsored-tag">Sponsored</span>
-        <span class="muted small">Monetag Partner Showcase</span>
-      </div>
-      <div>
-        <div style="font-weight:700;font-size:0.98rem;">${escapeHtml(title)}</div>
-        <div class="muted small" style="margin-top:4px;line-height:1.45;">${escapeHtml(subtitle)}</div>
-      </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-        <span class="muted small">Verified https:// partner destination</span>
-        <a class="btn-primary btn-sm" href="${escapeHtml(directUrl)}" target="_blank" rel="noopener noreferrer sponsored" style="text-decoration:none;">
-          ${escapeHtml(cta)} &#8599;
-        </a>
-      </div>
-    </aside>
-  `;
-}
-
-function renderGamezopArcadeBannerHtml(placement = 'feed') {
-  const cfg = state.monetizationConfig || DEFAULT_MONETIZATION_CONFIG;
-  const gamezopUrl = resolveGamezopUrl(cfg);
-  if (!gamezopUrl) return '';
-  const title = cfg.gamezopBannerTitle || DEFAULT_MONETIZATION_CONFIG.gamezopBannerTitle;
-  return `
-    <aside class="arcade-partner-card" data-arcade-placement="${escapeHtml(placement)}">
-      <div class="arcade-partner-icon" aria-hidden="true">&#127918;</div>
-      <div style="flex:1;min-width:180px;">
-        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-          <span class="arcade-badge">Partner Games</span>
-          <span class="muted small">Gamezop Arcade</span>
-        </div>
-        <div style="font-weight:700;font-size:0.96rem;margin-top:4px;">${escapeHtml(title)}</div>
-        <div class="muted small" style="margin-top:2px;">Instant HTML5 mini-games &middot; Play right in your browser</div>
-      </div>
-      <a class="btn-primary btn-sm" href="${escapeHtml(gamezopUrl)}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;white-space:nowrap;">
-        Play Games &#8599;
-      </a>
-    </aside>
-  `;
-}
-
 function boostBadgeLabelForPost(post) {
   if (!post) return '';
   if (post.recommendedLabel) return post.recommendedLabel;
@@ -1554,6 +1655,20 @@ function renderPostCardHtml(post) {
           </div>
           <button type="button" class="action-btn ${isSaved ? 'bookmarked' : ''}" data-bookmark-post="${escapeHtml(post.id)}">
             ${isSaved ? 'Saved' : 'Save'}
+          </button>
+        </div>
+
+        <div class="post-stats-row">
+          <button type="button" class="post-stats-link" data-open-engagers="${escapeHtml(post.id)}:0">
+            <strong>${formatCount(post.likesCount)}</strong> likes
+          </button>
+          <span>&middot;</span>
+          <button type="button" class="post-stats-link" data-open-engagers="${escapeHtml(post.id)}:1">
+            <strong>${formatCount(post.viewsCount)}</strong> views
+          </button>
+          <span>&middot;</span>
+          <button type="button" class="post-stats-link" data-open-post="${escapeHtml(post.id)}">
+            ${formatCount(post.commentsCount)} comments
           </button>
         </div>
 
@@ -1657,9 +1772,6 @@ function renderHome() {
         `).join('')}
       </section>
 
-      ${renderGamezopArcadeBannerHtml('home')}
-      ${renderSponsoredPartnerBannerHtml('home')}
-
       ${
         posts.length === 0
           ? `<div class="card-panel" style="text-align:center;padding:36px;">
@@ -1758,9 +1870,6 @@ function renderExplore() {
           <button type="button" class="chip ${state.exploreCategory === cat ? 'active' : ''}" data-explore-cat="${escapeHtml(cat)}">${escapeHtml(cat)}</button>
         `).join('')}
       </div>
-
-      ${renderGamezopArcadeBannerHtml('explore')}
-      ${renderSponsoredPartnerBannerHtml('explore')}
 
       ${
         state.exploreLayout === 'notes'
@@ -3146,6 +3255,13 @@ function bindFeedInteractions(container) {
       togglePostLike(b.dataset.likePost);
     };
   });
+  container.querySelectorAll('[data-open-engagers]').forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      const [postId, tabStr] = String(b.dataset.openEngagers || '').split(':');
+      if (postId) openPostEngagersModal(postId, Number(tabStr || 0));
+    };
+  });
   container.querySelectorAll('[data-bookmark-post]').forEach((b) => {
     b.onclick = (e) => {
       e.stopPropagation();
@@ -3241,8 +3357,14 @@ async function togglePostLike(postId) {
   const already = state.likedIds.has(postId);
   const nextLikes = Math.max(0, (post.likesCount || 0) + (already ? -1 : 1));
   post.likesCount = nextLikes;
-  if (already) state.likedIds.delete(postId);
-  else state.likedIds.add(postId);
+  if (already) {
+    state.likedIds.delete(postId);
+    state.postLikersByPostId.get(postId)?.delete(uid);
+  } else {
+    state.likedIds.add(postId);
+    if (!state.postLikersByPostId.has(postId)) state.postLikersByPostId.set(postId, new Set());
+    state.postLikersByPostId.get(postId).add(uid);
+  }
   state.pendingMutations.likes.set(postId, { value: !already, expiresAt: Date.now() + 12000 });
   state.pendingMutations.minLikes.set(postId, { value: nextLikes, expiresAt: Date.now() + 12000 });
   renderMainStage();
@@ -3444,6 +3566,18 @@ async function openPostDetailModal(postId) {
   }
   post.viewsCount = (post.viewsCount || 0) + 1;
   state.pendingMutations.minViews.set(postId, { value: post.viewsCount, expiresAt: Date.now() + 12000 });
+  if (state.user?.uid) {
+    if (!state.postViewersByPostId.has(postId)) state.postViewersByPostId.set(postId, new Set());
+    state.postViewersByPostId.get(postId).add(state.user.uid);
+    upsertSupabaseTable(
+      SUPABASE_WEB_CONFIG,
+      'user_interactions',
+      [{ user_id: state.user.uid, target_type: 'VIEWED_POST', target_id: postId }],
+      '',
+      globalThis.fetch,
+      'user_id,target_type,target_id'
+    ).catch(() => undefined);
+  }
   patchSupabaseRows(
     SUPABASE_WEB_CONFIG,
     'posts',
@@ -3484,7 +3618,13 @@ async function openPostDetailModal(postId) {
       </div>
       <div style="display:flex;flex-direction:column;gap:12px;">
         <div class="post-caption">${renderRichCaptionHtml(post.caption || '')}</div>
-        <div class="muted small">${formatCount(post.likesCount)} likes &middot; ${formatCount(post.commentsCount)} comments &middot; ${formatCount(post.viewsCount)} views</div>
+        <div class="post-stats-row">
+          <button type="button" class="post-stats-link" data-open-engagers="${escapeHtml(post.id)}:0"><strong>${formatCount(post.likesCount)}</strong> likes</button>
+          <span>&middot;</span>
+          <button type="button" class="post-stats-link" data-open-engagers="${escapeHtml(post.id)}:1"><strong>${formatCount(post.viewsCount)}</strong> views</button>
+          <span>&middot;</span>
+          <span>${formatCount(post.commentsCount)} comments</span>
+        </div>
         <div id="modalCommentsList" style="flex:1;max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--border);padding-top:10px;">
           ${
             comments.length === 0
@@ -3536,6 +3676,71 @@ async function openPostDetailModal(postId) {
     await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'posts', `id=eq.${encodeURIComponent(postId)}`, { comments_count: post.commentsCount });
     refreshOpenPostModalComments(postId);
   };
+}
+
+function openPostEngagersModal(postId, initialTab = 0) {
+  const post = state.posts.find((p) => p.id === postId);
+  if (!post) return;
+  let activeTab = Number(initialTab) === 1 ? 1 : 0;
+
+  const renderEngagersBody = () => {
+    const uidSet = activeTab === 0
+      ? (state.postLikersByPostId.get(postId) || new Set())
+      : (state.postViewersByPostId.get(postId) || new Set());
+    const users = [...uidSet].map((uid) => {
+      if (state.profile?.userId === uid) return state.profile;
+      return state.creators.find((c) => c.userId === uid) || { userId: uid, username: 'momi.creator', displayName: 'Momi Member' };
+    });
+    const totalCount = activeTab === 0 ? (post.likesCount || 0) : (post.viewsCount || 0);
+    const extraCount = Math.max(0, totalCount - users.length);
+
+    openModal(`
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <h3 style="margin:0;">Post Activity &middot; @${escapeHtml(post.authorUsername)}</h3>
+        <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+      </div>
+      <div class="chip-row" style="margin-bottom:14px;">
+        <button type="button" class="chip ${activeTab === 0 ? 'active' : ''}" id="engTabLikes">Likes (${formatCount(post.likesCount)})</button>
+        <button type="button" class="chip ${activeTab === 1 ? 'active' : ''}" id="engTabViews">Views (${formatCount(post.viewsCount)})</button>
+      </div>
+      <div class="engagers-list">
+        ${
+          users.length === 0
+            ? `<p class="muted small" style="margin:8px 0;">${activeTab === 0 ? 'No tracked profile likes on this post yet.' : 'Viewers appear here as signed-in members open this post.'}</p>`
+            : users.map((u) => {
+              const isMe = u.userId === state.user?.uid;
+              const isFollowing = state.followingUids.has(u.userId);
+              return `
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+                  <button type="button" class="post-author-btn" data-open-user="${escapeHtml(u.userId)}">
+                    ${avatarHtml(u, 38)}
+                    <div class="post-author-meta">
+                      <span class="post-author-name">@${escapeHtml(u.username)} ${u.isVerified ? '<span class="verified-dot">&#10003;</span>' : ''}</span>
+                      <span class="muted small">${escapeHtml(u.displayName || '')}</span>
+                    </div>
+                  </button>
+                  ${!isMe ? `<button type="button" class="btn-sm ${isFollowing ? 'btn-outline' : 'btn-primary'}" data-follow-uid="${escapeHtml(u.userId)}" data-follow-name="${escapeHtml(u.username)}">${isFollowing ? 'Following' : 'Follow'}</button>` : '<span class="pill">You</span>'}
+                </div>
+              `;
+            }).join('')
+        }
+        ${extraCount > 0 ? `<div class="muted small" style="padding-top:6px;">+ ${formatCount(extraCount)} additional ${activeTab === 0 ? 'likes' : 'views'} recorded.</div>` : ''}
+      </div>
+    `);
+    document.getElementById('closeModalBtn').onclick = closeModal;
+    document.getElementById('engTabLikes').onclick = () => { activeTab = 0; renderEngagersBody(); };
+    document.getElementById('engTabViews').onclick = () => { activeTab = 1; renderEngagersBody(); };
+    modalContent.querySelectorAll('[data-open-user]').forEach((b) => {
+      b.onclick = () => {
+        closeModal();
+        state.viewedProfileUid = b.dataset.openUser;
+        state.profileTab = 'posts';
+        navigateTo('profile', { keepViewedUid: true });
+      };
+    });
+    bindUserAndFollowButtons(modalContent);
+  };
+  renderEngagersBody();
 }
 
 async function refreshOpenPostModalComments(postId) {
@@ -3665,6 +3870,7 @@ function openEditProfileModal() {
     state.pendingMutations.profile = { data: optimistic, expiresAt: Date.now() + 12000 };
     state.profile = { ...state.profile, ...optimistic };
     state.creators = state.creators.map((c) => (c.userId === state.user.uid ? { ...c, ...optimistic } : c));
+    saveCachedWebWorkspace(state.user.uid);
     await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'profiles', `user_id=eq.${encodeURIComponent(state.user.uid)}`, patch);
     await refreshAllFromSupabase({ showErrors: false });
     closeModal();
@@ -4490,18 +4696,6 @@ async function adminToggleRecommendPost(post) {
 
 async function saveAdMonetizationConfigFromForm() {
   if (!isOwnerAdmin() || state.adminBusy) return;
-  const directRaw = document.getElementById('cfgMonetagDirectUrl').value.trim();
-  const normalizedDirect = normalizeMonetagDirectUrl(directRaw);
-  if (directRaw && !normalizedDirect) {
-    showToast('Monetag Direct Link must start with https://');
-    return;
-  }
-  const gamezopRaw = document.getElementById('cfgGamezopPortalUrl').value.trim();
-  const normalizedGamezop = normalizeMonetagDirectUrl(gamezopRaw);
-  if (gamezopRaw && !normalizedGamezop) {
-    showToast('Gamezop Portal URL must start with https://');
-    return;
-  }
   state.adminBusy = true;
   renderMainStage();
   try {
@@ -4513,17 +4707,9 @@ async function saveAdMonetizationConfigFromForm() {
       admob_mrec_unit_id: document.getElementById('cfgAdmobMrec').value.trim().slice(0, 120),
       admob_interstitial_unit_id: document.getElementById('cfgAdmobInterstitial').value.trim().slice(0, 120),
       start_io_enabled: Boolean(document.getElementById('cfgStartIoEnabled').checked),
-      monetag_enabled: Boolean(document.getElementById('cfgMonetagEnabled').checked),
-      monetag_direct_link_url: normalizedDirect,
-      monetag_web_zone_id: sanitizeMonetagZoneId(document.getElementById('cfgMonetagZoneId').value),
-      monetag_web_meta_tag: document.getElementById('cfgMonetagMeta').value.trim().slice(0, 120),
       partner_promo_title: (document.getElementById('cfgPromoTitle').value.trim() || DEFAULT_MONETIZATION_CONFIG.partnerPromoTitle).slice(0, 80),
       partner_promo_subtitle: (document.getElementById('cfgPromoSubtitle').value.trim() || DEFAULT_MONETIZATION_CONFIG.partnerPromoSubtitle).slice(0, 180),
       partner_promo_cta: (document.getElementById('cfgPromoCta').value.trim() || DEFAULT_MONETIZATION_CONFIG.partnerPromoCta).slice(0, 40),
-      gamezop_enabled: Boolean(document.getElementById('cfgGamezopEnabled').checked),
-      gamezop_portal_url: normalizedGamezop,
-      gamezop_publisher_id: sanitizeGamezopPublisherId(document.getElementById('cfgGamezopPubId').value),
-      gamezop_banner_title: (document.getElementById('cfgGamezopTitle').value.trim() || DEFAULT_MONETIZATION_CONFIG.gamezopBannerTitle).slice(0, 80),
       announcement_id: existingCfg.announcementId || '',
       announcement_title: existingCfg.announcementTitle || '',
       announcement_body: existingCfg.announcementBody || '',
@@ -4533,7 +4719,7 @@ async function saveAdMonetizationConfigFromForm() {
     };
     await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'app_config', [row], '', globalThis.fetch, 'id');
     await refreshAllFromSupabase({ showErrors: false });
-    showToast('Live Monetization config saved across Android & Web!');
+    showToast('Live AdMob & Start.io config saved across Android & Web!');
   } catch (err) {
     showToast(err?.message || 'Failed saving monetization config');
   } finally {
@@ -4658,7 +4844,7 @@ async function syncSupabaseDataFromWeb() {
   state.supabaseStatus = 'Syncing Momi data to Supabase...';
   if (state.nav === 'profile' || state.nav === 'admin') renderMainStage();
   try {
-    const bundle = mapFirestoreSnapshotToSupabaseBundle({
+    const bundle = mapMomiSnapshotToSupabaseBundle({
       profile: state.profile,
       creators: state.creators,
       posts: state.posts,
@@ -4682,7 +4868,7 @@ async function syncSupabaseDataFromWeb() {
 
 function downloadSupabaseMigrationSnapshot() {
   if (!isOwnerAdmin()) return;
-  const bundle = mapFirestoreSnapshotToSupabaseBundle({
+  const bundle = mapMomiSnapshotToSupabaseBundle({
     profile: state.profile,
     creators: state.creators,
     posts: state.posts,
@@ -4696,12 +4882,12 @@ function downloadSupabaseMigrationSnapshot() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `momi-supabase-migration-${new Date().toISOString().slice(0, 10)}.json`;
+  a.download = `momi-supabase-snapshot-${new Date().toISOString().slice(0, 10)}.json`;
   document.body.appendChild(a);
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  showToast('Downloaded Supabase migration JSON snapshot!');
+  showToast('Downloaded Supabase JSON snapshot!');
 }
 
 // ---------------------------------------------------------------------------
@@ -5147,8 +5333,6 @@ function renderAdminConsole() {
             <div class="owner-form-grid">
               <label class="consent-row"><span>Enable AdMob (Android)</span><input id="cfgAdmobEnabled" type="checkbox" ${cfg.admobEnabled ? 'checked' : ''} /></label>
               <label class="consent-row"><span>Enable Start.io (Android)</span><input id="cfgStartIoEnabled" type="checkbox" ${cfg.startIoEnabled ? 'checked' : ''} /></label>
-              <label class="consent-row"><span>Enable Monetag (Android + Web)</span><input id="cfgMonetagEnabled" type="checkbox" ${cfg.monetagEnabled ? 'checked' : ''} /></label>
-              <label class="consent-row"><span>Enable Gamezop Arcade (Android + Web)</span><input id="cfgGamezopEnabled" type="checkbox" ${cfg.gamezopEnabled ? 'checked' : ''} /></label>
             </div>
             <div class="owner-form-grid">
               <div>
@@ -5166,50 +5350,20 @@ function renderAdminConsole() {
             </div>
             <div class="owner-form-grid">
               <div>
-                <label class="small muted">Monetag Direct SmartLink URL (https://)</label>
-                <input id="cfgMonetagDirectUrl" class="input" placeholder="https://otieu.com/4/..." value="${escapeHtml(cfg.monetagDirectLinkUrl || '')}" />
-              </div>
-              <div>
-                <label class="small muted">Monetag Web Zone ID</label>
-                <input id="cfgMonetagZoneId" class="input" placeholder="e.g. 9012345" value="${escapeHtml(cfg.monetagWebZoneId || '')}" />
-              </div>
-              <div>
-                <label class="small muted">Monetag Meta Verification Content</label>
-                <input id="cfgMonetagMeta" class="input" placeholder="content value" value="${escapeHtml(cfg.monetagWebMetaTag || '')}" />
-              </div>
-            </div>
-            <div class="owner-form-grid">
-              <div>
-                <label class="small muted">Gamezop Publisher ID</label>
-                <input id="cfgGamezopPubId" class="input" placeholder="e.g. 9012" value="${escapeHtml(cfg.gamezopPublisherId || '')}" />
-              </div>
-              <div>
-                <label class="small muted">Gamezop Portal URL (optional https://)</label>
-                <input id="cfgGamezopPortalUrl" class="input" placeholder="https://www.gamezop.com/?id=..." value="${escapeHtml(cfg.gamezopPortalUrl || '')}" />
-              </div>
-              <div>
-                <label class="small muted">Gamezop Card Title</label>
-                <input id="cfgGamezopTitle" class="input" value="${escapeHtml(cfg.gamezopBannerTitle || '')}" />
-              </div>
-            </div>
-            <div class="owner-form-grid">
-              <div>
-                <label class="small muted">Sponsored Card Title</label>
+                <label class="small muted">Creator Showcase Card Title</label>
                 <input id="cfgPromoTitle" class="input" value="${escapeHtml(cfg.partnerPromoTitle || '')}" />
               </div>
               <div>
-                <label class="small muted">Sponsored Card CTA</label>
+                <label class="small muted">Creator Showcase CTA</label>
                 <input id="cfgPromoCta" class="input" value="${escapeHtml(cfg.partnerPromoCta || '')}" />
               </div>
             </div>
             <div>
-              <label class="small muted">Sponsored Card Subtitle</label>
+              <label class="small muted">Creator Showcase Subtitle</label>
               <input id="cfgPromoSubtitle" class="input" value="${escapeHtml(cfg.partnerPromoSubtitle || '')}" />
             </div>
             <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
               <button type="submit" class="btn-primary" ${state.adminBusy ? 'disabled' : ''}>Save Live Monetization Config</button>
-              <a class="btn-outline btn-sm" href="https://business.gamezop.com" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Gamezop &#8599;</a>
-              <a class="btn-outline btn-sm" href="https://publishers.monetag.com" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Monetag &#8599;</a>
             </div>
           </form>
         ` : ''}
@@ -5591,17 +5745,9 @@ async function saveInAppAnnouncementFromForm({ clear = false } = {}) {
       admob_mrec_unit_id: cfg.admobMrecUnitId || '',
       admob_interstitial_unit_id: cfg.admobInterstitialUnitId || '',
       start_io_enabled: Boolean(cfg.startIoEnabled),
-      monetag_enabled: Boolean(cfg.monetagEnabled),
-      monetag_direct_link_url: cfg.monetagDirectLinkUrl || '',
-      monetag_web_zone_id: cfg.monetagWebZoneId || '',
-      monetag_web_meta_tag: cfg.monetagWebMetaTag || '',
       partner_promo_title: cfg.partnerPromoTitle || DEFAULT_MONETIZATION_CONFIG.partnerPromoTitle,
       partner_promo_subtitle: cfg.partnerPromoSubtitle || DEFAULT_MONETIZATION_CONFIG.partnerPromoSubtitle,
       partner_promo_cta: cfg.partnerPromoCta || DEFAULT_MONETIZATION_CONFIG.partnerPromoCta,
-      gamezop_enabled: Boolean(cfg.gamezopEnabled),
-      gamezop_portal_url: cfg.gamezopPortalUrl || '',
-      gamezop_publisher_id: cfg.gamezopPublisherId || '',
-      gamezop_banner_title: cfg.gamezopBannerTitle || DEFAULT_MONETIZATION_CONFIG.gamezopBannerTitle,
       announcement_id: clear ? '' : `ann_${Date.now()}`,
       announcement_title: clear ? '' : document.getElementById('annTitleInput').value.trim().slice(0, 120),
       announcement_body: clear ? '' : document.getElementById('annBodyInput').value.trim().slice(0, 500),
@@ -5621,35 +5767,101 @@ async function saveInAppAnnouncementFromForm({ clear = false } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Momi AI Assistant Modal (Honest Google AI Status + Android Gemini Integration)
+// Momi AI Assistant Modal (Built-in Smart Assistant + Optional Gemini Key)
 // ---------------------------------------------------------------------------
+
+function buildLocalMomiAiReply(promptText) {
+  const q = String(promptText || '').toLowerCase();
+  const handle = state.profile?.username ? `@${state.profile.username}` : 'creator';
+  if (/caption|photo|post|pic|frame/.test(q)) {
+    return `Here are 3 ready-to-post captions for ${handle}:\n1. Golden hour light hitting every corner just right. #momi #photography #goldenhour\n2. Keeping today quiet, crisp, and intentional. #aesthetic #minimal #momi\n3. One frame from today worth saving for later. #street #travel #momi`;
+  }
+  if (/video|clip|hook|short|film/.test(q)) {
+    return `High-retention Video Clip hooks for ${handle}:\n- "Wait for the final 2 seconds of today's cut..."\n- "3 lighting changes in 10 seconds — shot on Momi Studio."\n- "Behind the scenes before the sunset faded (#clips #momi #studio)."`;
+  }
+  if (/bio|profile|dp|page|group/.test(q)) {
+    return `Bio & Community tips:\n- Keep your Momi bio to 1 crisp line + location + focus (e.g. "Visual Diary | Street & Cafe Frames | Co-host @momi").\n- Launch a Page for curated drops and a Public Group for daily creator feedback.`;
+  }
+  if (/grow|like|view|reach|engag/.test(q)) {
+    return `Momi Growth Checklist:\n1. Post during golden-hour evening hours with 3-5 focused #hashtags.\n2. Share a 24h Story right after publishing a new post or video clip.\n3. Reply to early viewers & comment on creator notes inside Explore.`;
+  }
+  return `Momi AI Assistant Ready (${handle}):\nI can draft captions, #hashtags, video clip hooks, bio refreshes, and Page/Group prompts for your next upload. Ask me anything like "Write a travel caption" or paste your Gemini API key above for live Gemini 2.5 Flash replies!`;
+}
+
+async function generateMomiAiResponse(promptText) {
+  const savedKey = String(localStorage.getItem('momi_gemini_api_key') || '').trim();
+  if (savedKey) {
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(savedKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: {
+              parts: [{ text: 'You are Momi AI, a concise, upbeat social creator assistant inside Momi (a visual social app for photos, video clips, 24h stories, live rooms, Pages & Groups, and creator marketplace).' }]
+            },
+            contents: [{ role: 'user', parts: [{ text: promptText }] }]
+          })
+        }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const txt = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (txt && txt.trim()) return { text: txt.trim(), source: 'Gemini 2.5 Flash' };
+      }
+    } catch {
+      // Fall back cleanly to built-in Momi assistant
+    }
+  }
+  return { text: buildLocalMomiAiReply(promptText), source: 'Momi Built-in AI' };
+}
 
 function openAiAssistantModal() {
   const templates = [
     { label: 'Travel Photo', caption: 'Golden hour shadows and calm streets along the coast today. #travel #momi #goldenhour' },
     { label: 'Video Clip Hook', caption: '3 quick frames from today’s studio session — wait for the final cut! #clips #studio #momi' },
     { label: 'Community Group Poll', caption: 'Which color palette fits this weekend’s drop better? Tell me below! #community #design #momi' },
-    { label: 'Creator Page Intro', caption: 'Welcome to our official Momi Creator Page — behind-the-scenes drops, live Q&As & tutorials every week. #creator #momi' },
-    { label: 'Marketplace Spotlight', caption: 'Fresh handcrafted release now live in Momi Marketplace — tap to view verified store details. #marketplace #shop #momi' }
+    { label: 'Creator Page Intro', caption: 'Welcome to our official Momi Creator Page — behind-the-scenes drops, live Q&As & tutorials every week. #creator #momi' }
   ];
+  const savedKey = String(localStorage.getItem('momi_gemini_api_key') || '').trim();
+  const statusLabel = savedKey ? 'Gemini 2.5 Flash Connected' : 'Momi Built-in AI Ready';
+
   openModal(`
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
-      <div style="display:flex;align-items:center;gap:8px;">
-        <h3 style="margin:0;">Momi Google AI Studio</h3>
-        <span class="badge-pill">Gemini 2.5 Flash · v${escapeHtml(APP_VERSION_NAME)}</span>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <h3 style="margin:0;">Momi AI Assistant</h3>
+        <span class="badge-pill" id="aiStatusPill">${escapeHtml(statusLabel)}</span>
       </div>
       <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
     </div>
-    <div class="card-panel" style="gap:10px;background:var(--surface-alt);">
-      <strong>Google AI Status on Web vs Android</strong>
-      <div class="small muted" style="line-height:1.5;">
-        Browser code never stores or exposes your private Gemini API key. Live Google Gemini replies run inside the Android app with <strong>Test Status</strong> diagnostics and automatic model fallback once <code>GEMINI_API_KEY</code> is added in AI Studio Secrets (and GitHub Secrets for APK releases).
-      </div>
-      <div class="chip-row">
-        <a class="btn-primary btn-sm" href="${ANDROID_APK_URL}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Download Momi v${escapeHtml(APP_VERSION_NAME)} APK</a>
+
+    <div class="ai-chat-thread" id="aiChatThread">
+      ${state.aiChatHistory.map((m) => `
+        <div class="ai-msg ${m.role === 'user' ? 'user' : 'assistant'}">${escapeHtml(m.text).replace(/\n/g, '<br>')}</div>
+      `).join('')}
+    </div>
+
+    <form id="aiChatForm" style="display:flex;gap:8px;margin-top:10px;">
+      <input id="aiChatInput" class="input" placeholder="Ask Momi AI for captions, video hooks, bio ideas..." required />
+      <button type="submit" class="btn-primary btn-sm" id="aiSendBtn" ${state.aiBusy ? 'disabled' : ''}>${state.aiBusy ? 'Thinking...' : 'Ask AI'}</button>
+    </form>
+
+    <div class="chip-row" style="margin-top:10px;">
+      <button type="button" class="chip" data-ai-quick="Write 3 aesthetic photo captions with hashtags">Photo Captions</button>
+      <button type="button" class="chip" data-ai-quick="Give me viral video clip hooks">Video Hooks</button>
+      <button type="button" class="chip" data-ai-quick="Polish my creator bio and Page intro">Bio &amp; Page Ideas</button>
+    </div>
+
+    <div class="card-panel" style="margin-top:14px;gap:8px;background:var(--surface-alt);">
+      <div class="small muted">Optional: Save your personal Gemini API key locally to upgrade from Built-in AI to live Gemini 2.5 Flash replies.</div>
+      <div style="display:flex;gap:8px;">
+        <input id="aiGeminiKeyInput" type="password" class="input" placeholder="AIza... (optional Gemini API key)" value="${escapeHtml(savedKey)}" />
+        <button type="button" class="btn-outline btn-sm" id="saveAiKeyBtn">Save Key</button>
       </div>
     </div>
-    <div style="margin-top:16px;">
+
+    <div style="margin-top:14px;">
       <div style="font-weight:700;margin-bottom:8px;">Quick Studio Starter Templates</div>
       <div style="display:grid;gap:8px;">
         ${templates.map((t, idx) => `
@@ -5664,7 +5876,40 @@ function openAiAssistantModal() {
       </div>
     </div>
   `);
+
+  const threadEl = document.getElementById('aiChatThread');
+  if (threadEl) threadEl.scrollTop = threadEl.scrollHeight;
   document.getElementById('closeModalBtn').onclick = closeModal;
+
+  const submitPrompt = async (text) => {
+    const clean = String(text || '').trim();
+    if (!clean || state.aiBusy) return;
+    state.aiBusy = true;
+    state.aiChatHistory.push({ role: 'user', text: clean });
+    openAiAssistantModal();
+    const reply = await generateMomiAiResponse(clean);
+    state.aiChatHistory.push({ role: 'assistant', text: reply.text });
+    state.aiBusy = false;
+    if (document.getElementById('aiChatThread')) {
+      openAiAssistantModal();
+    }
+  };
+
+  document.getElementById('aiChatForm').onsubmit = (e) => {
+    e.preventDefault();
+    const val = document.getElementById('aiChatInput').value;
+    submitPrompt(val);
+  };
+  modalContent.querySelectorAll('[data-ai-quick]').forEach((b) => {
+    b.onclick = () => submitPrompt(b.dataset.aiQuick);
+  });
+  document.getElementById('saveAiKeyBtn').onclick = () => {
+    const val = document.getElementById('aiGeminiKeyInput').value.trim();
+    if (val) localStorage.setItem('momi_gemini_api_key', val);
+    else localStorage.removeItem('momi_gemini_api_key');
+    showToast(val ? 'Gemini key saved — live Gemini 2.5 Flash enabled!' : 'Using Built-in Momi AI Assistant.');
+    openAiAssistantModal();
+  };
   modalContent.querySelectorAll('[data-use-ai-tpl]').forEach((b) => {
     b.onclick = () => {
       const tpl = templates[Number(b.dataset.useAiTpl)];

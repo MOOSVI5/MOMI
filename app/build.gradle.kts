@@ -1,4 +1,3 @@
-import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
 import java.time.Duration
 
 plugins {
@@ -6,7 +5,6 @@ plugins {
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.secrets)
-  alias(libs.plugins.google.services)
 }
 
 android {
@@ -17,8 +15,8 @@ android {
     applicationId = "com.aistudio.luma.xkpqrm"
     minSdk = 24
     targetSdk = 36
-    versionCode = 13
-    versionName = "2.2"
+    versionCode = 14
+    versionName = "2.3"
 
     val dotEnvMap = buildMap<String, String> {
       val envFile = rootProject.file(".env")
@@ -45,7 +43,6 @@ android {
     val admobBannerUnitId = resolveEnv("ADMOB_BANNER_UNIT_ID", "ca-app-pub-3940256099942544/6300978111")
     val admobMrecUnitId = resolveEnv("ADMOB_MREC_UNIT_ID", "ca-app-pub-3940256099942544/6300978111")
     val admobInterstitialUnitId = resolveEnv("ADMOB_INTERSTITIAL_UNIT_ID", "ca-app-pub-3940256099942544/1033173712")
-    val monetagDirectLinkUrl = resolveEnv("MONETAG_DIRECT_LINK_URL", "")
     val supabaseUrl = resolveEnv("SUPABASE_URL", "https://qotuvugkapaspowhbsbf.supabase.co")
     val supabaseAnonKey = resolveEnv("SUPABASE_ANON_KEY", "sb_publishable_LbrQBbU_4qH18qjopmNwIg_ALsMhlln")
     val geminiApiKey = resolveEnv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
@@ -59,7 +56,6 @@ android {
     buildConfigField("String", "ADMOB_BANNER_UNIT_ID", "\"$admobBannerUnitId\"")
     buildConfigField("String", "ADMOB_MREC_UNIT_ID", "\"$admobMrecUnitId\"")
     buildConfigField("String", "ADMOB_INTERSTITIAL_UNIT_ID", "\"$admobInterstitialUnitId\"")
-    buildConfigField("String", "MONETAG_DIRECT_LINK_URL", "\"$monetagDirectLinkUrl\"")
     buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
     buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     buildConfigField("String", "GEMINI_API_KEY", "\"$geminiApiKey\"")
@@ -124,13 +120,11 @@ secrets {
   defaultPropertiesFileName = ".env.example"
   ignoreList.addAll(
     listOf(
-      "FIREBASE_APPCHECK_DEBUG_TOKEN",
       "STARTIO_APP_ID",
       "ADMOB_APP_ID",
       "ADMOB_BANNER_UNIT_ID",
       "ADMOB_MREC_UNIT_ID",
       "ADMOB_INTERSTITIAL_UNIT_ID",
-      "MONETAG_DIRECT_LINK_URL",
       "SUPABASE_URL",
       "SUPABASE_ANON_KEY",
       "GEMINI_API_KEY"
@@ -138,13 +132,10 @@ secrets {
   )
 }
 
-googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
-
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
-  implementation(platform(libs.firebase.bom))
   // implementation(libs.accompanist.permissions)
   implementation(libs.androidx.activity.compose)
   implementation(libs.androidx.camera.camera2)
@@ -167,13 +158,8 @@ dependencies {
   // implementation(libs.androidx.room.runtime)
   implementation(libs.coil.compose)
   // implementation(libs.converter.moshi)
-  // implementation(libs.firebase.ai)
-  // Uncomment to use Firestore:
-  implementation(libs.firebase.firestore)
 
-  // Uncomment ALL FOUR of the following dependencies together to use Firebase Auth and Google
-  // Sign-In via Credential Manager:
-  implementation(libs.firebase.auth)
+  // Google Sign-In via Credential Manager (for Supabase Google OAuth):
   implementation(libs.androidx.credentials)
   implementation(libs.androidx.credentials.play.services)
   implementation(libs.googleid)
@@ -185,8 +171,6 @@ dependencies {
   implementation(libs.androidx.media3.transformer)
   implementation(libs.androidx.media3.effect)
   implementation(libs.androidx.media3.common)
-  implementation(libs.firebase.appcheck.recaptcha)
-  implementation(libs.firebase.appcheck.debug)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   // implementation(libs.logging.interceptor)

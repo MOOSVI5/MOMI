@@ -1,4 +1,4 @@
-import { DEFAULT_MONETIZATION_CONFIG, SUPABASE_WEB_CONFIG } from './firebase-config.js';
+import { DEFAULT_MONETIZATION_CONFIG, SUPABASE_WEB_CONFIG } from './app-config.js';
 
 export const SUPABASE_SCHEMA_TABLES = [
   'profiles',
@@ -191,7 +191,7 @@ function toIsoTimestamp(value) {
   return new Date().toISOString();
 }
 
-export function mapFirestoreSnapshotToSupabaseBundle({
+export function mapMomiSnapshotToSupabaseBundle({
   profile = null,
   creators = [],
   posts = [],
@@ -209,6 +209,7 @@ export function mapFirestoreSnapshotToSupabaseBundle({
     : allCreators
   ).map((p) => ({
     user_id: String(p.userId || p.id || ''),
+    email: String(p.email || '').trim().toLowerCase().slice(0, 160),
     username: String(p.username || 'momi.creator').slice(0, 50),
     display_name: String(p.displayName || 'Momi Creator').slice(0, 80),
     category: String(p.category || '').slice(0, 80),
@@ -337,21 +338,13 @@ export function mapFirestoreSnapshotToSupabaseBundle({
     admob_mrec_unit_id: String(cfg.admobMrecUnitId || '').slice(0, 120),
     admob_interstitial_unit_id: String(cfg.admobInterstitialUnitId || '').slice(0, 120),
     start_io_enabled: Boolean(cfg.startIoEnabled),
-    monetag_enabled: Boolean(cfg.monetagEnabled),
-    monetag_direct_link_url: String(cfg.monetagDirectLinkUrl || '').slice(0, 300),
-    monetag_web_zone_id: String(cfg.monetagWebZoneId || '').slice(0, 40),
-    monetag_web_meta_tag: String(cfg.monetagWebMetaTag || '').slice(0, 120),
     partner_promo_title: String(cfg.partnerPromoTitle || '').slice(0, 80),
     partner_promo_subtitle: String(cfg.partnerPromoSubtitle || '').slice(0, 180),
     partner_promo_cta: String(cfg.partnerPromoCta || '').slice(0, 40),
-    gamezop_enabled: Boolean(cfg.gamezopEnabled),
-    gamezop_portal_url: String(cfg.gamezopPortalUrl || '').slice(0, 300),
-    gamezop_publisher_id: String(cfg.gamezopPublisherId || '').slice(0, 40),
-    gamezop_banner_title: String(cfg.gamezopBannerTitle || '').slice(0, 80),
     announcement_id: String(cfg.announcementId || '').slice(0, 80),
     announcement_title: String(cfg.announcementTitle || '').slice(0, 120),
     announcement_body: String(cfg.announcementBody || '').slice(0, 500),
-    latest_version_name: String(cfg.latestVersionName || '2.2').slice(0, 32),
+    latest_version_name: String(cfg.latestVersionName || '2.3').slice(0, 32),
     release_notes: String(cfg.releaseNotes || '').slice(0, 400),
     updated_by_email: String(cfg.updatedByEmail || '').slice(0, 120)
   }];
@@ -706,7 +699,8 @@ export async function fetchSupabaseFeed(cfg = SUPABASE_WEB_CONFIG, fetchImpl = g
       configRes,
       pagesRes,
       groupsRes,
-      showcaseRes
+      showcaseRes,
+      engagersRes
     ] = await Promise.all([
       fetchImpl(`${baseUrl}/rest/v1/posts?select=*&order=created_at.desc&limit=120`, { headers }),
       fetchImpl(`${baseUrl}/rest/v1/stories?select=*&order=created_at.desc&limit=50`, { headers }),
@@ -717,7 +711,8 @@ export async function fetchSupabaseFeed(cfg = SUPABASE_WEB_CONFIG, fetchImpl = g
       fetchImpl(`${baseUrl}/rest/v1/app_config?select=*&id=eq.monetization&limit=1`, { headers }),
       fetchImpl(`${baseUrl}/rest/v1/pages?select=*&order=followers_count.desc&limit=60`, { headers }).catch(() => ({ ok: false })),
       fetchImpl(`${baseUrl}/rest/v1/groups?select=*&order=members_count.desc&limit=60`, { headers }).catch(() => ({ ok: false })),
-      fetchImpl(`${baseUrl}/rest/v1/showcase_accounts?select=*&order=username.asc&limit=40`, { headers }).catch(() => ({ ok: false }))
+      fetchImpl(`${baseUrl}/rest/v1/showcase_accounts?select=*&order=username.asc&limit=40`, { headers }).catch(() => ({ ok: false })),
+      fetchImpl(`${baseUrl}/rest/v1/user_interactions?select=user_id,target_type,target_id&target_type=in.(LIKED_POST,VIEWED_POST)&limit=1000`, { headers }).catch(() => ({ ok: false }))
     ]);
     if (!postsRes.ok && !profilesRes.ok) return null;
     const posts = postsRes.ok ? await postsRes.json() : [];
@@ -730,6 +725,7 @@ export async function fetchSupabaseFeed(cfg = SUPABASE_WEB_CONFIG, fetchImpl = g
     const pages = pagesRes.ok ? await pagesRes.json() : [];
     const groups = groupsRes.ok ? await groupsRes.json() : [];
     const showcaseAccounts = showcaseRes.ok ? await showcaseRes.json() : [];
+    const postInteractions = engagersRes.ok ? await engagersRes.json() : [];
     return {
       posts,
       stories,
@@ -740,7 +736,8 @@ export async function fetchSupabaseFeed(cfg = SUPABASE_WEB_CONFIG, fetchImpl = g
       appConfig: configs[0] || null,
       pages,
       groups,
-      showcaseAccounts
+      showcaseAccounts,
+      postInteractions
     };
   } catch {
     return null;
@@ -900,21 +897,13 @@ export function mapSupabaseConfigToWeb(row = {}) {
     admobMrecUnitId: String(row.admob_mrec_unit_id || ''),
     admobInterstitialUnitId: String(row.admob_interstitial_unit_id || ''),
     startIoEnabled: Boolean(row.start_io_enabled ?? DEFAULT_MONETIZATION_CONFIG.startIoEnabled),
-    monetagEnabled: Boolean(row.monetag_enabled ?? DEFAULT_MONETIZATION_CONFIG.monetagEnabled),
-    monetagDirectLinkUrl: String(row.monetag_direct_link_url || ''),
-    monetagWebZoneId: String(row.monetag_web_zone_id || ''),
-    monetagWebMetaTag: String(row.monetag_web_meta_tag || ''),
     partnerPromoTitle: String(row.partner_promo_title || DEFAULT_MONETIZATION_CONFIG.partnerPromoTitle),
     partnerPromoSubtitle: String(row.partner_promo_subtitle || DEFAULT_MONETIZATION_CONFIG.partnerPromoSubtitle),
     partnerPromoCta: String(row.partner_promo_cta || DEFAULT_MONETIZATION_CONFIG.partnerPromoCta),
-    gamezopEnabled: Boolean(row.gamezop_enabled ?? false),
-    gamezopPortalUrl: String(row.gamezop_portal_url || ''),
-    gamezopPublisherId: String(row.gamezop_publisher_id || ''),
-    gamezopBannerTitle: String(row.gamezop_banner_title || DEFAULT_MONETIZATION_CONFIG.gamezopBannerTitle),
     announcementId: String(row.announcement_id || ''),
     announcementTitle: String(row.announcement_title || ''),
     announcementBody: String(row.announcement_body || ''),
-    latestVersionName: String(row.latest_version_name || '2.2'),
+    latestVersionName: String(row.latest_version_name || '2.3'),
     releaseNotes: String(row.release_notes || '')
   };
 }
@@ -964,6 +953,7 @@ export function mapSupabaseShowcaseAccountToWeb(row = {}) {
 export function mapSupabaseProfileToWeb(row = {}) {
   return {
     userId: String(row.user_id || ''),
+    email: String(row.email || '').trim().toLowerCase(),
     username: String(row.username || 'momi.creator'),
     displayName: String(row.display_name || row.username || 'Creator'),
     category: String(row.category || 'Creator'),
@@ -1229,6 +1219,64 @@ export async function supabaseSignUpWithEmail(cfg = SUPABASE_WEB_CONFIG, email, 
     return { session, confirmationRequired: false };
   }
   return { session: null, confirmationRequired: true };
+}
+
+export async function supabaseVerifyEmailOtp(
+  cfg = SUPABASE_WEB_CONFIG,
+  email,
+  token,
+  type = 'signup',
+  fetchImpl = globalThis.fetch
+) {
+  const baseUrl = normalizeSupabaseUrl(cfg?.url);
+  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) throw new Error('Supabase configuration missing.');
+  const anonKey = String(cfg.anonKey).trim();
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  const cleanCode = String(token || '').trim().replace(/\s+/g, '');
+  if (!cleanEmail || cleanCode.length < 4) {
+    throw new Error('Enter the verification code sent to your email.');
+  }
+  const res = await fetchImpl(`${baseUrl}/auth/v1/verify`, {
+    method: 'POST',
+    headers: { apikey: anonKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: cleanEmail, token: cleanCode, type })
+  });
+  if (!res.ok) {
+    throw new Error(await parseSupabaseAuthError(res, `Verification failed (HTTP ${res.status})`));
+  }
+  const data = await res.json();
+  if (!data?.access_token || !data?.user?.id) {
+    throw new Error('Email verified. Please sign in with your email and password.');
+  }
+  const session = {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token || '',
+    expiresAt: Date.now() + Number(data.expires_in || 3600) * 1000,
+    user: mapSupabaseAuthUserToWeb(data.user)
+  };
+  saveSupabaseAuthSession(session);
+  return { session };
+}
+
+export async function supabaseResendSignupOtp(
+  cfg = SUPABASE_WEB_CONFIG,
+  email,
+  fetchImpl = globalThis.fetch
+) {
+  const baseUrl = normalizeSupabaseUrl(cfg?.url);
+  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) throw new Error('Supabase configuration missing.');
+  const anonKey = String(cfg.anonKey).trim();
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail.includes('@')) throw new Error('Valid email is required.');
+  const res = await fetchImpl(`${baseUrl}/auth/v1/resend`, {
+    method: 'POST',
+    headers: { apikey: anonKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'signup', email: cleanEmail })
+  });
+  if (!res.ok) {
+    throw new Error(await parseSupabaseAuthError(res, `Resend code failed (HTTP ${res.status})`));
+  }
+  return true;
 }
 
 export async function supabaseRefreshSession(cfg = SUPABASE_WEB_CONFIG, refreshToken, fetchImpl = globalThis.fetch) {

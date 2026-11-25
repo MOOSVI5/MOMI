@@ -88,7 +88,7 @@ jobs:
           echo "$FINGERPRINTS"
           {
             echo "### Release APK Signing Fingerprints"
-            echo "Add these to Firebase Console -> Project \`gen-lang-client-0132255277\` -> Android app \`com.aistudio.luma.xkpqrm\` so Google Sign-In works in release builds:"
+            echo "Add these SHA-1 / SHA-256 fingerprints to your Google Cloud Android OAuth Client (\`com.aistudio.luma.xkpqrm\`) if needed for Google Sign-In in release builds:"
             echo '```'
             echo "$FINGERPRINTS"
             echo '```'
@@ -97,20 +97,6 @@ jobs:
               echo "> **Note:** Built with a one-time runner keystore because \`KEYSTORE_BASE64\`, \`STORE_PASSWORD\`, and \`KEY_PASSWORD\` secrets were not set. For permanent store updates with the same key, save your keystore in GitHub Settings -> Secrets and variables -> Actions."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Prepare google-services.json
-        shell: bash
-        env:
-          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
-        run: |
-          if [ ! -f app/google-services.json ]; then
-            if [ -n "$GOOGLE_SERVICES_JSON" ]; then
-              printf '%s\n' "$GOOGLE_SERVICES_JSON" > app/google-services.json
-            else
-              echo "::error::Missing app/google-services.json in repository and GOOGLE_SERVICES_JSON secret is not set. Add app/google-services.json or set the GOOGLE_SERVICES_JSON repository secret."
-              exit 1
-            fi
-          fi
 
       - name: Build Release APK
         env:
@@ -125,7 +111,7 @@ jobs:
         shell: bash
         run: |
           VERSION_NAME="$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')"
-          VERSION_NAME="${VERSION_NAME:-2.2}"
+          VERSION_NAME="${VERSION_NAME:-2.3}"
           APK_PATH="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
           if [ -z "$APK_PATH" ]; then
             echo "::error::No release APK found."

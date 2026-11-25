@@ -288,3 +288,221 @@ fun FollowListBottomSheet(
         }
     }
 }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PostEngagersBottomSheet(
+    postAuthorUsername: String,
+    initialTab: Int,
+    likerIds: List<String>,
+    viewerIds: List<String>,
+    totalLikesCount: Int,
+    totalViewsCount: Int,
+    allProfiles: List<UserProfile>,
+    currentUserId: String,
+    followingUids: Set<String>,
+    onFollowToggle: (UserProfile, Boolean) -> Unit,
+    onUserClick: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var selectedTab by remember(initialTab) { mutableIntStateOf(initialTab.coerceIn(0, 1)) }
+    val profilesByUid = remember(allProfiles) { allProfiles.associateBy { it.userId } }
+
+    val likerProfiles = remember(likerIds, profilesByUid) {
+        likerIds.distinct().map { uid ->
+            profilesByUid[uid] ?: UserProfile(
+                id = uid,
+                userId = uid,
+                username = "creator_${uid.take(6)}",
+                displayName = "Momi Member",
+                avatarKey = MediaAssets.avatarKeyForUid(uid)
+            )
+        }
+    }
+    val viewerProfiles = remember(viewerIds, profilesByUid) {
+        viewerIds.distinct().map { uid ->
+            profilesByUid[uid] ?: UserProfile(
+                id = uid,
+                userId = uid,
+                username = "viewer_${uid.take(6)}",
+                displayName = "Momi Member",
+                avatarKey = MediaAssets.avatarKeyForUid(uid)
+            )
+        }
+    }
+
+    val activeProfiles = if (selectedTab == 0) likerProfiles else viewerProfiles
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 18.dp)
+        ) {
+            Text(
+                text = "Post Activity · @$postAuthorUsername",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .padding(bottom = 10.dp)
+            )
+
+            Row(modifier = Modifier.fillMaxWidth()) {
+                val likesBadge = maxOf(totalLikesCount, likerProfiles.size)
+                val viewsBadge = maxOf(totalViewsCount, viewerProfiles.size)
+                listOf(
+                    0 to "$likesBadge Likes",
+                    1 to "$viewsBadge Views"
+                ).forEach { (tabIdx, title) ->
+                    val selected = selectedTab == tabIdx
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { selectedTab = tabIdx }
+                            .testTag("post_engagers_tab_$tabIdx"),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(vertical = 12.dp)
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(2.5.dp)
+                                .background(if (selected) MaterialTheme.colorScheme.primary else Color.Transparent)
+                        )
+                    }
+                }
+            }
+            HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant)
+
+            if (activeProfiles.isEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 44.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Group,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(40.dp)
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = if (selectedTab == 0) "No recorded likes yet" else "No recorded views yet",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = if (selectedTab == 0) {
+                            "Signed-in people who like this post will appear here."
+                        } else {
+                            "Signed-in people who view this post will appear here."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 160.dp, max = 420.dp)
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(activeProfiles, key = { "${selectedTab}_${it.userId}" }) { user ->
+                        val isFollowing = followingUids.contains(user.userId)
+                        val isSelf = user.userId == currentUserId
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 56.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    onDismiss()
+                                    onUserClick(user.userId)
+                                }
+                                .padding(horizontal = 6.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            LumaAvatar(
+                                username = user.username,
+                                avatarKey = user.avatarKey,
+                                avatarData = user.avatarData,
+                                avatarUrl = user.avatarUrl,
+                                size = 42.dp,
+                                hasActiveStory = false
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = user.displayName,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    if (user.isVerified) {
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Icon(
+                                            imageVector = Icons.Filled.Verified,
+                                            contentDescription = "Verified",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = "@${user.username}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            if (!isSelf) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .heightIn(min = 36.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(
+                                            if (isFollowing) MaterialTheme.colorScheme.surfaceVariant
+                                            else MaterialTheme.colorScheme.primary
+                                        )
+                                        .clickable { onFollowToggle(user, isFollowing) }
+                                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = if (isFollowing) "Following" else "Follow",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isFollowing) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onPrimary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

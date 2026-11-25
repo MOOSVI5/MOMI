@@ -1,4 +1,4 @@
-import { FILTER_OPTIONS, filterCssForTag, MAX_IMAGE_BASE64_CHARS } from './firebase-config.js';
+import { FILTER_OPTIONS, filterCssForTag, MAX_IMAGE_BASE64_CHARS } from './app-config.js';
 
 let sharedAudioCtx = null;
 

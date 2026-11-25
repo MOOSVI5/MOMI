@@ -1,11 +1,5 @@
 package com.example.data.model
 
-import com.google.firebase.Timestamp
-import com.google.firebase.firestore.DocumentId
-import com.google.firebase.firestore.Exclude
-import com.google.firebase.firestore.IgnoreExtraProperties
-import com.google.firebase.firestore.PropertyName
-import com.google.firebase.firestore.ServerTimestamp
 
 data class MediaFrame(
     val imageKey: String = "img_post_coastal",
@@ -63,11 +57,11 @@ object ModerationScopes {
     }
 }
 
-@IgnoreExtraProperties
 data class UserProfile(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val userId: String = "",
     val username: String = "",
+    val email: String = "",
     val displayName: String = "",
     val category: String = "",
     val bio: String = "",
@@ -77,25 +71,24 @@ data class UserProfile(
     val avatarData: String? = null,
     val followersCount: Long = 0L,
     val followingCount: Long = 0L,
-    @get:PropertyName("isVerified") val isVerified: Boolean = false,
+    val isVerified: Boolean = false,
     val role: String = MomiRoles.USER,
     val moderationScopes: List<String> = emptyList(),
     val assignedByEmail: String? = null,
-    @get:PropertyName("partnerConsent") val partnerConsent: Boolean = false,
+    val partnerConsent: Boolean = false,
     val consentUpdatedAt: Timestamp? = null,
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val createdAt: Timestamp? = null,
+    val updatedAt: Timestamp? = null
 )
 
-@IgnoreExtraProperties
 data class Post(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val userId: String = "",
     val authorUsername: String = "",
     val authorDisplayName: String = "",
     val authorAvatarKey: String = "avatar_aria",
     val authorAvatarUrl: String? = null,
-    @get:Exclude val authorAvatarData: String? = null,
+    val authorAvatarData: String? = null,
     val authorVerified: Boolean = false,
     val location: String = "",
     val imageKey: String = "img_post_coastal",
@@ -118,17 +111,17 @@ data class Post(
     val caption: String = "",
     val likesCount: Long = 0L,
     val viewsCount: Long = 0L,
-    @get:PropertyName("isLiked") val isLiked: Boolean = false,
-    @get:PropertyName("isBookmarked") val isBookmarked: Boolean = false,
-    @get:PropertyName("isFollowingAuthor") val isFollowingAuthor: Boolean = false,
+    val isLiked: Boolean = false,
+    val isBookmarked: Boolean = false,
+    val isFollowingAuthor: Boolean = false,
     val commentsCount: Long = 0L,
     val category: String = "For You",
-    @get:PropertyName("isReel") val isReel: Boolean = false,
+    val isReel: Boolean = false,
     val audioTitle: String = "",
     val localAudioPath: String? = null,
     val audioUrl: String? = null,
     val audioData: String? = null,
-    @get:PropertyName("isBoosted") val isBoosted: Boolean = false,
+    val isBoosted: Boolean = false,
     val boostTier: String = "",
     val recommendedLabel: String = "",
     val boostedByUid: String? = null,
@@ -136,13 +129,12 @@ data class Post(
     val pageId: String? = null,
     val groupId: String? = null,
     val communityName: String = "",
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val createdAt: Timestamp? = null,
+    val updatedAt: Timestamp? = null
 ) {
     val isVideoPost: Boolean
         get() = mediaType == "VIDEO" || !localVideoPath.isNullOrBlank() || !videoUrl.isNullOrBlank() || !videoData.isNullOrBlank() || videoChunksCount > 0L
 
-    @get:Exclude
     val numericAspectRatio: Float
         get() = when {
             isVideoPost -> 0.85f
@@ -151,7 +143,6 @@ data class Post(
             else -> 1f
         }
 
-    @get:Exclude
     val allHashtags: List<String>
         get() {
             val fromCaption = Regex("#([a-zA-Z0-9_]+)")
@@ -164,7 +155,6 @@ data class Post(
                 .take(15)
         }
 
-    @get:Exclude
     val allTaggedUsernames: List<String>
         get() {
             val fromCaption = Regex("@([a-zA-Z0-9._]+)")
@@ -177,7 +167,6 @@ data class Post(
                 .take(10)
         }
 
-    @get:Exclude
     val allImageFrames: List<MediaFrame>
         get() {
             val frames = mutableListOf(
@@ -208,29 +197,27 @@ data class Post(
         }
 }
 
-@IgnoreExtraProperties
 data class Comment(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val userId: String = "",
     val authorUsername: String = "",
     val authorAvatarKey: String = "avatar_aria",
     val authorAvatarUrl: String? = null,
-    @get:Exclude val authorAvatarData: String? = null,
+    val authorAvatarData: String? = null,
     val text: String = "",
     val likesCount: Long = 0L,
-    @get:PropertyName("isLiked") val isLiked: Boolean = false,
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val isLiked: Boolean = false,
+    val createdAt: Timestamp? = null,
+    val updatedAt: Timestamp? = null
 )
 
-@IgnoreExtraProperties
 data class Story(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val userId: String = "",
     val username: String = "",
     val avatarKey: String = "avatar_aria",
     val avatarUrl: String? = null,
-    @get:Exclude val avatarData: String? = null,
+    val avatarData: String? = null,
     val imageKey: String = "img_post_coastal",
     val localImagePath: String? = null,
     val imageUrl: String? = null,
@@ -246,35 +233,32 @@ data class Story(
     val audioUrl: String? = null,
     val audioData: String? = null,
     val caption: String = "",
-    @get:PropertyName("isSeen") val isSeen: Boolean = false,
-    @get:PropertyName("isOwnStory") val isOwnStory: Boolean = false,
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val isSeen: Boolean = false,
+    val isOwnStory: Boolean = false,
+    val createdAt: Timestamp? = null,
+    val updatedAt: Timestamp? = null
 ) {
     val isVideoStory: Boolean
         get() = mediaType == "VIDEO" || !localVideoPath.isNullOrBlank() || !videoUrl.isNullOrBlank() || !videoData.isNullOrBlank() || videoChunksCount > 0L
 }
 
-@IgnoreExtraProperties
 data class FollowEdge(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val followerUid: String = "",
     val targetUid: String = "",
     val followerUsername: String = "",
     val targetUsername: String = "",
-    @ServerTimestamp val createdAt: Timestamp? = null
+    val createdAt: Timestamp? = null
 )
 
-@IgnoreExtraProperties
 data class InteractionMarker(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val targetId: String = "",
-    @ServerTimestamp val createdAt: Timestamp? = null
+    val createdAt: Timestamp? = null
 )
 
-@IgnoreExtraProperties
 data class NotificationItem(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val userId: String = "",
     val actorUid: String = "",
     val actorUsername: String = "",
@@ -283,16 +267,15 @@ data class NotificationItem(
     val timeLabel: String = "",
     val section: String = "Today",
     val previewImageKey: String? = null,
-    @get:PropertyName("isFollowAction") val isFollowAction: Boolean = false,
-    @get:PropertyName("isFollowingBack") val isFollowingBack: Boolean = false,
-    @get:PropertyName("isUnread") val isUnread: Boolean = true,
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val isFollowAction: Boolean = false,
+    val isFollowingBack: Boolean = false,
+    val isUnread: Boolean = true,
+    val createdAt: Timestamp? = null,
+    val updatedAt: Timestamp? = null
 )
 
-@IgnoreExtraProperties
 data class MessageThread(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val participantUids: List<String> = emptyList(),
     val userAId: String = "",
     val userAUsername: String = "",
@@ -307,10 +290,10 @@ data class MessageThread(
     val unreadUid: String = "",
     val timeLabel: String = "",
     val unreadCount: Long = 0L,
-    @get:PropertyName("isOnline") val isOnline: Boolean = false,
+    val isOnline: Boolean = false,
     val noteText: String? = null,
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val createdAt: Timestamp? = null,
+    val updatedAt: Timestamp? = null
 ) {
     fun peerUidFor(currentUid: String): String =
         if (userAId == currentUid) userBId else userAId
@@ -328,9 +311,8 @@ data class MessageThread(
         unreadUid == currentUid && unreadCount > 0L
 }
 
-@IgnoreExtraProperties
 data class ChatMessage(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val participantUids: List<String> = emptyList(),
     val senderUid: String = "",
     val senderUsername: String = "",
@@ -342,53 +324,49 @@ data class ChatMessage(
     val videoDurationMs: Long = 0L,
     val audioData: String? = null,
     val audioDurationMs: Long = 0L,
-    @ServerTimestamp val createdAt: Timestamp? = null
+    val createdAt: Timestamp? = null
 )
 
-@IgnoreExtraProperties
 data class LiveStream(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val userId: String = "",
     val username: String = "",
     val displayName: String = "",
     val avatarKey: String = "avatar_aria",
     val avatarUrl: String? = null,
-    @get:Exclude val avatarData: String? = null,
-    @get:PropertyName("authorVerified") val authorVerified: Boolean = false,
+    val avatarData: String? = null,
+    val authorVerified: Boolean = false,
     val title: String = "",
     val category: String = "Live",
-    @get:PropertyName("isLive") val isLive: Boolean = true,
+    val isLive: Boolean = true,
     val viewerCount: Long = 0L,
     val likesCount: Long = 0L,
     val giftsCredits: Long = 0L,
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val createdAt: Timestamp? = null,
+    val updatedAt: Timestamp? = null
 )
 
-@IgnoreExtraProperties
 data class LiveFrame(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val userId: String = "",
     val seq: Long = 0L,
     val frameData: String = "",
     val cameraEnabled: Boolean = true,
     val micMuted: Boolean = false,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val updatedAt: Timestamp? = null
 )
 
-@IgnoreExtraProperties
 data class LiveComment(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val userId: String = "",
     val username: String = "",
     val avatarKey: String = "avatar_aria",
     val text: String = "",
-    @ServerTimestamp val createdAt: Timestamp? = null
+    val createdAt: Timestamp? = null
 )
 
-@IgnoreExtraProperties
 data class UserWallet(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val userId: String = "",
     val balance: Long = 0L,
     val totalEarned: Long = 0L,
@@ -398,13 +376,12 @@ data class UserWallet(
     val verificationTier: String = MomiCreditCatalog.VERIFICATION_NONE,
     val unlockedPerks: List<String> = emptyList(),
     val lastTxId: String? = null,
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val createdAt: Timestamp? = null,
+    val updatedAt: Timestamp? = null
 )
 
-@IgnoreExtraProperties
 data class CreditTransaction(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val txId: String = "",
     val type: String = TYPE_TOP_UP,
     val senderUid: String = "",
@@ -422,8 +399,8 @@ data class CreditTransaction(
     val postId: String? = null,
     val recipientClaimed: Boolean = true,
     val status: String = "COMPLETED",
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val createdAt: Timestamp? = null,
+    val updatedAt: Timestamp? = null
 ) {
     companion object {
         const val TYPE_TOP_UP = "TOP_UP"
@@ -439,32 +416,23 @@ data class CreditTransaction(
     }
 }
 
-@IgnoreExtraProperties
 data class AdMonetizationConfig(
-    @DocumentId val id: String = "monetization",
+    val id: String = "monetization",
     val admobEnabled: Boolean = true,
     val admobBannerUnitId: String = "",
     val admobMrecUnitId: String = "",
     val admobInterstitialUnitId: String = "",
     val startIoEnabled: Boolean = true,
-    val monetagEnabled: Boolean = true,
-    val monetagDirectLinkUrl: String = "",
-    val monetagWebZoneId: String = "",
-    val monetagWebMetaTag: String = "",
     val partnerPromoTitle: String = "Featured Creator Deals & Partner Showcase",
     val partnerPromoSubtitle: String = "Explore verified creator collections, partner offers & exclusive community perks.",
     val partnerPromoCta: String = "Explore Partner",
-    val gamezopEnabled: Boolean = false,
-    val gamezopPortalUrl: String = "",
-    val gamezopPublisherId: String = "",
-    val gamezopBannerTitle: String = "Momi Arcade · Play Instant Games",
     val announcementId: String = "",
     val announcementTitle: String = "",
     val announcementBody: String = "",
-    val latestVersionName: String = "2.2",
+    val latestVersionName: String = "2.3",
     val releaseNotes: String = "",
     val updatedByEmail: String = "",
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val updatedAt: Timestamp? = null
 )
 
 data class PostBoostOption(
@@ -655,9 +623,8 @@ object MomiCreditCatalog {
     }
 }
 
-@IgnoreExtraProperties
 data class MerchantAccount(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val userId: String = "",
     val ownerUsername: String = "",
     val storeName: String = "",
@@ -667,27 +634,26 @@ data class MerchantAccount(
     val avatarKey: String = "avatar_aria",
     val avatarUrl: String? = null,
     val avatarData: String? = null,
-    @get:PropertyName("isVerified") val isVerified: Boolean = false,
+    val isVerified: Boolean = false,
     val verifiedByEmail: String? = null,
     val totalSales: Long = 0L,
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val createdAt: Timestamp? = null,
+    val updatedAt: Timestamp? = null
 )
 
-@IgnoreExtraProperties
 data class MarketProduct(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val sellerUid: String = "",
     val sellerUsername: String = "",
     val storeName: String = "",
-    @get:Exclude val sellerVerified: Boolean = false,
+    val sellerVerified: Boolean = false,
     val title: String = "",
     val description: String = "",
     val category: String = "Collectibles",
     val priceUsd: Double = 0.0,
     val originalPriceUsd: Double = 0.0,
     val discountPercent: Long = 0L,
-    @get:PropertyName("freeShipping") val freeShipping: Boolean = true,
+    val freeShipping: Boolean = true,
     val imageKey: String = "img_post_coastal",
     val imageUrl: String? = null,
     val imageData: String? = null,
@@ -698,14 +664,13 @@ data class MarketProduct(
     val videoChunksCount: Long = 0L,
     val videoDurationMs: Long = 0L,
     val stockCount: Long = 1L,
-    @get:PropertyName("isFeatured") val isFeatured: Boolean = false,
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val isFeatured: Boolean = false,
+    val createdAt: Timestamp? = null,
+    val updatedAt: Timestamp? = null
 ) {
     val isVideoProduct: Boolean
         get() = !videoUrl.isNullOrBlank() || !videoData.isNullOrBlank() || videoChunksCount > 0L
 
-    @get:Exclude
     val allProductFrames: List<MediaFrame>
         get() {
             val frames = mutableListOf(MediaFrame(imageKey = imageKey, imageData = imageData, imageUrl = imageUrl))
@@ -721,9 +686,8 @@ data class MarketProduct(
         }
 }
 
-@IgnoreExtraProperties
 data class MarketOrder(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val buyerUid: String = "",
     val buyerUsername: String = "",
     val sellerUid: String = "",
@@ -736,13 +700,12 @@ data class MarketOrder(
     val priceUsd: Double = 0.0,
     val shippingAddress: String = "",
     val status: String = "PLACED",
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val createdAt: Timestamp? = null,
+    val updatedAt: Timestamp? = null
 )
 
-@IgnoreExtraProperties
 data class ContentReport(
-    @DocumentId val id: String = "",
+    val id: String = "",
     val targetType: String = "POST",
     val targetId: String = "",
     val targetAuthorUid: String = "",
@@ -757,11 +720,10 @@ data class ContentReport(
     val reviewedByUsername: String? = null,
     val reviewedByRole: String? = null,
     val resolutionNote: String? = null,
-    @ServerTimestamp val createdAt: Timestamp? = null,
-    @ServerTimestamp val updatedAt: Timestamp? = null
+    val createdAt: Timestamp? = null,
+    val updatedAt: Timestamp? = null
 )
 
-@IgnoreExtraProperties
 data class MomiPage(
     val id: String = "",
     val ownerUid: String = "",
@@ -778,7 +740,6 @@ data class MomiPage(
     val createdAt: Timestamp? = null
 )
 
-@IgnoreExtraProperties
 data class MomiGroup(
     val id: String = "",
     val ownerUid: String = "",
@@ -793,7 +754,6 @@ data class MomiGroup(
     val createdAt: Timestamp? = null
 )
 
-@IgnoreExtraProperties
 data class ShowcaseAccount(
     val username: String = "",
     val displayName: String = "",
@@ -816,22 +776,5 @@ fun sortFeedWithBoostPriority(posts: List<Post>): List<Post> {
                 .thenBy { it.index }
         )
         .map { it.value }
-}
-
-fun normalizeMonetagDirectUrl(raw: String?): String {
-    val trimmed = raw?.trim().orEmpty()
-    if (!trimmed.startsWith("https://", ignoreCase = false)) return ""
-    return trimmed.take(300)
-}
-
-fun sanitizeGamezopPublisherId(raw: String?): String =
-    raw?.trim()?.replace(Regex("[^a-zA-Z0-9_-]"), "")?.take(40).orEmpty()
-
-fun resolveGamezopLaunchUrl(config: AdMonetizationConfig): String {
-    if (!config.gamezopEnabled) return ""
-    val portalUrl = normalizeMonetagDirectUrl(config.gamezopPortalUrl)
-    if (portalUrl.isNotEmpty()) return portalUrl
-    val pubId = sanitizeGamezopPublisherId(config.gamezopPublisherId)
-    return if (pubId.isNotEmpty()) "https://www.gamezop.com/?id=$pubId" else ""
 }
 

@@ -1,15 +1,6 @@
-export const FIREBASE_WEB_CONFIG = {
-  apiKey: ['AIzaSyCx7Z9WLA', 'x0AvR0RqrU5jqHaVDCxVVDPo'].join('-'),
-  authDomain: 'gen-lang-client-0132255277.firebaseapp.com',
-  projectId: 'gen-lang-client-0132255277',
-  storageBucket: 'gen-lang-client-0132255277.firebasestorage.app',
-  messagingSenderId: '160847434087',
-  appId: '1:160847434087:web:6f066cf037b6444a9e3e'
-};
-
-export const FIRESTORE_DATABASE_ID = 'ai-studio-android-momi-6f066cf0-37b6-444a-9e3e-d290cfd23a49';
 export const ADMIN_OWNER_EMAIL = 'syali6511@gmail.com';
 export const MAX_IMAGE_BASE64_CHARS = 650000;
+export const STORY_TTL_MS = 24 * 60 * 60 * 1000;
 
 export function isOwnerEmail(email = '') {
   return String(email || '').trim().toLowerCase() === ADMIN_OWNER_EMAIL.toLowerCase();
@@ -73,12 +64,17 @@ export const TRENDING_HASHTAGS = [
 ];
 
 export const COLOR_SCHEMES = [
-  { id: 'MIDNIGHT_SUNSET', label: 'Midnight Sunset' },
-  { id: 'EMERALD_GOLD', label: 'Emerald & Gold' },
-  { id: 'COBALT_INDIGO', label: 'Electric Indigo' },
-  { id: 'SILK_MAROON', label: 'Silk & Maroon' },
-  { id: 'WHITE_GREY', label: 'White & Grey' }
+  { id: 'WHITE_GREY', label: 'White & Grey' },
+  { id: 'EMERALD_MAROON', label: 'Emerald Green & Maroon' },
+  { id: 'GOLD_EMERALD', label: 'Gold & Emerald Green' }
 ];
+
+export function normalizeColorScheme(raw = '') {
+  const clean = String(raw || '').trim().toUpperCase();
+  if (clean === 'WHITE_GREY') return 'WHITE_GREY';
+  if (clean === 'GOLD_EMERALD' || clean === 'EMERALD_GOLD') return 'GOLD_EMERALD';
+  return 'EMERALD_MAROON';
+}
 
 export function filterCssForTag(filterTag, brightness = 0, contrast = 1, warmth = 0) {
   const found = FILTER_OPTIONS.find((f) => f.tag === filterTag);
@@ -198,8 +194,8 @@ export function escapeHtml(str = '') {
     .replace(/'/g, '&#39;');
 }
 
-export const APP_VERSION_NAME = '2.2';
-export const APP_VERSION_CODE = 13;
+export const APP_VERSION_NAME = '2.3';
+export const APP_VERSION_CODE = 14;
 export const WEB_APP_URL = 'https://moosvi5.github.io/MOMI/';
 export const ANDROID_APK_URL = 'https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-latest.apk';
 export const ANDROID_RELEASES_URL = 'https://github.com/MOOSVI5/MOMI/releases/latest';
@@ -219,6 +215,24 @@ export function compareSemanticVersions(candidate = '', current = '') {
     if (l !== r) return l > r ? 1 : -1;
   }
   return 0;
+}
+
+export function filterActiveStories24h(stories = [], nowMs = Date.now()) {
+  const cutoffMs = nowMs - STORY_TTL_MS;
+  return (Array.isArray(stories) ? stories : []).filter((s) => {
+    if (typeof s?.createdAtMs === 'number' && Number.isFinite(s.createdAtMs)) {
+      return s.createdAtMs >= cutoffMs;
+    }
+    const sec = s?.createdAt?.seconds;
+    if (typeof sec === 'number' && Number.isFinite(sec)) {
+      return sec * 1000 >= cutoffMs;
+    }
+    if (typeof s?.created_at === 'string') {
+      const parsed = Date.parse(s.created_at);
+      return Number.isFinite(parsed) ? parsed >= cutoffMs : true;
+    }
+    return true;
+  });
 }
 
 export const SHOWCASE_PERSONAS = [
@@ -355,21 +369,13 @@ export const DEFAULT_MONETIZATION_CONFIG = {
   admobMrecUnitId: '',
   admobInterstitialUnitId: '',
   startIoEnabled: true,
-  monetagEnabled: true,
-  monetagDirectLinkUrl: '',
-  monetagWebZoneId: '',
-  monetagWebMetaTag: '',
   partnerPromoTitle: 'Featured Creator Deals & Partner Showcase',
   partnerPromoSubtitle: 'Explore verified creator collections, partner offers & exclusive community perks.',
   partnerPromoCta: 'Explore Partner',
-  gamezopEnabled: false,
-  gamezopPortalUrl: '',
-  gamezopPublisherId: '',
-  gamezopBannerTitle: 'Momi Arcade · Play Instant Games',
   announcementId: '',
   announcementTitle: '',
   announcementBody: '',
-  latestVersionName: '2.2',
+  latestVersionName: '2.3',
   releaseNotes: '',
   updatedByEmail: ''
 };
@@ -426,30 +432,6 @@ export const WEB_PERK_CATALOG = [
   }
 ];
 
-export function normalizeMonetagDirectUrl(raw = '') {
-  const trimmed = String(raw || '').trim();
-  if (!trimmed.startsWith('https://')) return '';
-  return trimmed.slice(0, 300);
-}
-
-export function sanitizeMonetagZoneId(raw = '') {
-  const clean = String(raw || '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
-  return clean.slice(0, 40);
-}
-
-export function sanitizeGamezopPublisherId(raw = '') {
-  const clean = String(raw || '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
-  return clean.slice(0, 40);
-}
-
-export function resolveGamezopUrl(cfg = {}) {
-  if (!cfg?.gamezopEnabled) return '';
-  const direct = normalizeMonetagDirectUrl(cfg.gamezopPortalUrl);
-  if (direct) return direct;
-  const pubId = sanitizeGamezopPublisherId(cfg.gamezopPublisherId);
-  return pubId ? `https://www.gamezop.com/?id=${pubId}` : '';
-}
-
 export function sortFeedWithBoostPriority(posts = []) {
   if (!Array.isArray(posts) || posts.length <= 1) return Array.isArray(posts) ? posts : [];
   const tierRank = (p) => {
@@ -482,4 +464,3 @@ export function verificationTierForPerks(current = 'NONE', unlockedPerks = []) {
   if (perks.includes('CREATOR_BOOST') || perks.includes('VIP_PATRON_PASS')) return 'CREATOR_PRO';
   return 'NONE';
 }
-

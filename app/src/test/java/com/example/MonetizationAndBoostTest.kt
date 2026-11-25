@@ -4,10 +4,9 @@ import com.example.data.model.AdMonetizationConfig
 import com.example.data.model.CreditTransaction
 import com.example.data.model.MomiCreditCatalog
 import com.example.data.model.Post
-import com.example.data.model.normalizeMonetagDirectUrl
-import com.example.data.model.resolveGamezopLaunchUrl
-import com.example.data.model.sanitizeGamezopPublisherId
 import com.example.data.model.sortFeedWithBoostPriority
+import com.example.data.supabase.MomiSupabaseSchema
+import com.example.ui.theme.AppColorScheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -44,44 +43,20 @@ class MonetizationAndBoostTest {
     }
 
     @Test
-    fun normalizeMonetagDirectUrlEnforcesHttpsAndTrims() {
+    fun colorSchemesAreStrictlyLimitedToThreeApprovedPalettes() {
         assertEquals(
-            "https://otieu.com/4/9001234",
-            normalizeMonetagDirectUrl("  https://otieu.com/4/9001234  ")
+            listOf(
+                AppColorScheme.WHITE_GREY,
+                AppColorScheme.EMERALD_MAROON,
+                AppColorScheme.GOLD_EMERALD
+            ),
+            AppColorScheme.entries
         )
-        assertEquals("", normalizeMonetagDirectUrl("http://insecure.example.com"))
-        assertEquals("", normalizeMonetagDirectUrl("javascript:alert(1)"))
-        assertEquals("", normalizeMonetagDirectUrl(null))
+        assertEquals(86_400_000L, MomiSupabaseSchema.STORY_TTL_MS)
     }
 
     @Test
-    fun resolveGamezopLaunchUrlHandlesPortalUrlAndPublisherIdSafely() {
-        assertEquals("", resolveGamezopLaunchUrl(AdMonetizationConfig()))
-
-        val withPubIdOnly = AdMonetizationConfig(
-            gamezopEnabled = true,
-            gamezopPublisherId = " 9012;bad "
-        )
-        assertEquals("9012bad", sanitizeGamezopPublisherId(" 9012;bad "))
-        assertEquals("https://www.gamezop.com/?id=9012bad", resolveGamezopLaunchUrl(withPubIdOnly))
-
-        val withPortalOverride = AdMonetizationConfig(
-            gamezopEnabled = true,
-            gamezopPublisherId = "9012",
-            gamezopPortalUrl = "https://4829.play.gamezop.com"
-        )
-        assertEquals("https://4829.play.gamezop.com", resolveGamezopLaunchUrl(withPortalOverride))
-
-        val withInsecurePortal = AdMonetizationConfig(
-            gamezopEnabled = true,
-            gamezopPublisherId = "9012",
-            gamezopPortalUrl = "http://insecure.gamezop.com"
-        )
-        assertEquals("https://www.gamezop.com/?id=9012", resolveGamezopLaunchUrl(withInsecurePortal))
-    }
-
-    @Test
-    fun boostOptionsMatchFirestoreAllowedCreditCosts() {
+    fun boostOptionsMatchAllowedCreditCosts() {
         val allowedCosts = setOf(100L, 250L, 500L)
         assertTrue(MomiCreditCatalog.boostOptions.isNotEmpty())
         MomiCreditCatalog.boostOptions.forEach { option ->
@@ -101,8 +76,7 @@ class MonetizationAndBoostTest {
         val defaultConfig = AdMonetizationConfig()
         assertTrue(defaultConfig.admobEnabled)
         assertTrue(defaultConfig.startIoEnabled)
-        assertTrue(defaultConfig.monetagEnabled)
-        assertFalse(defaultConfig.gamezopEnabled)
+        assertEquals("2.3", defaultConfig.latestVersionName)
         assertFalse(defaultConfig.partnerPromoTitle.isBlank())
     }
 }

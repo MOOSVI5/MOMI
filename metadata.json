@@ -1,6 +1,6 @@
 {
   "name": "Momi",
-  "description": "A social photo and story sharing Android app inspired by Instagram with a maroon and silk blue color scheme.",
+  "description": "A real-time Supabase-synced social photo, story, clips, and community Android & Web app with White + Grey, Emerald Green + Maroon, and Gold + Emerald Green themes.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

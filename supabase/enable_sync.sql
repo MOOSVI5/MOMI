@@ -5,7 +5,16 @@
 -- Allows Android + Web clients to read/write all Momi tables, Pages, Groups,
 -- Showcase Starters, In-App Announcements, and upload media to Storage buckets.
 
--- 1. Ensure extra media, community & announcement columns exist on upgraded schemas
+-- 1. Ensure extra media, email uniqueness, interactions, community & announcement columns exist on upgraded schemas
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS email text NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_email_lower
+  ON public.profiles(lower(email))
+  WHERE email <> '';
+
+ALTER TABLE public.user_interactions DROP CONSTRAINT IF EXISTS user_interactions_target_type_check;
+ALTER TABLE public.user_interactions ADD CONSTRAINT user_interactions_target_type_check
+  CHECK (target_type IN ('LIKED_POST', 'VIEWED_POST', 'BOOKMARK', 'SEEN_STORY', 'LIKED_COMMENT'));
+
 ALTER TABLE public.stories ADD COLUMN IF NOT EXISTS audio_url text;
 ALTER TABLE public.market_products ADD COLUMN IF NOT EXISTS extra_image_urls text[] NOT NULL DEFAULT ARRAY[]::text[];
 
@@ -16,7 +25,7 @@ ALTER TABLE public.posts ADD COLUMN IF NOT EXISTS community_name text NOT NULL D
 ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS announcement_id text NOT NULL DEFAULT '';
 ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS announcement_title text NOT NULL DEFAULT '';
 ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS announcement_body text NOT NULL DEFAULT '';
-ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS latest_version_name text NOT NULL DEFAULT '2.2';
+ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS latest_version_name text NOT NULL DEFAULT '2.3';
 ALTER TABLE public.app_config ADD COLUMN IF NOT EXISTS release_notes text NOT NULL DEFAULT '';
 
 -- 2. Pages, Page Follows, Groups, Group Members & Showcase Starters Tables

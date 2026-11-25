@@ -76,6 +76,7 @@ class SupabaseMigrationTest {
         val profile = UserProfile(
             id = "uid_1",
             userId = "uid_1",
+            email = "ali@momi.app",
             username = "ali.momi",
             displayName = "Ali",
             partnerConsent = true,
@@ -132,10 +133,9 @@ class SupabaseMigrationTest {
             unlockedPerks = listOf("CREATOR_BOOST")
         )
         val cfg = AdMonetizationConfig(
-            monetagEnabled = true,
-            monetagDirectLinkUrl = "https://otieu.com/4/9001",
-            gamezopEnabled = true,
-            gamezopPublisherId = "9012"
+            admobEnabled = true,
+            startIoEnabled = true,
+            latestVersionName = "2.3"
         )
 
         val bundle = MomiSupabaseSchema.buildMigrationBundleMap(
@@ -165,7 +165,7 @@ class SupabaseMigrationTest {
 
         val appCfgRow = tables["app_config"]!!.first()
         assertEquals("monetization", appCfgRow["id"])
-        assertEquals("9012", appCfgRow["gamezop_publisher_id"])
+        assertEquals("2.3", appCfgRow["latest_version_name"])
 
         val jsonText = MomiSupabaseSchema.buildMigrationBundleJson(
             profiles = listOf(profile),
@@ -208,9 +208,9 @@ class SupabaseMigrationTest {
         )
         val cfg = AdMonetizationConfig(
             announcementId = "ann_42",
-            announcementTitle = "Momi v2.2 In-App Notes",
+            announcementTitle = "Momi v2.3 In-App Notes",
             announcementBody = "Pages & Groups are live!",
-            latestVersionName = "2.2",
+            latestVersionName = "2.3",
             releaseNotes = "Smooth live rooms and starter console"
         )
         val post = Post(
@@ -226,11 +226,11 @@ class SupabaseMigrationTest {
         assertEquals("Film Club", group.name)
         assertTrue(starter.isAuthorized)
         assertEquals("ann_42", cfg.announcementId)
-        assertEquals("2.2", cfg.latestVersionName)
+        assertEquals("2.3", cfg.latestVersionName)
         assertEquals("pg_1", post.pageId)
         assertTrue(
             MomiSupabaseSchema.TABLES.containsAll(
-                listOf("pages", "page_follows", "groups", "group_members", "showcase_accounts")
+                listOf("pages", "page_follows", "groups", "group_members", "showcase_accounts", "user_interactions")
             )
         )
     }

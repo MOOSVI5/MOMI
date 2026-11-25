@@ -206,7 +206,7 @@ fun onEmailPasswordAuthClicked(
                         persistSession(context, sess)
                         onAuthSuccess()
                     } else {
-                        onConfirmationSent("Check ${res.email} for your verification link, then sign in.")
+                        onConfirmationSent(res.email)
                     }
                 }
                 .onFailure { err ->
@@ -222,6 +222,46 @@ fun onEmailPasswordAuthClicked(
                     onAuthError(err.localizedMessage ?: "Sign in failed. Check email and password.")
                 }
         }
+    }
+}
+
+fun onVerifyEmailOtpClicked(
+    context: Context,
+    email: String,
+    otpCode: String,
+    displayName: String,
+    onAuthSuccess: () -> Unit,
+    onAuthError: (String) -> Unit,
+    scope: CoroutineScope
+) {
+    val client = MomiSupabaseClient()
+    scope.launch {
+        client.verifyEmailSignupOtp(email = email, otpCode = otpCode, displayName = displayName)
+            .onSuccess { sess ->
+                persistSession(context, sess)
+                onAuthSuccess()
+            }
+            .onFailure { err ->
+                onAuthError(err.localizedMessage ?: "Invalid or expired verification code.")
+            }
+    }
+}
+
+fun onResendEmailOtpClicked(
+    email: String,
+    onSent: (String) -> Unit,
+    onAuthError: (String) -> Unit,
+    scope: CoroutineScope
+) {
+    val client = MomiSupabaseClient()
+    scope.launch {
+        client.resendEmailSignupOtp(email = email)
+            .onSuccess {
+                onSent("Verification code resent to ${email.trim()}. Check your inbox and spam folder.")
+            }
+            .onFailure { err ->
+                onAuthError(err.localizedMessage ?: "Could not resend verification code.")
+            }
     }
 }
 

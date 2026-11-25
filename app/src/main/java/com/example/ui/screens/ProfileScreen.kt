@@ -463,56 +463,58 @@ fun ProfileScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AppColorScheme.entries.chunked(2).forEach { rowSchemes ->
+                    AppColorScheme.entries.forEach { scheme ->
+                        val active = appColorScheme == scheme
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(
+                                    if (active) MaterialTheme.colorScheme.primaryContainer
+                                    else MaterialTheme.colorScheme.surfaceVariant
+                                )
+                                .border(
+                                    width = if (active) 1.5.dp else 0.dp,
+                                    color = if (active) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                    shape = RoundedCornerShape(14.dp)
+                                )
+                                .clickable { onColorSchemeChange(scheme) }
+                                .padding(horizontal = 14.dp, vertical = 12.dp)
+                                .testTag("color_scheme_${scheme.name}"),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            rowSchemes.forEach { scheme ->
-                                val active = appColorScheme == scheme
-                                Row(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .background(
-                                            if (active) MaterialTheme.colorScheme.primaryContainer
-                                            else MaterialTheme.colorScheme.surfaceVariant
-                                        )
-                                        .border(
-                                            width = if (active) 1.5.dp else 0.dp,
-                                            color = if (active) MaterialTheme.colorScheme.primary else Color.Transparent,
-                                            shape = RoundedCornerShape(14.dp)
-                                        )
-                                        .clickable { onColorSchemeChange(scheme) }
-                                        .padding(horizontal = 12.dp, vertical = 10.dp)
-                                        .testTag("color_scheme_${scheme.name}"),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(24.dp)
-                                            .clip(CircleShape)
-                                            .background(Brush.linearGradient(scheme.gradientColors))
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Column {
-                                        Text(
-                                            text = scheme.displayName,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Text(
-                                            text = scheme.subtitle,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                }
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape)
+                                    .background(Brush.linearGradient(scheme.gradientColors))
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = scheme.displayName,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = scheme.subtitle,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            if (active) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Icon(
+                                    imageVector = Icons.Filled.CheckCircle,
+                                    contentDescription = "Selected theme",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                         }
                     }
@@ -738,7 +740,7 @@ fun ProfileScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("AdMob, Start.io & Monetag Setup", fontWeight = FontWeight.Bold)
+                        Text("AdMob & Start.io Setup", fontWeight = FontWeight.Bold)
                     }
                     OutlinedButton(
                         onClick = {
@@ -1471,7 +1473,10 @@ fun ProfileScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
                                         Icon(
                                             imageVector = Icons.Filled.AdminPanelSettings,
                                             contentDescription = null,
@@ -1483,21 +1488,26 @@ fun ProfileScreen(
                                             text = "Owner Admin Console",
                                             style = MaterialTheme.typography.labelLarge,
                                             fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
                                             color = MaterialTheme.colorScheme.onPrimaryContainer
                                         )
                                     }
+                                    Spacer(modifier = Modifier.width(8.dp))
                                     Box(
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(10.dp))
                                             .background(MaterialTheme.colorScheme.surface)
                                             .clickable { onToggleAdminViewMode(false) }
-                                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                                            .padding(horizontal = 10.dp, vertical = 6.dp)
                                             .testTag("switch_to_user_view_button")
                                     ) {
                                         Text(
                                             text = "Switch to User",
                                             style = MaterialTheme.typography.labelSmall,
                                             fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            softWrap = false,
                                             color = MaterialTheme.colorScheme.primary
                                         )
                                     }
@@ -1611,7 +1621,10 @@ fun ProfileScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
                                         Icon(
                                             imageVector = Icons.Filled.AutoAwesome,
                                             contentDescription = null,
@@ -1622,14 +1635,19 @@ fun ProfileScreen(
                                         Text(
                                             text = "Starter Showcase Accounts",
                                             style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     }
+                                    Spacer(modifier = Modifier.width(8.dp))
                                     Text(
                                         text = "$showcasePostsCount posts · $showcaseStoriesCount stories",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.primary,
-                                        fontWeight = FontWeight.SemiBold
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                 }
                                 Row(
@@ -1644,7 +1662,10 @@ fun ProfileScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
                                         Icon(
                                             imageVector = Icons.Filled.Campaign,
                                             contentDescription = null,
@@ -1655,14 +1676,19 @@ fun ProfileScreen(
                                         Text(
                                             text = "Broadcast In-App Update & Notice",
                                             style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     }
+                                    Spacer(modifier = Modifier.width(8.dp))
                                     Text(
-                                        text = "v${monetizationConfig.latestVersionName}",
+                                        text = "v${monetizationConfig.latestVersionName.ifBlank { BuildConfig.VERSION_NAME }}",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.primary,
-                                        fontWeight = FontWeight.SemiBold
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                 }
                             }
@@ -2559,7 +2585,7 @@ private fun InAppAnnouncementSheet(
 ) {
     var title by remember(currentConfig) { mutableStateOf(currentConfig.announcementTitle) }
     var body by remember(currentConfig) { mutableStateOf(currentConfig.announcementBody) }
-    var latestVersion by remember(currentConfig) { mutableStateOf(currentConfig.latestVersionName.ifBlank { "2.2" }) }
+    var latestVersion by remember(currentConfig) { mutableStateOf(currentConfig.latestVersionName.ifBlank { BuildConfig.VERSION_NAME.ifBlank { "2.3" } }) }
     var releaseNotes by remember(currentConfig) { mutableStateOf(currentConfig.releaseNotes) }
 
     ModalBottomSheet(
@@ -2606,7 +2632,7 @@ private fun InAppAnnouncementSheet(
             OutlinedTextField(
                 value = latestVersion,
                 onValueChange = { latestVersion = it },
-                label = { Text("Release Label (e.g. 2.2)") },
+                label = { Text("Release Label (e.g. 2.3)") },
                 singleLine = true,
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth()

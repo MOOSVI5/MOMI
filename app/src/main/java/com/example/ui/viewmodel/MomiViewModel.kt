@@ -53,7 +53,9 @@ import com.example.util.AppUpdateChecker
 import com.example.util.AvailableAppUpdate
 import com.example.util.MediaAssets
 import com.example.util.StudioMusicCatalog
-import com.google.firebase.Timestamp
+import com.example.data.model.Timestamp
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -129,6 +131,9 @@ class MomiViewModel(
     private val _aiUiState = MutableStateFlow<AiAssistantUiState>(AiAssistantUiState.Idle)
     val aiUiState: StateFlow<AiAssistantUiState> = _aiUiState.asStateFlow()
 
+    private val _userGeminiApiKey = MutableStateFlow("")
+    val userGeminiApiKey: StateFlow<String> = _userGeminiApiKey.asStateFlow()
+
     private val _aiStatus = MutableStateFlow(aiAssistantRepository.currentConfigStatus())
     val aiStatus: StateFlow<GoogleAiStatus> = _aiStatus.asStateFlow()
 
@@ -183,6 +188,10 @@ class MomiViewModel(
     private val supaBookmarkedPostIds = MutableStateFlow<Set<String>>(emptySet())
     private val supaSeenStoryIds = MutableStateFlow<Set<String>>(emptySet())
     private val supaLikedCommentIds = MutableStateFlow<Set<String>>(emptySet())
+    private val supaPostLikersByPostId = MutableStateFlow<Map<String, List<String>>>(emptyMap())
+    val postLikersByPostId: StateFlow<Map<String, List<String>>> = supaPostLikersByPostId.asStateFlow()
+    private val supaPostViewersByPostId = MutableStateFlow<Map<String, List<String>>>(emptyMap())
+    val postViewersByPostId: StateFlow<Map<String, List<String>>> = supaPostViewersByPostId.asStateFlow()
     private val supaCommentsByPost = MutableStateFlow<Map<String, List<Comment>>>(emptyMap())
     private val supaChatMessagesByThread = MutableStateFlow<Map<String, List<ChatMessage>>>(emptyMap())
     private val supaLiveFrameByStream = MutableStateFlow<Map<String, LiveFrame>>(emptyMap())
@@ -409,14 +418,18 @@ class MomiViewModel(
 
     val profileState: StateFlow<StreamUiState<UserProfile?>> = combine(
         supaProfiles,
-        follows
-    ) { sProfiles, allFollows ->
-        val resolved = sProfiles.firstOrNull { it.userId == currentUserId }
-            ?: cachedProfile.value
+        follows,
+        cachedProfile
+    ) { sProfiles, allFollows, localCached ->
+        val cleanEmail = initialEmail?.trim()?.takeIf { it.isNotBlank() }
+        val matchedRemote = sProfiles.firstOrNull { it.userId == currentUserId }
+            ?: if (cleanEmail != null) sProfiles.firstOrNull { it.email.equals(cleanEmail, ignoreCase = true) } else null
+        val resolved = matchedRemote
+            ?: localCached
             ?: fallbackProfileBase()
         val hydrated = resolved.copy(
-            followersCount = allFollows.count { it.targetUid == currentUserId }.toLong(),
-            followingCount = allFollows.count { it.followerUid == currentUserId }.toLong()
+            followersCount = allFollows.count { it.targetUid == resolved.userId }.toLong(),
+            followingCount = allFollows.count { it.followerUid == resolved.userId }.toLong()
         )
         StreamUiState.Success(hydrated) as StreamUiState<UserProfile?>
     }
@@ -531,11 +544,12 @@ class MomiViewModel(
         optimisticPostInputs,
         supaHasLoadedFeed
     ) { base, (likeOverrides, bookmarkOverrides, pendingComments), hasLoaded ->
-        if (!hasLoaded && base.posts.isEmpty()) {
+        val sourcePosts = base.posts.ifEmpty { cachedRawPosts.value }
+        if (!hasLoaded && sourcePosts.isEmpty()) {
             return@combine StreamUiState.Loading
         }
         val profilesByUid = base.profiles.associateBy { it.userId }
-        val enriched = base.posts.map { post ->
+        val enriched = sourcePosts.map { post ->
             val authorProfile = profilesByUid[post.userId]
             val isShowcase = post.id.startsWith("showcase_")
             val serverLiked = base.liked.contains(post.id)
@@ -576,6 +590,10 @@ class MomiViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), StreamUiState.Loading)
 
+    val isFeedLoading: StateFlow<Boolean> = allPostsState
+        .map { it is StreamUiState.Loading }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), true)
+
     val allPosts: StateFlow<List<Post>> = allPostsState
         .map { state ->
             when (state) {
@@ -595,7 +613,12 @@ class MomiViewModel(
         seenStoryIds
     ) { rawStories, profiles, seen ->
         val profilesByUid = profiles.associateBy { it.userId }
+        val cutoffMs = System.currentTimeMillis() - MomiSupabaseSchema.STORY_TTL_MS
         rawStories
+            .filter { story ->
+                val createdMs = story.createdAt?.toDate()?.time
+                createdMs == null || createdMs >= cutoffMs
+            }
             .map { story ->
                 val p = profilesByUid[story.userId]
                 story.copy(
@@ -787,7 +810,7 @@ class MomiViewModel(
     private val _themePreference = MutableStateFlow(ThemePreference.SYSTEM)
     val themePreference: StateFlow<ThemePreference> = _themePreference.asStateFlow()
 
-    private val _colorScheme = MutableStateFlow(AppColorScheme.MIDNIGHT_SUNSET)
+    private val _colorScheme = MutableStateFlow(AppColorScheme.EMERALD_MAROON)
     val colorScheme: StateFlow<AppColorScheme> = _colorScheme.asStateFlow()
 
     private val _searchQuery = MutableStateFlow("")
@@ -1098,12 +1121,20 @@ class MomiViewModel(
             _isCheckingAiStatus.value = true
             _aiStatus.value = _aiStatus.value.copy(
                 state = GoogleAiHealthState.CHECKING,
-                label = "Checking Google AI..."
+                label = "Checking Momi AI..."
             )
-            val result = aiAssistantRepository.probeGoogleAiStatus()
+            val result = aiAssistantRepository.probeGoogleAiStatus(_userGeminiApiKey.value)
             _aiStatus.value = result
             _isCheckingAiStatus.value = false
         }
+    }
+
+    fun saveUserGeminiApiKey(context: Context, apiKey: String) {
+        val clean = apiKey.trim()
+        _userGeminiApiKey.value = clean
+        AppearancePrefs.saveUserGeminiApiKey(context, clean)
+        _aiStatus.value = aiAssistantRepository.currentConfigStatus(clean)
+        checkGoogleAiStatus(force = true)
     }
 
     fun sendAiPrompt(prompt: String) {
@@ -1122,7 +1153,11 @@ class MomiViewModel(
         _aiUiState.value = AiAssistantUiState.Generating
 
         viewModelScope.launch {
-            aiAssistantRepository.streamReply(clean, historyPairs).collect { chunkResult ->
+            aiAssistantRepository.streamReply(
+                userPrompt = clean,
+                history = historyPairs,
+                userOverrideKey = _userGeminiApiKey.value
+            ).collect { chunkResult ->
                 chunkResult.onSuccess { replyText ->
                     _aiMessages.update { turns ->
                         val existing = turns.any { it.id == botTurnId }
@@ -1134,37 +1169,14 @@ class MomiViewModel(
                             turns + AiAssistantTurn(id = botTurnId, isUser = false, text = replyText, isError = false)
                         }
                     }
-                    _aiStatus.value = GoogleAiStatus(
-                        state = GoogleAiHealthState.READY,
-                        label = "Google AI Connected",
-                        detail = "Live reply received from Google Gemini"
-                    )
+                    _aiStatus.value = aiAssistantRepository.currentConfigStatus(_userGeminiApiKey.value)
                 }.onFailure { err ->
-                    val msg = err.localizedMessage ?: "Google AI Assistant is temporarily unavailable."
+                    val fallback = aiAssistantRepository.generateBuiltInMomiReply(clean)
                     _aiMessages.update { turns ->
-                        val existing = turns.any { it.id == botTurnId }
-                        if (existing) {
-                            turns.map { turn ->
-                                if (turn.id == botTurnId && turn.text.isBlank()) {
-                                    turn.copy(text = msg, isError = true)
-                                } else {
-                                    turn
-                                }
-                            }
-                        } else {
-                            turns + AiAssistantTurn(id = botTurnId, isUser = false, text = msg, isError = true)
-                        }
+                        turns + AiAssistantTurn(id = botTurnId, isUser = false, text = fallback, isError = false)
                     }
-                    _aiStatus.value = GoogleAiStatus(
-                        state = if (msg.contains("GEMINI_API_KEY", ignoreCase = true)) {
-                            GoogleAiHealthState.MISSING_KEY
-                        } else {
-                            GoogleAiHealthState.ERROR
-                        },
-                        label = "Google AI Not Answering",
-                        detail = msg
-                    )
-                    _aiUiState.value = AiAssistantUiState.Error(msg)
+                    _aiUiState.value = AiAssistantUiState.Idle
+                    Log.w(TAG, "AI fallback used", err)
                 }
             }
             if (_aiUiState.value is AiAssistantUiState.Generating) {
@@ -1174,11 +1186,17 @@ class MomiViewModel(
     }
 
     fun loadAppearance(context: android.content.Context) {
-        _themePreference.value = AppearancePrefs.loadThemePreference(context)
-        _colorScheme.value = AppearancePrefs.loadColorScheme(context)
+        val appCtx = context.applicationContext
+        cachedAppContext = appCtx
+        _themePreference.value = AppearancePrefs.loadThemePreference(appCtx)
+        _colorScheme.value = AppearancePrefs.loadColorScheme(appCtx)
+        val savedGeminiKey = AppearancePrefs.loadUserGeminiApiKey(appCtx)
+        _userGeminiApiKey.value = savedGeminiKey
+        _aiStatus.value = aiAssistantRepository.currentConfigStatus(savedGeminiKey)
         if (isOwnerAccount) {
-            _adminViewEnabled.value = AppearancePrefs.loadAdminViewMode(context)
+            _adminViewEnabled.value = AppearancePrefs.loadAdminViewMode(appCtx)
         }
+        restoreLocalCaches(appCtx)
     }
 
     fun setThemePreference(context: android.content.Context, preference: ThemePreference) {
@@ -1220,6 +1238,15 @@ class MomiViewModel(
         optimisticPostLikes.update { it + (post.id to nextLiked) }
         viewModelScope.launch {
             supaLikedPostIds.update { if (nextLiked) it + post.id else it - post.id }
+            supaPostLikersByPostId.update { map ->
+                val cur = map[post.id].orEmpty().toMutableList()
+                if (nextLiked) {
+                    if (currentUserId !in cur) cur.add(0, currentUserId)
+                } else {
+                    cur.remove(currentUserId)
+                }
+                map + (post.id to cur)
+            }
             supaPosts.update { list -> list.map { if (it.id == post.id) it.copy(likesCount = targetCount) else it } }
             val res = supabaseBackend.setInteraction(currentUserId, "LIKED_POST", post.id, nextLiked)
                 .mapCatching { supabaseBackend.updatePostCounts(post.id, likesCount = targetCount).getOrThrow() }
@@ -1259,6 +1286,11 @@ class MomiViewModel(
         optimisticPostLikes.update { it + (post.id to true) }
         viewModelScope.launch {
             supaLikedPostIds.update { it + post.id }
+            supaPostLikersByPostId.update { map ->
+                val cur = map[post.id].orEmpty().toMutableList()
+                if (currentUserId !in cur) cur.add(0, currentUserId)
+                map + (post.id to cur)
+            }
             supaPosts.update { list -> list.map { if (it.id == post.id) it.copy(likesCount = targetCount) else it } }
             val res = supabaseBackend.setInteraction(currentUserId, "LIKED_POST", post.id, true)
                 .mapCatching { supabaseBackend.updatePostCounts(post.id, likesCount = targetCount).getOrThrow() }
@@ -1691,6 +1723,9 @@ class MomiViewModel(
                 else listOf(updated) + list
             }
             cachedProfile.value = updated
+            cachedAppContext?.let { ctx ->
+                AppearancePrefs.saveCachedProfileJson(ctx, updated.userId, serializeProfileToJson(updated))
+            }
             supabaseBackend.upsertProfile(updated)
                 .onSuccess {
                     _statusNotice.value = "Profile saved!"
@@ -2313,6 +2348,12 @@ class MomiViewModel(
         pendingMinViews[postId] = nextViews to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
         viewModelScope.launch {
             supaPosts.update { list -> list.map { if (it.id == postId) it.copy(viewsCount = maxOf(it.viewsCount, nextViews)) else it } }
+            supaPostViewersByPostId.update { map ->
+                val cur = map[postId].orEmpty().toMutableList()
+                if (currentUserId !in cur) cur.add(0, currentUserId)
+                map + (postId to cur)
+            }
+            supabaseBackend.setInteraction(currentUserId, "VIEWED_POST", postId, true)
             supabaseBackend.updatePostCounts(postId, viewsCount = nextViews)
         }
     }
@@ -2661,7 +2702,7 @@ class MomiViewModel(
                 .onSuccess {
                     supaMonetizationConfig.value = finalCfg
                     cachedMonetizationConfig.value = finalCfg
-                    _statusNotice.value = "Updated AdMob, Start.io & Monetag config for Android & Web!"
+                    _statusNotice.value = "Updated AdMob & Start.io config for Android & Web!"
                     onComplete(true)
                 }
                 .onFailure { err ->
@@ -3393,7 +3434,8 @@ class MomiViewModel(
                     username = base.username,
                     displayName = base.displayName,
                     avatarKey = base.avatarKey,
-                    avatarUrl = base.avatarUrl
+                    avatarUrl = base.avatarUrl,
+                    email = base.email
                 )
             }
             supabaseClient.fetchFeedBundle(currentUserId).onSuccess { bundle ->
@@ -3418,6 +3460,15 @@ class MomiViewModel(
                     }
                     supaProfiles.value = mergedProfiles
                     cachedProfiles.value = mergedProfiles
+                    val cleanEmail = initialEmail?.trim()?.takeIf { it.isNotBlank() }
+                    val ownRemote = mergedProfiles.firstOrNull { it.userId == currentUserId }
+                        ?: if (cleanEmail != null) mergedProfiles.firstOrNull { it.email.equals(cleanEmail, ignoreCase = true) } else null
+                    if (ownRemote != null) {
+                        cachedProfile.value = ownRemote
+                        cachedAppContext?.let { ctx ->
+                            AppearancePrefs.saveCachedProfileJson(ctx, currentUserId, serializeProfileToJson(ownRemote))
+                        }
+                    }
                 }
 
                 val mergedPosts = buildList {
@@ -3442,8 +3493,19 @@ class MomiViewModel(
                 }
                 supaPosts.value = mergedPosts
                 cachedRawPosts.value = mergedPosts
-                supaStories.value = bundle.stories
-                cachedStories.value = bundle.stories
+                cachedAppContext?.let { ctx ->
+                    if (mergedPosts.isNotEmpty()) {
+                        AppearancePrefs.saveCachedFeedPostsJson(ctx, serializePostsToJson(mergedPosts.take(25)))
+                    }
+                }
+
+                val cutoffStoryMs = nowMs - MomiSupabaseSchema.STORY_TTL_MS
+                val validStories = bundle.stories.filter { story ->
+                    val createdMs = story.createdAt?.toDate()?.time
+                    createdMs == null || createdMs >= cutoffStoryMs
+                }
+                supaStories.value = validStories
+                cachedStories.value = validStories
                 supaProducts.value = bundle.products
                 cachedProducts.value = bundle.products
                 supaMerchants.value = bundle.merchants
@@ -3467,6 +3529,8 @@ class MomiViewModel(
                     if (pair.first) nextLikes.add(postId) else nextLikes.remove(postId)
                 }
                 supaLikedPostIds.value = nextLikes
+                supaPostLikersByPostId.value = bundle.postLikersByPostId
+                supaPostViewersByPostId.value = bundle.postViewersByPostId
 
                 val nextBookmarks = bundle.bookmarkedPostIds.toMutableSet()
                 pendingBookmarks.forEach { (postId, pair) ->
@@ -3563,20 +3627,155 @@ class MomiViewModel(
     }
 
     private fun fallbackProfileBase(): UserProfile {
+        val cleanEmail = initialEmail?.trim()?.lowercase().orEmpty()
         val fallbackName = initialDisplayName?.trim()?.takeIf { it.isNotBlank() } ?: "Momi Creator"
-        val fallbackUsername = initialEmail?.substringBefore("@")
-            ?.lowercase()
-            ?.replace(Regex("[^a-z0-9._]"), "")
-            ?.takeIf { it.isNotBlank() }
+        val fallbackUsername = cleanEmail.substringBefore("@")
+            .lowercase()
+            .replace(Regex("[^a-z0-9._]"), "")
+            .takeIf { it.isNotBlank() }
             ?: "momi.creator"
         return UserProfile(
             id = currentUserId,
             userId = currentUserId,
             username = fallbackUsername.take(50),
+            email = cleanEmail,
             displayName = fallbackName.take(80),
             avatarKey = MediaAssets.avatarKeyForUid(currentUserId)
         )
     }
+
+    private fun restoreLocalCaches(context: Context) {
+        AppearancePrefs.loadCachedProfileJson(context, currentUserId)?.let { jsonStr ->
+            parseProfileFromJson(jsonStr)?.let { cachedProf ->
+                if (cachedProfile.value == null) {
+                    cachedProfile.value = cachedProf
+                }
+                if (supaProfiles.value.none { it.userId == cachedProf.userId }) {
+                    supaProfiles.update { listOf(cachedProf) + it }
+                }
+            }
+        }
+        AppearancePrefs.loadCachedFeedPostsJson(context)?.let { jsonStr ->
+            val restoredPosts = parsePostsFromJson(jsonStr)
+            if (restoredPosts.isNotEmpty() && cachedRawPosts.value.isEmpty()) {
+                cachedRawPosts.value = restoredPosts
+                if (supaPosts.value.isEmpty()) {
+                    supaPosts.value = restoredPosts
+                }
+            }
+        }
+    }
+
+    private fun serializeProfileToJson(p: UserProfile): String = JSONObject().apply {
+        put("userId", p.userId)
+        put("username", p.username)
+        put("email", p.email)
+        put("displayName", p.displayName)
+        put("category", p.category)
+        put("bio", p.bio)
+        put("website", p.website)
+        put("avatarKey", p.avatarKey)
+        put("avatarUrl", p.avatarUrl ?: "")
+        put("avatarData", p.avatarData?.take(60_000) ?: "")
+        put("isVerified", p.isVerified)
+        put("role", p.role)
+    }.toString()
+
+    private fun parseProfileFromJson(raw: String): UserProfile? = runCatching {
+        val o = JSONObject(raw)
+        val uid = o.optString("userId").takeIf { it.isNotBlank() } ?: return@runCatching null
+        UserProfile(
+            id = uid,
+            userId = uid,
+            username = o.optString("username", "momi.creator"),
+            email = o.optString("email"),
+            displayName = o.optString("displayName", "Momi Creator"),
+            category = o.optString("category"),
+            bio = o.optString("bio"),
+            website = o.optString("website"),
+            avatarKey = o.optString("avatarKey", "avatar_aria"),
+            avatarUrl = o.optString("avatarUrl").takeIf { it.isNotBlank() },
+            avatarData = o.optString("avatarData").takeIf { it.isNotBlank() },
+            isVerified = o.optBoolean("isVerified", false),
+            role = o.optString("role", MomiRoles.USER)
+        )
+    }.getOrNull()
+
+    private fun serializePostsToJson(posts: List<Post>): String {
+        val arr = JSONArray()
+        posts.forEach { p ->
+            arr.put(
+                JSONObject().apply {
+                    put("id", p.id)
+                    put("userId", p.userId)
+                    put("authorUsername", p.authorUsername)
+                    put("authorDisplayName", p.authorDisplayName)
+                    put("authorAvatarKey", p.authorAvatarKey)
+                    put("authorAvatarUrl", p.authorAvatarUrl ?: "")
+                    put("authorVerified", p.authorVerified)
+                    put("location", p.location)
+                    put("imageKey", p.imageKey)
+                    put("imageUrl", p.imageUrl ?: "")
+                    put("mediaType", p.mediaType)
+                    put("videoUrl", p.videoUrl ?: "")
+                    put("videoDurationMs", p.videoDurationMs)
+                    put("filterTag", p.filterTag)
+                    put("aspectRatio", p.aspectRatio)
+                    put("caption", p.caption)
+                    put("likesCount", p.likesCount)
+                    put("viewsCount", p.viewsCount)
+                    put("commentsCount", p.commentsCount)
+                    put("category", p.category)
+                    put("isReel", p.isReel)
+                    put("audioTitle", p.audioTitle)
+                    put("audioUrl", p.audioUrl ?: "")
+                    put("communityName", p.communityName)
+                    put("createdAtMs", p.createdAt?.toDate()?.time ?: 0L)
+                }
+            )
+        }
+        return arr.toString()
+    }
+
+    private fun parsePostsFromJson(raw: String): List<Post> = runCatching {
+        val arr = JSONArray(raw)
+        buildList {
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val id = o.optString("id").takeIf { it.isNotBlank() } ?: continue
+                val createdMs = o.optLong("createdAtMs", 0L)
+                add(
+                    Post(
+                        id = id,
+                        userId = o.optString("userId"),
+                        authorUsername = o.optString("authorUsername", "momi.creator"),
+                        authorDisplayName = o.optString("authorDisplayName", "Momi Creator"),
+                        authorAvatarKey = o.optString("authorAvatarKey", "avatar_aria"),
+                        authorAvatarUrl = o.optString("authorAvatarUrl").takeIf { it.isNotBlank() },
+                        authorVerified = o.optBoolean("authorVerified", false),
+                        location = o.optString("location"),
+                        imageKey = o.optString("imageKey", "img_post_coastal"),
+                        imageUrl = o.optString("imageUrl").takeIf { it.isNotBlank() },
+                        mediaType = o.optString("mediaType", "IMAGE"),
+                        videoUrl = o.optString("videoUrl").takeIf { it.isNotBlank() },
+                        videoDurationMs = o.optLong("videoDurationMs", 0L),
+                        filterTag = o.optString("filterTag", "NONE"),
+                        aspectRatio = o.optString("aspectRatio", "1:1"),
+                        caption = o.optString("caption"),
+                        likesCount = o.optLong("likesCount", 0L),
+                        viewsCount = o.optLong("viewsCount", 0L),
+                        commentsCount = o.optLong("commentsCount", 0L),
+                        category = o.optString("category", "For You"),
+                        isReel = o.optBoolean("isReel", false),
+                        audioTitle = o.optString("audioTitle"),
+                        audioUrl = o.optString("audioUrl").takeIf { it.isNotBlank() },
+                        communityName = o.optString("communityName"),
+                        createdAt = if (createdMs > 0L) Timestamp(java.util.Date(createdMs)) else null
+                    )
+                )
+            }
+        }
+    }.getOrDefault(emptyList())
 
     private fun isQuotaExceeded(error: Throwable?): Boolean {
         if (error == null) return false

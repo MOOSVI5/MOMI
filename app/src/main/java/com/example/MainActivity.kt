@@ -103,6 +103,7 @@ import com.example.ui.components.MomiAiAssistantBottomSheet
 import com.example.ui.components.MomiInterstitialController
 import com.example.ui.components.MomiStartIoSession
 import com.example.ui.components.PostBoostBottomSheet
+import com.example.ui.components.PostEngagersBottomSheet
 import com.example.ui.screens.CommunitiesScreen
 import com.example.ui.screens.CreatePostScreen
 import com.example.ui.screens.ExploreScreen
@@ -413,9 +414,14 @@ private fun LumaApp(
     val groups by viewModel.groups.collectAsStateWithLifecycle()
     val showcaseAccounts by viewModel.showcaseAccounts.collectAsStateWithLifecycle()
     val dismissedAnnouncementId by viewModel.dismissedAnnouncementId.collectAsStateWithLifecycle()
+    val isFeedLoading by viewModel.isFeedLoading.collectAsStateWithLifecycle()
+    val postLikersByPostId by viewModel.postLikersByPostId.collectAsStateWithLifecycle()
+    val postViewersByPostId by viewModel.postViewersByPostId.collectAsStateWithLifecycle()
+    val userGeminiApiKey by viewModel.userGeminiApiKey.collectAsStateWithLifecycle()
     var showAiAssistantSheet by remember { mutableStateOf(false) }
     var pendingReportTarget by remember { mutableStateOf<ReportDraftTarget?>(null) }
     var pendingBoostPost by remember { mutableStateOf<Post?>(null) }
+    var engagersSheetState by remember { mutableStateOf<Pair<Post, Int>?>(null) }
     var notificationSoundsEnabled by remember(context) {
         mutableStateOf(AppearancePrefs.isNotificationSoundsEnabled(context))
     }
@@ -865,12 +871,15 @@ private fun LumaApp(
                                 },
                                 isAdminViewActive = isAdminViewActive,
                                 monetizationConfig = monetizationConfig,
+                                isFeedLoading = isFeedLoading,
                                 dismissedAnnouncementId = dismissedAnnouncementId.orEmpty(),
                                 onDismissAnnouncement = viewModel::dismissInAppAnnouncement,
                                 onBoostPost = { post -> pendingBoostPost = post },
                                 onToggleRecommendedPost = { post, recommended ->
                                     viewModel.adminSetPostRecommended(post, recommended)
                                 },
+                                onLikesClick = { post -> engagersSheetState = post to 0 },
+                                onViewsClick = { post -> engagersSheetState = post to 1 },
                                 onAuthorClick = { userId, username, isShowcase ->
                                     openUserProfile(userId, username, isShowcase)
                                 }
@@ -1336,6 +1345,8 @@ private fun LumaApp(
                                         currentlyFollowing = it.isFollowingAuthor
                                     )
                                 },
+                                onLikesClick = { post -> engagersSheetState = post to 0 },
+                                onViewsClick = { post -> engagersSheetState = post to 1 },
                                 onAuthorClick = { uid, uname, isShowcase ->
                                     openUserProfile(uid, uname, isShowcase)
                                 }
@@ -1521,7 +1532,9 @@ private fun LumaApp(
                                 onBoostPost = { p -> pendingBoostPost = p },
                                 onToggleRecommendedPost = { p, recommended ->
                                     viewModel.adminSetPostRecommended(p, recommended)
-                                }
+                                },
+                                onLikesClick = { p -> engagersSheetState = p to 0 },
+                                onViewsClick = { p -> engagersSheetState = p to 1 }
                             )
                         }
 
@@ -1619,9 +1632,34 @@ private fun LumaApp(
             uiState = aiUiState,
             aiStatus = aiStatus,
             isCheckingStatus = isCheckingAiStatus,
+            savedApiKey = userGeminiApiKey,
+            onSaveApiKey = { key -> viewModel.saveUserGeminiApiKey(context, key) },
             onCheckStatus = { viewModel.checkGoogleAiStatus(force = true) },
             onSendPrompt = viewModel::sendAiPrompt,
             onDismiss = { showAiAssistantSheet = false }
+        )
+    }
+
+    engagersSheetState?.let { (targetPost, initialTab) ->
+        PostEngagersBottomSheet(
+            postAuthorUsername = targetPost.authorUsername,
+            initialTab = initialTab,
+            likerIds = postLikersByPostId[targetPost.id].orEmpty(),
+            viewerIds = postViewersByPostId[targetPost.id].orEmpty(),
+            totalLikesCount = targetPost.likesCount.toInt(),
+            totalViewsCount = targetPost.viewsCount.toInt(),
+            allProfiles = allCreators,
+            currentUserId = viewModel.currentUserId,
+            followingUids = followingUids,
+            onFollowToggle = { creator, isFollowing ->
+                viewModel.toggleFollow(
+                    targetUid = creator.userId,
+                    targetUsername = creator.username,
+                    currentlyFollowing = isFollowing
+                )
+            },
+            onUserClick = { uid -> openUserProfile(uid) },
+            onDismiss = { engagersSheetState = null }
         )
     }
 

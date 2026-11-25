@@ -70,7 +70,6 @@ import com.example.data.model.Story
 import com.example.data.model.UserProfile
 import kotlinx.coroutines.delay
 import com.example.ui.components.LumaAvatar
-import com.example.ui.components.MomiGamezopArcadeCard
 import com.example.ui.components.MomiInlineFeedAdCard
 import com.example.ui.components.PostCard
 import com.example.ui.components.rememberStartIoNativeAds
@@ -109,18 +108,22 @@ fun HomeScreen(
     onFollowCreator: (UserProfile, Boolean) -> Unit = { _, _ -> },
     onDeletePost: (Post) -> Unit,
     onReportPost: (Post) -> Unit = {},
+    isFeedLoading: Boolean = false,
     isAdminViewActive: Boolean = false,
     monetizationConfig: AdMonetizationConfig = AdMonetizationConfig(),
     dismissedAnnouncementId: String = "",
     onDismissAnnouncement: (String) -> Unit = {},
     onBoostPost: (Post) -> Unit = {},
     onToggleRecommendedPost: (Post, Boolean) -> Unit = { _, _ -> },
+    onLikesClick: (Post) -> Unit = {},
+    onViewsClick: (Post) -> Unit = {},
     onAuthorClick: (userId: String, username: String, isShowcase: Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var feedFilter by remember { mutableStateOf("For You") }
     var filterMenuOpen by remember { mutableStateOf(false) }
     var feedMuted by remember { mutableStateOf(true) }
+    var manualPlayingPostId by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
     val nativeAdState = rememberStartIoNativeAds(
         count = 3,
@@ -183,11 +186,19 @@ fun HomeScreen(
         }
     }
 
+    val resolvedActivePlayablePostId = manualPlayingPostId?.takeIf { playablePostIds.contains(it) } ?: activePlayablePostId
+
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) {
+            manualPlayingPostId = null
+        }
+    }
+
     val ownStory = remember(stories) { stories.firstOrNull { it.isOwnStory } }
     val friendStories = remember(stories) { stories.filter { !it.isOwnStory } }
 
-    LaunchedEffect(activePlayablePostId, displayedPosts) {
-        val targetId = activePlayablePostId ?: return@LaunchedEffect
+    LaunchedEffect(resolvedActivePlayablePostId, displayedPosts) {
+        val targetId = resolvedActivePlayablePostId ?: return@LaunchedEffect
         delay(900L)
         displayedPosts.firstOrNull { it.id == targetId }?.let(onPostViewed)
     }
@@ -626,11 +637,34 @@ fun HomeScreen(
                 }
             }
 
-            item(key = "gamezop_home_arcade") {
-                MomiGamezopArcadeCard(monetizationConfig = monetizationConfig)
-            }
-
-            if (displayedPosts.isEmpty()) {
+            if (displayedPosts.isEmpty() && isFeedLoading) {
+                item(key = "loading_feed") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 32.dp, vertical = 64.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(36.dp)
+                        )
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = "Syncing your Momi feed...",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Loading real-time posts, clips, and stories.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            } else if (displayedPosts.isEmpty()) {
                 item(key = "empty_feed") {
                     Column(
                         modifier = Modifier
@@ -646,14 +680,14 @@ fun HomeScreen(
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = if (feedFilter == "Saved") "No saved posts yet" else "Your feed is quiet",
+                            text = if (feedFilter == "Saved") "No saved posts yet" else "No posts yet",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onBackground
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Tap the bookmark icon on any post or share a new frame to see it here.",
+                            text = "Tap + below to share a photo or video clip with your followers.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -665,7 +699,7 @@ fun HomeScreen(
                         post = post,
                         isOwnPost = post.userId == profile?.userId && !post.id.startsWith("showcase_"),
                         isAdminViewActive = isAdminViewActive,
-                        isPlaybackActive = post.id == activePlayablePostId,
+                        isPlaybackActive = post.id == resolvedActivePlayablePostId,
                         externalMuted = feedMuted,
                         onMuteChange = { feedMuted = it },
                         onPostClick = { onPostClick(post) },
@@ -677,6 +711,9 @@ fun HomeScreen(
                         onShareClick = { onShareClick(post) },
                         onBookmarkToggle = { onBookmarkToggle(post) },
                         onFollowToggle = { onFollowToggle(post) },
+                        onLikesClick = { onLikesClick(post) },
+                        onViewsClick = { onViewsClick(post) },
+                        onRequestVideoPlay = { manualPlayingPostId = post.id },
                         onBoostPost = { onBoostPost(post) },
                         onToggleRecommended = { recommended -> onToggleRecommendedPost(post, recommended) },
                         onDeletePost = { onDeletePost(post) },

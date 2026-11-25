@@ -31,8 +31,10 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.HelpOutline
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -60,6 +62,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ai.GoogleAiHealthState
@@ -119,6 +122,8 @@ fun MomiAiAssistantBottomSheet(
     uiState: AiAssistantUiState,
     aiStatus: GoogleAiStatus,
     isCheckingStatus: Boolean,
+    savedApiKey: String = "",
+    onSaveApiKey: (String) -> Unit = {},
     onCheckStatus: () -> Unit,
     onSendPrompt: (String) -> Unit,
     onDismiss: () -> Unit
@@ -126,6 +131,8 @@ fun MomiAiAssistantBottomSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val listState = rememberLazyListState()
     var promptDraft by remember { mutableStateOf("") }
+    var showKeyEditor by remember { mutableStateOf(false) }
+    var apiKeyDraft by remember(savedApiKey) { mutableStateOf(savedApiKey) }
     val isBusy = uiState is AiAssistantUiState.Generating
 
     LaunchedEffect(Unit) {
@@ -154,7 +161,7 @@ fun MomiAiAssistantBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 400.dp, max = 600.dp)
+                .heightIn(min = 420.dp, max = 640.dp)
                 .imePadding()
         ) {
             Row(
@@ -187,7 +194,7 @@ fun MomiAiAssistantBottomSheet(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Google Gemini · Captions · Studio help",
+                            text = "Always-on Creator · Captions · Studio help",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -204,18 +211,18 @@ fun MomiAiAssistantBottomSheet(
                 }
             }
 
-            // Google AI Live Status Diagnostic Pill
+            // AI Status Diagnostic Pill + Optional Gemini Key Toggle
             val statusBg = when (aiStatus.state) {
                 GoogleAiHealthState.READY -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
                 GoogleAiHealthState.CHECKING -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
-                GoogleAiHealthState.MISSING_KEY,
-                GoogleAiHealthState.ERROR -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
+                GoogleAiHealthState.MISSING_KEY -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f)
+                GoogleAiHealthState.ERROR -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.65f)
             }
             val statusTint = when (aiStatus.state) {
                 GoogleAiHealthState.READY -> MaterialTheme.colorScheme.primary
                 GoogleAiHealthState.CHECKING -> MaterialTheme.colorScheme.onSurfaceVariant
-                GoogleAiHealthState.MISSING_KEY,
-                GoogleAiHealthState.ERROR -> MaterialTheme.colorScheme.error
+                GoogleAiHealthState.MISSING_KEY -> MaterialTheme.colorScheme.secondary
+                GoogleAiHealthState.ERROR -> MaterialTheme.colorScheme.tertiary
             }
             Surface(
                 shape = RoundedCornerShape(12.dp),
@@ -225,56 +232,103 @@ fun MomiAiAssistantBottomSheet(
                     .padding(horizontal = 14.dp, vertical = 4.dp)
                     .testTag("google_ai_status_card")
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (isCheckingStatus || aiStatus.state == GoogleAiHealthState.CHECKING) {
-                        CircularProgressIndicator(
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(16.dp),
-                            color = statusTint
-                        )
-                    } else {
-                        Icon(
-                            imageVector = if (aiStatus.state == GoogleAiHealthState.READY) {
-                                Icons.Filled.CheckCircle
-                            } else {
-                                Icons.Filled.ErrorOutline
-                            },
-                            contentDescription = aiStatus.label,
-                            tint = statusTint,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = if (isCheckingStatus) "Checking Google AI status..." else aiStatus.label,
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = aiStatus.detail,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    TextButton(
-                        onClick = onCheckStatus,
-                        enabled = !isCheckingStatus,
-                        modifier = Modifier.testTag("ai_check_status_button")
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Filled.Refresh,
-                            contentDescription = "Test Google AI status",
-                            modifier = Modifier.size(15.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Test", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        if (isCheckingStatus || aiStatus.state == GoogleAiHealthState.CHECKING) {
+                            CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(16.dp),
+                                color = statusTint
+                            )
+                        } else {
+                            Icon(
+                                imageVector = if (aiStatus.state == GoogleAiHealthState.READY) {
+                                    Icons.Filled.CheckCircle
+                                } else {
+                                    Icons.Filled.ErrorOutline
+                                },
+                                contentDescription = aiStatus.label,
+                                tint = statusTint,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (isCheckingStatus) "Checking AI status..." else aiStatus.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = aiStatus.detail,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        TextButton(
+                            onClick = { showKeyEditor = !showKeyEditor },
+                            modifier = Modifier.testTag("ai_key_toggle_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Key,
+                                contentDescription = "Configure Gemini Key",
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = if (savedApiKey.isNotBlank()) "Key" else "Add Key",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        TextButton(
+                            onClick = onCheckStatus,
+                            enabled = !isCheckingStatus,
+                            modifier = Modifier.testTag("ai_check_status_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Refresh,
+                                contentDescription = "Test AI status",
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Test", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    if (showKeyEditor) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = apiKeyDraft,
+                                onValueChange = { apiKeyDraft = it },
+                                placeholder = { Text("Paste optional Gemini API key...") },
+                                singleLine = true,
+                                visualTransformation = PasswordVisualTransformation(),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("ai_gemini_key_input")
+                            )
+                            Button(
+                                onClick = {
+                                    onSaveApiKey(apiKeyDraft.trim())
+                                    showKeyEditor = false
+                                    onCheckStatus()
+                                },
+                                modifier = Modifier.testTag("ai_save_key_button")
+                            ) {
+                                Text("Save")
+                            }
+                        }
                     }
                 }
             }
@@ -323,7 +377,7 @@ fun MomiAiAssistantBottomSheet(
                                 .padding(14.dp)
                         ) {
                             Text(
-                                text = "Ask me anything about creating posts, adding tracks, sending media messages, or selling on Momi Marketplace.",
+                                text = "Ask me anything about creating posts, growing Pages & Groups, playing/uploading clips, sending media messages, or selling on Momi Marketplace.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
@@ -374,7 +428,7 @@ fun MomiAiAssistantBottomSheet(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Answering with Google Gemini...",
+                                text = "Thinking...",
                                 fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -422,7 +476,7 @@ fun MomiAiAssistantBottomSheet(
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.Send,
                         contentDescription = "Send question",
-                        tint = if (canSend) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = if (canSend) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(20.dp)
                     )
                 }

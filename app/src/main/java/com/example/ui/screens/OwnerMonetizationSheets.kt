@@ -96,18 +96,9 @@ fun OwnerMonetizationAndPlaySheet(
     var admobMrecUnitId by remember(currentConfig) { mutableStateOf(currentConfig.admobMrecUnitId) }
     var admobInterstitialUnitId by remember(currentConfig) { mutableStateOf(currentConfig.admobInterstitialUnitId) }
     var startIoEnabled by remember(currentConfig) { mutableStateOf(currentConfig.startIoEnabled) }
-    var monetagEnabled by remember(currentConfig) { mutableStateOf(currentConfig.monetagEnabled) }
-    var monetagDirectLinkUrl by remember(currentConfig) { mutableStateOf(currentConfig.monetagDirectLinkUrl) }
-    var monetagWebZoneId by remember(currentConfig) { mutableStateOf(currentConfig.monetagWebZoneId) }
-    var monetagWebMetaTag by remember(currentConfig) { mutableStateOf(currentConfig.monetagWebMetaTag) }
     var partnerPromoTitle by remember(currentConfig) { mutableStateOf(currentConfig.partnerPromoTitle) }
     var partnerPromoSubtitle by remember(currentConfig) { mutableStateOf(currentConfig.partnerPromoSubtitle) }
     var partnerPromoCta by remember(currentConfig) { mutableStateOf(currentConfig.partnerPromoCta) }
-    var gamezopEnabled by remember(currentConfig) { mutableStateOf(currentConfig.gamezopEnabled) }
-    var gamezopPublisherId by remember(currentConfig) { mutableStateOf(currentConfig.gamezopPublisherId) }
-    var gamezopPortalUrl by remember(currentConfig) { mutableStateOf(currentConfig.gamezopPortalUrl) }
-    var gamezopBannerTitle by remember(currentConfig) { mutableStateOf(currentConfig.gamezopBannerTitle) }
-    var validationError by remember { mutableStateOf<String?>(null) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -137,7 +128,7 @@ fun OwnerMonetizationAndPlaySheet(
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Live AdMob, Start.io, Monetag & Gamezop synced across Android & Web.",
+                    text = "Live AdMob & Start.io monetization synced across Android & Web.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -162,8 +153,6 @@ fun OwnerMonetizationAndPlaySheet(
                         PlayInfoLine("Start.io SDK", "${adDiagnostics.sdkStatus} (App ID ${BuildConfig.STARTIO_APP_ID})")
                         PlayInfoLine("Start.io Feed / MREC", "${adDiagnostics.nativeStatus} | ${adDiagnostics.mrecStatus}")
                         PlayInfoLine("Start.io Banner", adDiagnostics.bannerStatus)
-                        PlayInfoLine("Monetag Direct / Web", adDiagnostics.monetagStatus)
-                        PlayInfoLine("Gamezop Arcade", adDiagnostics.gamezopStatus)
                         PlayInfoLine("Interstitial", adDiagnostics.interstitialStatus)
                         PlayInfoLine(
                             "Ad Serving Mode",
@@ -188,7 +177,7 @@ fun OwnerMonetizationAndPlaySheet(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Text(
-                            text = "Configure AdMob, Start.io, Monetag & Gamezop",
+                            text = "Configure AdMob & Start.io",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
@@ -248,145 +237,31 @@ fun OwnerMonetizationAndPlaySheet(
 
                         HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant)
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("Monetag Partner & Web (Tier 3)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
-                                Text("SmartLink Direct Partner Cards on Android + Web Tag", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Switch(checked = monetagEnabled, onCheckedChange = { monetagEnabled = it })
-                        }
-
-                        if (monetagEnabled) {
-                            OutlinedTextField(
-                                value = monetagDirectLinkUrl,
-                                onValueChange = {
-                                    monetagDirectLinkUrl = it
-                                    validationError = null
-                                },
-                                label = { Text("Monetag Direct SmartLink URL (https://...)") },
-                                placeholder = { Text("https://...") },
-                                singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("monetag_direct_link_input")
-                            )
-                            OutlinedTextField(
-                                value = monetagWebZoneId,
-                                onValueChange = { monetagWebZoneId = it },
-                                label = { Text("Monetag Web Zone ID (e.g. 1234567)") },
-                                singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("monetag_web_zone_input")
-                            )
-                            OutlinedTextField(
-                                value = monetagWebMetaTag,
-                                onValueChange = { monetagWebMetaTag = it },
-                                label = { Text("Monetag Web <meta name=\"monetag\"> Token") },
-                                singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("monetag_web_meta_input")
-                            )
-                            OutlinedTextField(
-                                value = partnerPromoTitle,
-                                onValueChange = { partnerPromoTitle = it },
-                                label = { Text("Partner Card Title") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            OutlinedTextField(
-                                value = partnerPromoSubtitle,
-                                onValueChange = { partnerPromoSubtitle = it },
-                                label = { Text("Partner Card Subtitle") },
-                                maxLines = 2,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            OutlinedTextField(
-                                value = partnerPromoCta,
-                                onValueChange = { partnerPromoCta = it },
-                                label = { Text("Partner CTA Label") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-
-                        HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant)
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("Gamezop Arcade (HTML5 Mini-Games)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
-                                Text("Instant browser games on Android & Web (no extra SDK bloat)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Switch(checked = gamezopEnabled, onCheckedChange = { gamezopEnabled = it })
-                        }
-
-                        if (gamezopEnabled) {
-                            OutlinedTextField(
-                                value = gamezopPublisherId,
-                                onValueChange = {
-                                    gamezopPublisherId = it
-                                    validationError = null
-                                },
-                                label = { Text("Gamezop Publisher / Property ID (e.g. 9012)") },
-                                singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("gamezop_pub_id_input")
-                            )
-                            OutlinedTextField(
-                                value = gamezopPortalUrl,
-                                onValueChange = {
-                                    gamezopPortalUrl = it
-                                    validationError = null
-                                },
-                                label = { Text("Gamezop Portal URL (optional https://...)") },
-                                placeholder = { Text("https://www.gamezop.com/?id=...") },
-                                singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("gamezop_portal_url_input")
-                            )
-                            OutlinedTextField(
-                                value = gamezopBannerTitle,
-                                onValueChange = { gamezopBannerTitle = it },
-                                label = { Text("Arcade Card Title") },
-                                singleLine = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("gamezop_title_input")
-                            )
-                        }
-
-                        if (!validationError.isNullOrBlank()) {
-                            Text(
-                                text = validationError.orEmpty(),
-                                color = MaterialTheme.colorScheme.error,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
+                        OutlinedTextField(
+                            value = partnerPromoTitle,
+                            onValueChange = { partnerPromoTitle = it },
+                            label = { Text("Creator Showcase Promo Title") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = partnerPromoSubtitle,
+                            onValueChange = { partnerPromoSubtitle = it },
+                            label = { Text("Creator Showcase Promo Subtitle") },
+                            maxLines = 2,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = partnerPromoCta,
+                            onValueChange = { partnerPromoCta = it },
+                            label = { Text("Creator Showcase CTA Label") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
 
                         Button(
                             enabled = !isSaving,
                             onClick = {
-                                val trimmedLink = monetagDirectLinkUrl.trim()
-                                if (trimmedLink.isNotEmpty() && !trimmedLink.startsWith("https://")) {
-                                    validationError = "Monetag Direct SmartLink URL must start with https://"
-                                    return@Button
-                                }
-                                val trimmedGamezopUrl = gamezopPortalUrl.trim()
-                                if (trimmedGamezopUrl.isNotEmpty() && !trimmedGamezopUrl.startsWith("https://")) {
-                                    validationError = "Gamezop Portal URL must start with https://"
-                                    return@Button
-                                }
                                 onSaveConfig(
                                     currentConfig.copy(
                                         admobEnabled = admobEnabled,
@@ -394,17 +269,9 @@ fun OwnerMonetizationAndPlaySheet(
                                         admobMrecUnitId = admobMrecUnitId.trim(),
                                         admobInterstitialUnitId = admobInterstitialUnitId.trim(),
                                         startIoEnabled = startIoEnabled,
-                                        monetagEnabled = monetagEnabled,
-                                        monetagDirectLinkUrl = trimmedLink,
-                                        monetagWebZoneId = monetagWebZoneId.trim(),
-                                        monetagWebMetaTag = monetagWebMetaTag.trim(),
                                         partnerPromoTitle = partnerPromoTitle.trim(),
                                         partnerPromoSubtitle = partnerPromoSubtitle.trim(),
-                                        partnerPromoCta = partnerPromoCta.trim(),
-                                        gamezopEnabled = gamezopEnabled,
-                                        gamezopPublisherId = gamezopPublisherId.trim(),
-                                        gamezopPortalUrl = trimmedGamezopUrl,
-                                        gamezopBannerTitle = gamezopBannerTitle.trim()
+                                        partnerPromoCta = partnerPromoCta.trim()
                                     )
                                 ) { ok ->
                                     if (ok) onDismiss()
@@ -596,16 +463,6 @@ fun OwnerMonetizationAndPlaySheet(
                         title = "Supabase Dashboard & SQL Editor",
                         subtitle = "Run supabase/schema.sql, enable Google Auth & copy URL + anon key",
                         onClick = { runCatching { uriHandler.openUri("https://supabase.com/dashboard") } }
-                    )
-                    PortalLinkButton(
-                        title = "Gamezop Business Portal",
-                        subtitle = "Copy your Gamezop Publisher ID or https:// Arcade Portal URL",
-                        onClick = { runCatching { uriHandler.openUri("https://business.gamezop.com") } }
-                    )
-                    PortalLinkButton(
-                        title = "Monetag Publisher Dashboard",
-                        subtitle = "Create Direct SmartLink & Web MultiTag / Meta token",
-                        onClick = { runCatching { uriHandler.openUri("https://publishers.monetag.com") } }
                     )
                     PortalLinkButton(
                         title = "Google AdMob Console",

@@ -1,10 +1,11 @@
-const CACHE_NAME = 'momi-web-v8-realtime-supabase';
+const CACHE_NAME = 'momi-web-v9-realtime-supabase';
 const SHELL_ASSETS = [
   './',
   './index.html',
   './styles.css',
   './app.js',
-  './firebase-config.js',
+  './studio.js',
+  './app-config.js',
   './supabase-client.js',
   './manifest.webmanifest',
   './version.json',
@@ -29,6 +30,12 @@ self.addEventListener('activate', (event) => {
     )
   );
   self.clients.claim();
+});
+
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
 });
 
 self.addEventListener('fetch', (event) => {

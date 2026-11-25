@@ -45,8 +45,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.Campaign
 import androidx.compose.material3.Button
@@ -74,7 +72,6 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -83,8 +80,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
 import com.example.BuildConfig
 import com.example.data.model.AdMonetizationConfig
-import com.example.data.model.normalizeMonetagDirectUrl
-import com.example.data.model.resolveGamezopLaunchUrl
 import com.google.android.gms.ads.AdListener
 import com.google.android.gms.ads.AdRequest
 import com.google.android.gms.ads.AdSize
@@ -121,8 +116,6 @@ data class StartIoDiagnostics(
     val nativeStatus: String = "Waiting for SDK",
     val mrecStatus: String = "Standby",
     val bannerStatus: String = "Waiting for SDK",
-    val monetagStatus: String = "Standby",
-    val gamezopStatus: String = "Standby",
     val interstitialStatus: String = "Waiting for SDK"
 )
 
@@ -163,14 +156,6 @@ object MomiStartIoSession {
         _diagnostics.update { it.copy(bannerStatus = status) }
     }
 
-    fun updateMonetag(status: String) {
-        _diagnostics.update { it.copy(monetagStatus = status) }
-    }
-
-    fun updateGamezop(status: String) {
-        _diagnostics.update { it.copy(gamezopStatus = status) }
-    }
-
     fun updateInterstitial(status: String) {
         _diagnostics.update { it.copy(interstitialStatus = status) }
     }
@@ -180,13 +165,6 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.findActivity()
     else -> null
-}
-
-private fun resolveMonetagDirectUrl(config: AdMonetizationConfig): String {
-    if (!config.monetagEnabled) return ""
-    val remote = normalizeMonetagDirectUrl(config.monetagDirectLinkUrl)
-    if (remote.isNotEmpty()) return remote
-    return normalizeMonetagDirectUrl(BuildConfig.MONETAG_DIRECT_LINK_URL)
 }
 
 private fun resolveAdMobBannerUnitId(config: AdMonetizationConfig): String =
@@ -712,7 +690,6 @@ fun MomiInlineFeedAdCard(
     }
 
     val admobUnitId = remember(monetizationConfig) { resolveAdMobMrecUnitId(monetizationConfig) }
-    val monetagUrl = remember(monetizationConfig) { resolveMonetagDirectUrl(monetizationConfig) }
 
     var admobExhausted by remember(monetizationConfig.admobEnabled, admobUnitId) {
         mutableStateOf(!monetizationConfig.admobEnabled || admobUnitId.isBlank())
@@ -750,15 +727,6 @@ fun MomiInlineFeedAdCard(
             modifier = modifier
         )
         return
-    }
-
-    // 3) Monetag Direct SmartLink Partner Showcase fallback (only if configured with an https:// URL)
-    if (monetagUrl.isNotEmpty()) {
-        MonetagPartnerShowcaseCard(
-            directLinkUrl = monetagUrl,
-            config = monetizationConfig,
-            modifier = modifier
-        )
     }
 }
 
@@ -1324,154 +1292,6 @@ private fun StartIoStandardFeedBannerCard(
     }
 }
 
-@Composable
-private fun MonetagPartnerShowcaseCard(
-    directLinkUrl: String,
-    config: AdMonetizationConfig,
-    modifier: Modifier = Modifier
-) {
-    val uriHandler = LocalUriHandler.current
-    LaunchedEffect(directLinkUrl) {
-        MomiStartIoSession.updateMonetag("Active Direct Partner Link")
-    }
-
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.background)
-            .testTag("monetag_partner_card")
-    ) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp)
-                .border(
-                    width = 0.75.dp,
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f),
-                    shape = RoundedCornerShape(16.dp)
-                )
-                .clip(RoundedCornerShape(16.dp))
-                .clickable { runCatching { uriHandler.openUri(directLinkUrl) } },
-            shape = RoundedCornerShape(16.dp),
-            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.28f),
-            tonalElevation = 1.dp
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                SponsoredHeaderRow(label = "Monetag Partner")
-                Text(
-                    text = config.partnerPromoTitle.ifBlank { "Featured Creator Deals & Partner Showcase" },
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = config.partnerPromoSubtitle.ifBlank {
-                        "Explore verified creator collections, partner offers & exclusive community perks."
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Button(
-                    onClick = { runCatching { uriHandler.openUri(directLinkUrl) } },
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp)
-                        .testTag("monetag_partner_cta")
-                ) {
-                    Text(
-                        text = config.partnerPromoCta.ifBlank { "Explore Partner" },
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.OpenInNew,
-                        contentDescription = "Open sponsored partner link",
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-            }
-        }
-        HorizontalDivider(
-            thickness = 0.5.dp,
-            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-        )
-    }
-}
-
-@Composable
-private fun MonetagCompactStrip(
-    directLinkUrl: String,
-    config: AdMonetizationConfig,
-    modifier: Modifier = Modifier
-) {
-    val uriHandler = LocalUriHandler.current
-    LaunchedEffect(directLinkUrl) {
-        MomiStartIoSession.updateMonetag("Active Direct Partner Strip")
-    }
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.32f),
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .clickable { runCatching { uriHandler.openUri(directLinkUrl) } }
-            .testTag("monetag_compact_strip")
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 48.dp)
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(MaterialTheme.colorScheme.secondaryContainer)
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                ) {
-                    Text(
-                        text = "Sponsored",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer
-                    )
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = config.partnerPromoTitle.ifBlank { "Explore Partner Showcase" },
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            Spacer(modifier = Modifier.width(8.dp))
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.OpenInNew,
-                contentDescription = "Open partner offer",
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(18.dp)
-            )
-        }
-    }
-}
 
 @Composable
 private fun SponsoredHeaderRow(label: String) {
@@ -1517,7 +1337,6 @@ fun MomiAnchoredExploreBanner(
 ) {
     val sdkReady by MomiStartIoSession.isInitialized.collectAsState()
     val admobUnitId = remember(monetizationConfig) { resolveAdMobBannerUnitId(monetizationConfig) }
-    val monetagUrl = remember(monetizationConfig) { resolveMonetagDirectUrl(monetizationConfig) }
 
     var admobExhausted by remember(monetizationConfig.admobEnabled, admobUnitId) {
         mutableStateOf(!monetizationConfig.admobEnabled || admobUnitId.isBlank())
@@ -1545,14 +1364,6 @@ fun MomiAnchoredExploreBanner(
         )
         return
     }
-
-    if (monetagUrl.isNotEmpty()) {
-        MonetagCompactStrip(
-            directLinkUrl = monetagUrl,
-            config = monetizationConfig,
-            modifier = modifier
-        )
-    }
 }
 
 @Composable
@@ -1562,7 +1373,6 @@ fun MomiMarketplaceBanner(
 ) {
     val sdkReady by MomiStartIoSession.isInitialized.collectAsState()
     val admobUnitId = remember(monetizationConfig) { resolveAdMobBannerUnitId(monetizationConfig) }
-    val monetagUrl = remember(monetizationConfig) { resolveMonetagDirectUrl(monetizationConfig) }
 
     var admobExhausted by remember(monetizationConfig.admobEnabled, admobUnitId) {
         mutableStateOf(!monetizationConfig.admobEnabled || admobUnitId.isBlank())
@@ -1589,14 +1399,6 @@ fun MomiMarketplaceBanner(
             modifier = modifier
         )
         return
-    }
-
-    if (monetagUrl.isNotEmpty()) {
-        MonetagCompactStrip(
-            directLinkUrl = monetagUrl,
-            config = monetizationConfig,
-            modifier = modifier
-        )
     }
 }
 
@@ -1778,132 +1580,4 @@ private fun StartIoAnchoredStrip(
     }
 }
 
-@Composable
-fun MomiGamezopArcadeCard(
-    monetizationConfig: AdMonetizationConfig = AdMonetizationConfig(),
-    modifier: Modifier = Modifier
-) {
-    val gamezopUrl = remember(monetizationConfig) { resolveGamezopLaunchUrl(monetizationConfig) }
-    if (gamezopUrl.isEmpty()) {
-        LaunchedEffect(monetizationConfig.gamezopEnabled) {
-            MomiStartIoSession.updateGamezop(
-                if (monetizationConfig.gamezopEnabled) "Enabled (needs Publisher ID or URL)" else "Standby"
-            )
-        }
-        return
-    }
-
-    val uriHandler = LocalUriHandler.current
-    LaunchedEffect(gamezopUrl) {
-        MomiStartIoSession.updateGamezop("Arcade Ready")
-    }
-
-    Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.38f),
-        tonalElevation = 1.dp,
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-            .border(
-                width = 0.75.dp,
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
-                shape = RoundedCornerShape(16.dp)
-            )
-            .clip(RoundedCornerShape(16.dp))
-            .clickable { runCatching { uriHandler.openUri(gamezopUrl) } }
-            .testTag("gamezop_arcade_card")
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(46.dp)
-                    .clip(RoundedCornerShape(13.dp))
-                    .background(
-                        Brush.linearGradient(
-                            colors = listOf(
-                                MaterialTheme.colorScheme.primary,
-                                MaterialTheme.colorScheme.tertiary
-                            )
-                        )
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.SportsEsports,
-                    contentDescription = "Gamezop Instant Games Arcade",
-                    tint = Color.White,
-                    modifier = Modifier.size(26.dp)
-                )
-            }
-
-            Column(modifier = Modifier.weight(1f)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(5.dp))
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            text = "Partner Games",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                    Text(
-                        text = "Gamezop",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Spacer(modifier = Modifier.height(3.dp))
-                Text(
-                    text = monetizationConfig.gamezopBannerTitle.ifBlank { "Momi Arcade · Play Instant Games" },
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = "Instant HTML5 mini-games · Play in browser",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            Button(
-                onClick = { runCatching { uriHandler.openUri(gamezopUrl) } },
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier
-                    .heightIn(min = 48.dp)
-                    .testTag("gamezop_play_button")
-            ) {
-                Text(
-                    text = "Play",
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.OpenInNew,
-                    contentDescription = "Launch Gamezop Arcade",
-                    modifier = Modifier.size(16.dp)
-                )
-            }
-        }
-    }
-}
 

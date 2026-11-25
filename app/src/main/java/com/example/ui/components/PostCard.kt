@@ -101,6 +101,9 @@ fun PostCard(
     onShareClick: () -> Unit,
     onBookmarkToggle: () -> Unit,
     onFollowToggle: () -> Unit,
+    onLikesClick: () -> Unit = {},
+    onViewsClick: () -> Unit = {},
+    onRequestVideoPlay: (() -> Unit)? = null,
     onBoostPost: (() -> Unit)? = null,
     onToggleRecommended: ((Boolean) -> Unit)? = null,
     onDeletePost: (() -> Unit)? = null,
@@ -467,6 +470,7 @@ fun PostCard(
                         showDoubleTapHeart = true
                         onDoubleTapLike()
                     },
+                    onRequestPlay = onRequestVideoPlay,
                     modifier = Modifier.fillMaxWidth().aspectRatio(mediaAspectRatio)
                 )
             } else if (imageFrames.size > 1) {
@@ -714,11 +718,20 @@ fun PostCard(
                     text = "${MediaAssets.formatCompactCount(post.likesCount)} likes",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onBackground
+                    color = MaterialTheme.colorScheme.onBackground,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onLikesClick)
+                        .padding(horizontal = 4.dp, vertical = 4.dp)
+                        .testTag("post_likes_${post.id}")
                 )
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.testTag("post_views_${post.id}")
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onViewsClick)
+                        .padding(horizontal = 4.dp, vertical = 4.dp)
+                        .testTag("post_views_${post.id}")
                 ) {
                     Icon(
                         imageVector = Icons.Outlined.Visibility,

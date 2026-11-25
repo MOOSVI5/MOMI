@@ -62,7 +62,6 @@ import com.example.data.model.Post
 import com.example.data.model.UserProfile
 import com.example.ui.components.LumaAvatar
 import com.example.ui.components.MomiAnchoredExploreBanner
-import com.example.ui.components.MomiGamezopArcadeCard
 import com.example.ui.components.PostMediaImage
 import com.example.util.MediaAssets
 
@@ -319,12 +318,6 @@ fun ExploreScreen(
                 verticalArrangement = Arrangement.spacedBy(2.dp),
                 contentPadding = PaddingValues(bottom = 16.dp)
             ) {
-                if (searchQuery.trim().isEmpty()) {
-                    item(key = "gamezop_explore_arcade") {
-                        MomiGamezopArcadeCard(monetizationConfig = monetizationConfig)
-                    }
-                }
-
                 if (searchQuery.trim().isEmpty() && discoverCreators.isNotEmpty()) {
                     item(key = "discover_creators_row") {
                         Column(

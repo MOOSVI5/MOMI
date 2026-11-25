@@ -30,7 +30,7 @@ import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
 import com.example.util.MediaAssets
 import com.example.util.StudioMusicCatalog
-import com.google.firebase.Timestamp
+import com.example.data.model.Timestamp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.URLEncoder
@@ -165,7 +165,7 @@ class SupabasePrimaryBackend(
     }
 
     suspend fun createPost(profile: UserProfile, post: Post): Result<Unit> {
-        client.ensureProfileExists(profile.userId, profile.username, profile.displayName, profile.avatarKey, profile.avatarUrl)
+        client.ensureProfileExists(profile.userId, profile.username, profile.displayName, profile.avatarKey, profile.avatarUrl, profile.email)
         return client.upsertRows("posts", listOf(MomiSupabaseSchema.toPostRow(post)), onConflict = "id").map { Unit }
     }
 
@@ -173,7 +173,7 @@ class SupabasePrimaryBackend(
         client.deleteRows("posts", "id=eq.${urlEncode(postId)}")
 
     suspend fun createStory(profile: UserProfile, story: Story): Result<Unit> {
-        client.ensureProfileExists(profile.userId, profile.username, profile.displayName, profile.avatarKey, profile.avatarUrl)
+        client.ensureProfileExists(profile.userId, profile.username, profile.displayName, profile.avatarKey, profile.avatarUrl, profile.email)
         return client.upsertRows("stories", listOf(MomiSupabaseSchema.toStoryRow(story)), onConflict = "id").map { Unit }
     }
 
@@ -343,7 +343,12 @@ class SupabasePrimaryBackend(
                 createdAt = now
             )
         }
-        client.upsertRows("profiles", personaProfiles.map(MomiSupabaseSchema::toProfileRow), onConflict = "user_id")
+        client.upsertRows(
+            "profiles",
+            personaProfiles.map(MomiSupabaseSchema::toProfileRow),
+            onConflict = "user_id",
+            ignoreDuplicates = true
+        )
 
         val posts = mutableListOf<Post>()
         val commentRows = mutableListOf<Map<String, Any?>>()

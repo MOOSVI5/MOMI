@@ -181,7 +181,8 @@ fun MomiVideoPlayer(
     muteButtonPadding: PaddingValues = PaddingValues(12.dp),
     contentScale: ContentScale = ContentScale.Fit,
     overrideVideoUri: Uri? = null,
-    onDoubleTap: (() -> Unit)? = null
+    onDoubleTap: (() -> Unit)? = null,
+    onRequestPlay: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -288,6 +289,7 @@ fun MomiVideoPlayer(
 
     val currentUserPaused by rememberUpdatedState(userPaused)
     val currentOnDoubleTap by rememberUpdatedState(onDoubleTap)
+    val currentOnRequestPlay by rememberUpdatedState(onRequestPlay)
 
     Box(
         modifier = modifier
@@ -306,7 +308,7 @@ fun MomiVideoPlayer(
                 .fillMaxSize()
                 .let { base ->
                     if (playableUri == null || playbackFailed || !isPlaying) {
-                        base.pointerInput(mediaId) {
+                        base.pointerInput(mediaId, isPlaying) {
                             detectTapGestures(
                                 onTap = {
                                     if (playbackFailed) {
@@ -314,6 +316,8 @@ fun MomiVideoPlayer(
                                         playbackFailed = false
                                         playableUri = null
                                         retryNonce++
+                                    } else if (!isPlaying) {
+                                        currentOnRequestPlay?.invoke()
                                     }
                                 },
                                 onDoubleTap = { currentOnDoubleTap?.invoke() }

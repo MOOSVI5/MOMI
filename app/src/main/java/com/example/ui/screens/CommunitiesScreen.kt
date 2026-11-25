@@ -97,6 +97,8 @@ fun CommunitiesScreen(
     onBookmarkToggle: (Post) -> Unit,
     onFollowAuthorToggle: (Post) -> Unit,
     onAuthorClick: (userId: String, username: String, isShowcase: Boolean) -> Unit,
+    onLikesClick: (Post) -> Unit = {},
+    onViewsClick: (Post) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     BackHandler(onBack = onBack)
@@ -326,6 +328,8 @@ fun CommunitiesScreen(
                             onShareClick = { onShareClick(post) },
                             onBookmarkToggle = { onBookmarkToggle(post) },
                             onFollowToggle = { onFollowAuthorToggle(post) },
+                            onLikesClick = { onLikesClick(post) },
+                            onViewsClick = { onViewsClick(post) },
                             onAuthorClick = {
                                 onAuthorClick(post.userId, post.authorUsername, post.id.startsWith("showcase_"))
                             }

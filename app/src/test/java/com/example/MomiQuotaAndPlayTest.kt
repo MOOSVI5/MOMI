@@ -3,8 +3,7 @@ package com.example
 import com.example.ai.GoogleAiHealthState
 import com.example.ai.MomiAiAssistantRepository
 import com.example.data.model.AdMonetizationConfig
-import com.example.data.repository.MomiFirestoreRepository
-import com.example.data.repository.WalletRepository
+import com.example.data.supabase.MomiSupabaseSchema
 import com.example.util.AppUpdateChecker
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -63,8 +62,8 @@ class MomiQuotaAndPlayTest {
     @Test
     fun supabaseConfigUpdateTriggersForNewerVersionOnlyOnNonPlayInstalls() {
         val newerCfg = AdMonetizationConfig(
-            latestVersionName = "2.3",
-            announcementTitle = "Momi v2.3 Live",
+            latestVersionName = "2.4",
+            announcementTitle = "Momi v2.4 Live",
             releaseNotes = "Faster Live Rooms"
         )
         val nonPlayUpdate = AppUpdateChecker.evaluateSupabaseConfigUpdate(
@@ -72,7 +71,7 @@ class MomiQuotaAndPlayTest {
             isPlayStoreInstall = false
         )
         assertNotNull(nonPlayUpdate)
-        assertEquals("2.3", nonPlayUpdate?.latestVersionName)
+        assertEquals("2.4", nonPlayUpdate?.latestVersionName)
 
         assertNull(
             AppUpdateChecker.evaluateSupabaseConfigUpdate(
@@ -116,23 +115,24 @@ class MomiQuotaAndPlayTest {
     @Test
     fun aiRepositoryConfigStatusReportsExplicitKeyState() {
         val status = MomiAiAssistantRepository().currentConfigStatus()
-        val expectedState = if (BuildConfig.GEMINI_API_KEY.isBlank() ||
+        val expectedModel = if (BuildConfig.GEMINI_API_KEY.isBlank() ||
             BuildConfig.GEMINI_API_KEY == "YOUR_GEMINI_API_KEY"
         ) {
-            GoogleAiHealthState.MISSING_KEY
+            "momi-assistant-local"
         } else {
-            GoogleAiHealthState.READY
+            "gemini-2.5-flash"
         }
-        assertEquals(expectedState, status.state)
+        assertEquals(GoogleAiHealthState.READY, status.state)
+        assertEquals(expectedModel, status.activeModel)
         assertTrue(status.label.isNotBlank())
         assertTrue(status.detail.isNotBlank())
     }
 
     @Test
-    fun firestoreQueryLimitsStayWithinSparkFriendlyBounds() {
-        assertTrue(MomiFirestoreRepository.POSTS_LIMIT <= 20L)
-        assertTrue(MomiFirestoreRepository.FOLLOWS_LIMIT <= 100L)
-        assertTrue(MomiFirestoreRepository.MARKERS_LIMIT <= 80L)
-        assertTrue(WalletRepository.TRANSACTIONS_LIMIT <= 25L)
+    fun supabaseQueryLimitsStayWithinBoundedLimits() {
+        assertTrue(MomiSupabaseSchema.POSTS_LIMIT <= 20L)
+        assertTrue(MomiSupabaseSchema.FOLLOWS_LIMIT <= 100L)
+        assertTrue(MomiSupabaseSchema.MARKERS_LIMIT <= 80L)
+        assertTrue(MomiSupabaseSchema.TRANSACTIONS_LIMIT <= 25L)
     }
 }

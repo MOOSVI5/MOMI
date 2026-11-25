@@ -1,11 +1,11 @@
 {
-  "versionName": "2.2",
-  "versionCode": 13,
+  "versionName": "2.3",
+  "versionCode": 14,
   "buildNumber": 0,
   "commitSha": "local",
-  "releasedAt": "2026-11-24T00:00:00Z",
-  "releaseTitle": "Momi v2.2",
-  "releaseNotes": "Google AI status diagnostics & model fallback, automatic push-to-app version updates, Pages & Groups, and custom metallic icon.",
+  "releasedAt": "2026-11-25T00:00:00Z",
+  "releaseTitle": "Momi v2.3",
+  "releaseNotes": "Single profile per email, 6-digit email verification, clickable likes & views lists, 24h stories, 3 signature color styles, interactive Momi AI, and full Owner Showcase controls.",
   "apkUrl": "https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-latest.apk",
   "releasesUrl": "https://github.com/MOOSVI5/MOMI/releases/latest",
   "webUrl": "https://moosvi5.github.io/MOMI/"

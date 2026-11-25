@@ -62,6 +62,8 @@ import androidx.credentials.CredentialManager
 import com.example.auth.attemptAutoSignIn
 import com.example.auth.onEmailPasswordAuthClicked
 import com.example.auth.onGoogleSignInClicked
+import com.example.auth.onResendEmailOtpClicked
+import com.example.auth.onVerifyEmailOtpClicked
 import com.example.ui.theme.LocalMomiBrandGradient
 import com.example.ui.theme.LumaScriptFamily
 
@@ -84,6 +86,8 @@ fun SignInScreen(
     var emailInput by remember { mutableStateOf("") }
     var passwordInput by remember { mutableStateOf("") }
     var displayNameInput by remember { mutableStateOf("") }
+    var pendingVerificationEmail by remember { mutableStateOf<String?>(null) }
+    var otpCodeInput by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
         attemptAutoSignIn(
@@ -291,109 +295,194 @@ fun SignInScreen(
                             .padding(top = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        if (isSignUpMode) {
+                        val verifyEmail = pendingVerificationEmail
+                        if (verifyEmail != null) {
+                            Text(
+                                text = "Enter the 6-digit verification code sent to $verifyEmail.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                             OutlinedTextField(
-                                value = displayNameInput,
-                                onValueChange = { displayNameInput = it },
-                                label = { Text("Display Name") },
-                                leadingIcon = { Icon(Icons.Filled.Person, contentDescription = null) },
+                                value = otpCodeInput,
+                                onValueChange = { otpCodeInput = it.filter { ch -> ch.isDigit() }.take(8) },
+                                label = { Text("6-Digit Verification Code") },
+                                leadingIcon = { Icon(Icons.Filled.VerifiedUser, contentDescription = null) },
                                 singleLine = true,
-                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Number,
+                                    imeAction = ImeAction.Done
+                                ),
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .testTag("display_name_input")
+                                    .testTag("otp_code_input")
                             )
-                        }
-
-                        OutlinedTextField(
-                            value = emailInput,
-                            onValueChange = { emailInput = it },
-                            label = { Text("Email") },
-                            leadingIcon = { Icon(Icons.Filled.Email, contentDescription = null) },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(
-                                keyboardType = KeyboardType.Email,
-                                imeAction = ImeAction.Next
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("email_input")
-                        )
-
-                        OutlinedTextField(
-                            value = passwordInput,
-                            onValueChange = { passwordInput = it },
-                            label = { Text("Password (6+ chars)") },
-                            leadingIcon = { Icon(Icons.Filled.Lock, contentDescription = null) },
-                            singleLine = true,
-                            visualTransformation = PasswordVisualTransformation(),
-                            keyboardOptions = KeyboardOptions(
-                                keyboardType = KeyboardType.Password,
-                                imeAction = ImeAction.Done
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("password_input")
-                        )
-
-                        OutlinedButton(
-                            onClick = {
-                                errorMessage = null
-                                infoMessage = null
-                                isSigningIn = true
-                                onEmailPasswordAuthClicked(
-                                    context = context,
-                                    email = emailInput,
-                                    password = passwordInput,
-                                    displayName = displayNameInput,
-                                    isSignUp = isSignUpMode,
-                                    onAuthSuccess = {
-                                        isSigningIn = false
-                                        onAuthSuccess()
-                                    },
-                                    onConfirmationSent = { msg ->
-                                        isSigningIn = false
-                                        infoMessage = msg
-                                        isSignUpMode = false
-                                    },
-                                    onAuthError = { msg ->
-                                        isSigningIn = false
-                                        errorMessage = msg
-                                    },
-                                    scope = coroutineScope
-                                )
-                            },
-                            enabled = !isSigningIn && !isAutoChecking,
-                            shape = RoundedCornerShape(16.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp)
-                                .testTag("email_sign_in_button")
-                        ) {
-                            Text(
-                                text = if (isSignUpMode) "Create Supabase Account" else "Sign In with Email",
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-
-                        TextButton(
-                            onClick = {
-                                isSignUpMode = !isSignUpMode
-                                errorMessage = null
-                                infoMessage = null
-                            },
-                            modifier = Modifier
-                                .align(Alignment.CenterHorizontally)
-                                .testTag("switch_auth_mode_button")
-                        ) {
-                            Text(
-                                text = if (isSignUpMode) {
-                                    "Already have an account? Sign in"
-                                } else {
-                                    "New to Momi? Create an account"
+                            Button(
+                                onClick = {
+                                    errorMessage = null
+                                    infoMessage = null
+                                    isSigningIn = true
+                                    onVerifyEmailOtpClicked(
+                                        context = context,
+                                        email = verifyEmail,
+                                        otpCode = otpCodeInput,
+                                        displayName = displayNameInput,
+                                        onAuthSuccess = {
+                                            isSigningIn = false
+                                            pendingVerificationEmail = null
+                                            onAuthSuccess()
+                                        },
+                                        onAuthError = { msg ->
+                                            isSigningIn = false
+                                            errorMessage = msg
+                                        },
+                                        scope = coroutineScope
+                                    )
                                 },
-                                style = MaterialTheme.typography.bodySmall
+                                enabled = !isSigningIn && otpCodeInput.length >= 6,
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("verify_otp_button")
+                            ) {
+                                Text("Verify Email & Continue", fontWeight = FontWeight.SemiBold)
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                TextButton(
+                                    onClick = {
+                                        errorMessage = null
+                                        infoMessage = null
+                                        onResendEmailOtpClicked(
+                                            email = verifyEmail,
+                                            onSent = { msg -> infoMessage = msg },
+                                            onAuthError = { msg -> errorMessage = msg },
+                                            scope = coroutineScope
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("resend_otp_button")
+                                ) {
+                                    Text("Resend Code", style = MaterialTheme.typography.bodySmall)
+                                }
+                                TextButton(
+                                    onClick = {
+                                        pendingVerificationEmail = null
+                                        otpCodeInput = ""
+                                        isSignUpMode = false
+                                        errorMessage = null
+                                    }
+                                ) {
+                                    Text("Back to Sign In", style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        } else {
+                            if (isSignUpMode) {
+                                OutlinedTextField(
+                                    value = displayNameInput,
+                                    onValueChange = { displayNameInput = it },
+                                    label = { Text("Display Name") },
+                                    leadingIcon = { Icon(Icons.Filled.Person, contentDescription = null) },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("display_name_input")
+                                )
+                            }
+
+                            OutlinedTextField(
+                                value = emailInput,
+                                onValueChange = { emailInput = it },
+                                label = { Text("Email") },
+                                leadingIcon = { Icon(Icons.Filled.Email, contentDescription = null) },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Email,
+                                    imeAction = ImeAction.Next
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("email_input")
                             )
+
+                            OutlinedTextField(
+                                value = passwordInput,
+                                onValueChange = { passwordInput = it },
+                                label = { Text("Password (6+ chars)") },
+                                leadingIcon = { Icon(Icons.Filled.Lock, contentDescription = null) },
+                                singleLine = true,
+                                visualTransformation = PasswordVisualTransformation(),
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Password,
+                                    imeAction = ImeAction.Done
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("password_input")
+                            )
+
+                            OutlinedButton(
+                                onClick = {
+                                    errorMessage = null
+                                    infoMessage = null
+                                    isSigningIn = true
+                                    onEmailPasswordAuthClicked(
+                                        context = context,
+                                        email = emailInput,
+                                        password = passwordInput,
+                                        displayName = displayNameInput,
+                                        isSignUp = isSignUpMode,
+                                        onAuthSuccess = {
+                                            isSigningIn = false
+                                            onAuthSuccess()
+                                        },
+                                        onConfirmationSent = { sentEmail ->
+                                            isSigningIn = false
+                                            pendingVerificationEmail = sentEmail
+                                            otpCodeInput = ""
+                                            infoMessage = "Verification code sent to $sentEmail. Enter the 6-digit code below."
+                                        },
+                                        onAuthError = { msg ->
+                                            isSigningIn = false
+                                            errorMessage = msg
+                                        },
+                                        scope = coroutineScope
+                                    )
+                                },
+                                enabled = !isSigningIn && !isAutoChecking,
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("email_sign_in_button")
+                            ) {
+                                Text(
+                                    text = if (isSignUpMode) "Create Momi Account" else "Sign In with Email",
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+
+                            TextButton(
+                                onClick = {
+                                    isSignUpMode = !isSignUpMode
+                                    errorMessage = null
+                                    infoMessage = null
+                                },
+                                modifier = Modifier
+                                    .align(Alignment.CenterHorizontally)
+                                    .testTag("switch_auth_mode_button")
+                            ) {
+                                Text(
+                                    text = if (isSignUpMode) {
+                                        "Already have an account? Sign in"
+                                    } else {
+                                        "New to Momi? Create an account"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
                         }
                     }
                 }

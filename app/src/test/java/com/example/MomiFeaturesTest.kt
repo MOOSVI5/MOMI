@@ -5,7 +5,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.model.Post
-import com.example.data.repository.MomiFirestoreRepository
+import com.example.data.model.ShowcaseCatalog
 import com.example.ui.theme.AppearancePrefs
 import com.example.util.MediaAssets
 import com.example.util.MomiAlertNotifier
@@ -113,10 +113,10 @@ class MomiFeaturesTest {
     @Test
     fun showcasePersonas_satisfy_filter_aspectRatio_and_schema_constraints() {
         val validFilterTags = MediaAssets.postFilterOptions.map { it.tag }.toSet()
-        assertEquals(6, MomiFirestoreRepository.SHOWCASE_PERSONAS.size)
-        assertTrue(MomiFirestoreRepository.SHOWCASE_COMMENTS.size >= 4)
+        assertEquals(6, ShowcaseCatalog.PERSONAS.size)
+        assertTrue(ShowcaseCatalog.COMMENTS.size >= 4)
 
-        MomiFirestoreRepository.SHOWCASE_PERSONAS.forEach { persona ->
+        ShowcaseCatalog.PERSONAS.forEach { persona ->
             assertTrue(persona.username.isNotBlank())
             assertTrue(persona.displayName.isNotBlank())
             assertTrue(validFilterTags.contains(persona.filterTag))

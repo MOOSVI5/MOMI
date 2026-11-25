@@ -20,9 +20,9 @@ import com.example.data.model.NotificationItem
 import com.example.data.model.Post
 import com.example.data.model.ShowcaseAccount
 import com.example.data.model.Story
+import com.example.data.model.Timestamp
 import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
-import com.google.firebase.Timestamp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -76,9 +76,12 @@ data class SupabaseFeedBundle(
     val liveStreams: List<LiveStream> = emptyList(),
     val follows: List<FollowEdge> = emptyList(),
     val likedPostIds: Set<String> = emptySet(),
+    val viewedPostIds: Set<String> = emptySet(),
     val bookmarkedPostIds: Set<String> = emptySet(),
     val seenStoryIds: Set<String> = emptySet(),
     val likedCommentIds: Set<String> = emptySet(),
+    val postLikersByPostId: Map<String, List<String>> = emptyMap(),
+    val postViewersByPostId: Map<String, List<String>> = emptyMap(),
     val notifications: List<NotificationItem> = emptyList(),
     val threads: List<MessageThread> = emptyList(),
     val orders: List<MarketOrder> = emptyList(),
@@ -94,6 +97,12 @@ data class SupabaseFeedBundle(
 )
 
 object MomiSupabaseSchema {
+    const val STORY_TTL_MS = 86_400_000L
+    const val POSTS_LIMIT = 20L
+    const val FOLLOWS_LIMIT = 100L
+    const val MARKERS_LIMIT = 80L
+    const val TRANSACTIONS_LIMIT = 25L
+
     val TABLES: Set<String> = setOf(
         "profiles",
         "posts",
@@ -259,6 +268,7 @@ object MomiSupabaseSchema {
         return linkedMapOf(
             "user_id" to uid,
             "username" to profile.username.ifBlank { "momi.${uid.take(6)}" }.take(50),
+            "email" to profile.email.trim().lowercase(Locale.US).take(160),
             "display_name" to profile.displayName.ifBlank { "Momi Creator" }.take(80),
             "category" to profile.category.take(80),
             "bio" to profile.bio.take(300),
@@ -575,17 +585,9 @@ object MomiSupabaseSchema {
         "admob_mrec_unit_id" to config.admobMrecUnitId.take(120),
         "admob_interstitial_unit_id" to config.admobInterstitialUnitId.take(120),
         "start_io_enabled" to config.startIoEnabled,
-        "monetag_enabled" to config.monetagEnabled,
-        "monetag_direct_link_url" to config.monetagDirectLinkUrl.take(300),
-        "monetag_web_zone_id" to config.monetagWebZoneId.take(40),
-        "monetag_web_meta_tag" to config.monetagWebMetaTag.take(120),
         "partner_promo_title" to config.partnerPromoTitle.take(80),
         "partner_promo_subtitle" to config.partnerPromoSubtitle.take(180),
         "partner_promo_cta" to config.partnerPromoCta.take(40),
-        "gamezop_enabled" to config.gamezopEnabled,
-        "gamezop_portal_url" to config.gamezopPortalUrl.take(300),
-        "gamezop_publisher_id" to config.gamezopPublisherId.take(40),
-        "gamezop_banner_title" to config.gamezopBannerTitle.take(80),
         "announcement_id" to config.announcementId.take(80),
         "announcement_title" to config.announcementTitle.take(120),
         "announcement_body" to config.announcementBody.take(500),
@@ -1058,6 +1060,87 @@ class MomiSupabaseClient(
         }
     }
 
+    suspend fun verifyEmailSignupOtp(
+        email: String,
+        otpCode: String,
+        displayName: String? = null
+    ): Result<SupabaseAuthSession> = withContext(Dispatchers.IO) {
+        if (!isConfigured()) {
+            return@withContext Result.failure(IllegalStateException("Supabase is not configured yet."))
+        }
+        val cleanEmail = email.trim()
+        val cleanCode = otpCode.trim().filter { it.isDigit() || it.isLetter() }
+        if (cleanEmail.isBlank() || cleanCode.length < 6) {
+            return@withContext Result.failure(IllegalArgumentException("Enter the 6-digit verification code sent to $cleanEmail."))
+        }
+        val cleanName = displayName?.trim()?.takeIf { it.isNotEmpty() }
+
+        fun sendVerify(otpType: String): Pair<Int, String> {
+            val payload = MomiSupabaseSchema.toJsonString(
+                linkedMapOf(
+                    "type" to otpType,
+                    "email" to cleanEmail,
+                    "token" to cleanCode
+                )
+            )
+            val request = Request.Builder()
+                .url("$baseUrl/auth/v1/verify")
+                .header("apikey", anonKey)
+                .header("Content-Type", "application/json")
+                .post(payload.toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                return response.code to response.body?.string().orEmpty()
+            }
+        }
+
+        runCatching {
+            var (code, rawBody) = sendVerify("signup")
+            if (code !in 200..299) {
+                val fallback = sendVerify("email")
+                if (fallback.first in 200..299) {
+                    code = fallback.first
+                    rawBody = fallback.second
+                }
+            }
+            if (code !in 200..299) {
+                val detail = extractSupabaseAuthError(rawBody, "Invalid or expired verification code (HTTP $code)")
+                error(detail)
+            }
+            val session = parseAuthSession(JSONObject(rawBody), displayNameHint = cleanName)
+            setActiveSessionAndPersist(session)
+            session
+        }
+    }
+
+    suspend fun resendEmailSignupOtp(email: String): Result<Unit> = withContext(Dispatchers.IO) {
+        if (!isConfigured()) {
+            return@withContext Result.failure(IllegalStateException("Supabase is not configured yet."))
+        }
+        val cleanEmail = email.trim()
+        if (cleanEmail.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Enter your email address first."))
+        }
+        val payload = MomiSupabaseSchema.toJsonString(
+            linkedMapOf("type" to "signup", "email" to cleanEmail)
+        )
+        val request = Request.Builder()
+            .url("$baseUrl/auth/v1/resend")
+            .header("apikey", anonKey)
+            .header("Content-Type", "application/json")
+            .post(payload.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+        runCatching {
+            httpClient.newCall(request).execute().use { response ->
+                val rawBody = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    error(extractSupabaseAuthError(rawBody, "Could not resend code (HTTP ${response.code})"))
+                }
+                Unit
+            }
+        }
+    }
+
     suspend fun refreshSession(refreshToken: String): Result<SupabaseAuthSession> =
         withContext(Dispatchers.IO) {
             if (!isConfigured() || refreshToken.isBlank()) {
@@ -1102,7 +1185,8 @@ class MomiSupabaseClient(
         table: String,
         rows: List<Map<String, Any?>>,
         accessToken: String? = null,
-        onConflict: String? = null
+        onConflict: String? = null,
+        ignoreDuplicates: Boolean = false
     ): Result<Int> = withContext(Dispatchers.IO) {
         if (!isConfigured()) {
             return@withContext Result.failure(IllegalStateException("Supabase is not configured yet."))
@@ -1117,6 +1201,12 @@ class MomiSupabaseClient(
             "?on_conflict=${URLEncoder.encode(col, "UTF-8")}"
         }.orEmpty()
 
+        val preferHeader = if (ignoreDuplicates) {
+            "resolution=ignore-duplicates,return=minimal"
+        } else {
+            "resolution=merge-duplicates,return=minimal"
+        }
+
         val jsonBody = MomiSupabaseSchema.toJsonString(rows)
         var token = ensureFreshAccessToken(explicit = accessToken)
 
@@ -1124,7 +1214,7 @@ class MomiSupabaseClient(
             val requestBuilder = Request.Builder()
                 .url("$baseUrl/rest/v1/$table$conflictQuery")
                 .header("Content-Type", "application/json")
-                .header("Prefer", "resolution=merge-duplicates,return=minimal")
+                .header("Prefer", preferHeader)
                 .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
             MomiSupabaseSchema.buildAuthHeaders(anonKey, bearerToken).forEach { (k, v) ->
                 requestBuilder.header(k, v)
@@ -1329,18 +1419,55 @@ class MomiSupabaseClient(
         }
     }
 
+    suspend fun fetchProfileByUserId(userId: String): UserProfile? = withContext(Dispatchers.IO) {
+        if (!isConfigured() || userId.isBlank()) return@withContext null
+        val encUid = URLEncoder.encode(userId.trim(), "UTF-8")
+        runCatching {
+            parseProfiles(fetchJsonArray("$baseUrl/rest/v1/profiles?select=*&user_id=eq.$encUid&limit=1")).firstOrNull()
+        }.getOrNull()
+    }
+
+    suspend fun fetchProfileByEmail(email: String): UserProfile? = withContext(Dispatchers.IO) {
+        val cleanEmail = email.trim().lowercase(Locale.US)
+        if (!isConfigured() || cleanEmail.isBlank()) return@withContext null
+        val encEmail = URLEncoder.encode(cleanEmail, "UTF-8")
+        runCatching {
+            parseProfiles(fetchJsonArray("$baseUrl/rest/v1/profiles?select=*&email=ilike.$encEmail&limit=1")).firstOrNull()
+        }.getOrNull()
+    }
+
     suspend fun ensureProfileExists(
         userId: String,
         username: String,
         displayName: String = username,
         avatarKey: String = "avatar_aria",
-        avatarUrl: String? = null
+        avatarUrl: String? = null,
+        email: String = ""
     ): Result<Unit> {
         if (!isConfigured() || userId.isBlank()) return Result.success(Unit)
+        // Critical: never overwrite an already-customized remote profile with fallback defaults!
+        val existing = fetchProfileByUserId(userId)
+        if (existing != null) {
+            val cleanEmail = email.trim().lowercase(Locale.US)
+            if (cleanEmail.isNotBlank() && existing.email.isBlank()) {
+                runCatching {
+                    patchRows("profiles", "user_id=eq.${URLEncoder.encode(userId, "UTF-8")}", mapOf("email" to cleanEmail))
+                }
+            }
+            return Result.success(Unit)
+        }
+        val cleanEmail = email.trim().lowercase(Locale.US)
+        if (cleanEmail.isNotBlank()) {
+            val existingByEmail = fetchProfileByEmail(cleanEmail)
+            if (existingByEmail != null) {
+                return Result.success(Unit)
+            }
+        }
         val stub = UserProfile(
             id = userId,
             userId = userId,
             username = username.ifBlank { "momi.${userId.take(6)}" },
+            email = cleanEmail,
             displayName = displayName.ifBlank { "Momi Creator" },
             avatarKey = avatarKey.ifBlank { "avatar_aria" },
             avatarUrl = avatarUrl
@@ -1348,7 +1475,8 @@ class MomiSupabaseClient(
         return upsertRows(
             "profiles",
             listOf(MomiSupabaseSchema.toProfileRow(stub)),
-            onConflict = "user_id"
+            onConflict = "user_id",
+            ignoreDuplicates = true
         ).map { Unit }
     }
 
@@ -1500,9 +1628,13 @@ class MomiSupabaseClient(
             return@withContext Result.failure(IllegalStateException("Supabase is not configured yet."))
         }
         runCatching {
+            val storyCutoffIso = MomiSupabaseSchema.formatTimestampIso(
+                Timestamp(Date(System.currentTimeMillis() - MomiSupabaseSchema.STORY_TTL_MS))
+            )
+            val encStoryCutoff = URLEncoder.encode(storyCutoffIso, "UTF-8")
             val profilesJson = fetchJsonArray("$baseUrl/rest/v1/profiles?select=*&limit=100", strict = true)
             val postsJson = fetchJsonArray("$baseUrl/rest/v1/posts?select=*&order=created_at.desc&limit=120", strict = true)
-            val storiesJson = fetchJsonArray("$baseUrl/rest/v1/stories?select=*&order=created_at.desc&limit=50")
+            val storiesJson = fetchJsonArray("$baseUrl/rest/v1/stories?select=*&created_at=gte.$encStoryCutoff&order=created_at.desc&limit=50")
             val productsJson = fetchJsonArray("$baseUrl/rest/v1/market_products?select=*&order=created_at.desc&limit=80")
             val merchantsJson = fetchJsonArray("$baseUrl/rest/v1/merchants?select=*&limit=80")
             val liveStreamsJson = fetchJsonArray("$baseUrl/rest/v1/live_streams?select=*&is_live=eq.true&order=updated_at.desc&limit=30")
@@ -1511,8 +1643,35 @@ class MomiSupabaseClient(
             val pagesJson = fetchJsonArray("$baseUrl/rest/v1/pages?select=*&order=created_at.desc&limit=60")
             val groupsJson = fetchJsonArray("$baseUrl/rest/v1/groups?select=*&order=created_at.desc&limit=60")
             val showcaseJson = fetchJsonArray("$baseUrl/rest/v1/showcase_accounts?select=*&limit=30")
+            val publicEngagementsJson = fetchJsonArray(
+                "$baseUrl/rest/v1/user_interactions?select=user_id,target_type,target_id&target_type=in.(LIKED_POST,VIEWED_POST)&limit=1000"
+            )
 
-            var likedPosts = emptySet<String>()
+            val likersMap = linkedMapOf<String, LinkedHashSet<String>>()
+            val viewersMap = linkedMapOf<String, LinkedHashSet<String>>()
+            val uid = currentUserId.trim()
+            val likedP = mutableSetOf<String>()
+            val viewedP = mutableSetOf<String>()
+            for (i in 0 until publicEngagementsJson.length()) {
+                val o = publicEngagementsJson.optJSONObject(i) ?: continue
+                val actorUid = o.optString("user_id")
+                val tType = o.optString("target_type")
+                val tId = o.optString("target_id")
+                if (actorUid.isBlank() || tId.isBlank()) continue
+                when (tType) {
+                    "LIKED_POST" -> {
+                        likersMap.getOrPut(tId) { LinkedHashSet() }.add(actorUid)
+                        if (uid.isNotEmpty() && actorUid == uid) likedP.add(tId)
+                    }
+                    "VIEWED_POST" -> {
+                        viewersMap.getOrPut(tId) { LinkedHashSet() }.add(actorUid)
+                        if (uid.isNotEmpty() && actorUid == uid) viewedP.add(tId)
+                    }
+                }
+            }
+
+            var likedPosts = likedP.toSet()
+            var viewedPosts = viewedP.toSet()
             var bookmarkedPosts = emptySet<String>()
             var seenStories = emptySet<String>()
             var likedComments = emptySet<String>()
@@ -1525,11 +1684,9 @@ class MomiSupabaseClient(
             var pageFollowedIds = emptySet<String>()
             var groupJoinedIds = emptySet<String>()
 
-            val uid = currentUserId.trim()
             if (uid.isNotEmpty()) {
                 val encUid = URLEncoder.encode(uid, "UTF-8")
                 val interJson = fetchJsonArray("$baseUrl/rest/v1/user_interactions?select=*&user_id=eq.$encUid&limit=400")
-                val likedP = mutableSetOf<String>()
                 val bookmarkedP = mutableSetOf<String>()
                 val seenS = mutableSetOf<String>()
                 val likedC = mutableSetOf<String>()
@@ -1539,13 +1696,21 @@ class MomiSupabaseClient(
                     val tId = o.optString("target_id")
                     if (tId.isBlank()) continue
                     when (tType) {
-                        "LIKED_POST" -> likedP.add(tId)
+                        "LIKED_POST" -> {
+                            likedP.add(tId)
+                            likersMap.getOrPut(tId) { LinkedHashSet() }.add(uid)
+                        }
+                        "VIEWED_POST" -> {
+                            viewedP.add(tId)
+                            viewersMap.getOrPut(tId) { LinkedHashSet() }.add(uid)
+                        }
                         "BOOKMARK" -> bookmarkedP.add(tId)
                         "SEEN_STORY" -> seenS.add(tId)
                         "LIKED_COMMENT" -> likedC.add(tId)
                     }
                 }
                 likedPosts = likedP
+                viewedPosts = viewedP
                 bookmarkedPosts = bookmarkedP
                 seenStories = seenS
                 likedComments = likedC
@@ -1598,9 +1763,12 @@ class MomiSupabaseClient(
                 liveStreams = parseLiveStreams(liveStreamsJson),
                 follows = parseFollows(followsJson),
                 likedPostIds = likedPosts,
+                viewedPostIds = viewedPosts,
                 bookmarkedPostIds = bookmarkedPosts,
                 seenStoryIds = seenStories,
                 likedCommentIds = likedComments,
+                postLikersByPostId = likersMap.mapValues { it.value.toList() },
+                postViewersByPostId = viewersMap.mapValues { it.value.toList() },
                 notifications = notifications,
                 threads = threads,
                 orders = orders,
@@ -1737,6 +1905,7 @@ class MomiSupabaseClient(
                     id = uid,
                     userId = uid,
                     username = o.optString("username", "momi.creator"),
+                    email = o.optString("email"),
                     displayName = o.optString("display_name", "Momi Creator"),
                     category = o.optString("category"),
                     bio = o.optString("bio"),
@@ -1825,10 +1994,13 @@ class MomiSupabaseClient(
     }
 
     private fun parseStories(arr: JSONArray): List<Story> = buildList {
+        val cutoffMs = System.currentTimeMillis() - MomiSupabaseSchema.STORY_TTL_MS
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
             val id = o.optString("id")
             if (id.isBlank()) continue
+            val createdAt = parseIsoTimestamp(o.optString("created_at"))
+            if (createdAt != null && createdAt.toDate().time < cutoffMs) continue
             add(
                 Story(
                     id = id,
@@ -1846,7 +2018,7 @@ class MomiSupabaseClient(
                     audioUrl = o.optCleanString("audio_url"),
                     audioData = o.optCleanString("audio_data"),
                     caption = o.optString("caption"),
-                    createdAt = parseIsoTimestamp(o.optString("created_at"))
+                    createdAt = createdAt
                 )
             )
         }
@@ -2186,21 +2358,13 @@ class MomiSupabaseClient(
             admobMrecUnitId = o.optString("admob_mrec_unit_id"),
             admobInterstitialUnitId = o.optString("admob_interstitial_unit_id"),
             startIoEnabled = o.optBoolean("start_io_enabled", true),
-            monetagEnabled = o.optBoolean("monetag_enabled", true),
-            monetagDirectLinkUrl = o.optString("monetag_direct_link_url"),
-            monetagWebZoneId = o.optString("monetag_web_zone_id"),
-            monetagWebMetaTag = o.optString("monetag_web_meta_tag"),
             partnerPromoTitle = o.optString("partner_promo_title"),
             partnerPromoSubtitle = o.optString("partner_promo_subtitle"),
             partnerPromoCta = o.optString("partner_promo_cta"),
-            gamezopEnabled = o.optBoolean("gamezop_enabled", false),
-            gamezopPortalUrl = o.optString("gamezop_portal_url"),
-            gamezopPublisherId = o.optString("gamezop_publisher_id"),
-            gamezopBannerTitle = o.optString("gamezop_banner_title"),
             announcementId = o.optString("announcement_id"),
             announcementTitle = o.optString("announcement_title"),
             announcementBody = o.optString("announcement_body"),
-            latestVersionName = o.optString("latest_version_name").ifBlank { "2.2" },
+            latestVersionName = o.optString("latest_version_name").ifBlank { "2.3" },
             releaseNotes = o.optString("release_notes"),
             updatedByEmail = o.optString("updated_by_email")
         )
