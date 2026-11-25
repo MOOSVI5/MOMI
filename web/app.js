@@ -1671,6 +1671,7 @@ function renderMainStage() {
     case 'home': renderHome(); break;
     case 'explore': renderExplore(); break;
     case 'clips': renderClips(); break;
+    case 'games': renderGames(); break;
     case 'create': renderCreateStudio(); break;
     case 'live': renderLiveLobby(); break;
     case 'communities': renderCommunities(); break;
@@ -2060,6 +2061,20 @@ function renderExplore() {
     b.onclick = () => { state.exploreCategory = b.dataset.exploreCat; renderExplore(); };
   });
   bindFeedInteractions(mainStage);
+}
+
+function renderGames() {
+  mainStage.innerHTML = `
+    <div class="stage-column" style="height:calc(100vh - 80px);display:flex;flex-direction:column;">
+      <div class="section-header" style="margin-bottom:12px;">
+        <h2>Momi Arcade &amp; Games</h2>
+        <span class="muted small">Bull Run Ranch Game</span>
+      </div>
+      <div style="flex:1;width:100%;background:#000;border-radius:16px;overflow:hidden;position:relative;border:1px solid var(--border-color);">
+        <iframe src="https://gamemonetize.com/bull-run-ranch-game" style="width:100%;height:100%;border:none;" allowfullscreen="true" sandbox="allow-scripts allow-same-origin allow-popups allow-forms"></iframe>
+      </div>
+    </div>
+  `;
 }
 
 function renderClips() {

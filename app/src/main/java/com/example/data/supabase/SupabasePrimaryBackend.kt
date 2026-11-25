@@ -122,7 +122,7 @@ class SupabasePrimaryBackend(
         var videoFallback: String? = null
         var videoChunksFallback: List<String> = emptyList()
         if (mediaType == "VIDEO" && !localVideoPath.isNullOrBlank()) {
-            val rawVideo = MediaAssets.readUploadBytesUpToLimit(localVideoPath, maxBytes = 22_000_000L)
+            val rawVideo = MediaAssets.readUploadBytesUpToLimit(localVideoPath, maxBytes = 100_000_000L)
             if (rawVideo != null) {
                 videoUrl = client.uploadStorageBytes(
                     bucket = "momi-videos",

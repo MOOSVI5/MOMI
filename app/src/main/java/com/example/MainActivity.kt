@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material.icons.filled.Storefront
+import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.outlined.AddBox
 import androidx.compose.material.icons.outlined.Groups
@@ -43,6 +44,7 @@ import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.SmartDisplay
+import androidx.compose.material.icons.outlined.SportsEsports
 import androidx.compose.material.icons.outlined.Storefront
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -107,6 +109,7 @@ import com.example.ui.components.PostEngagersBottomSheet
 import com.example.ui.screens.CommunitiesScreen
 import com.example.ui.screens.CreatePostScreen
 import com.example.ui.screens.ExploreScreen
+import com.example.ui.screens.GamesScreen
 import com.example.ui.screens.GoLiveScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.LiveViewerScreen
@@ -141,6 +144,7 @@ private object LumaRoutes {
     const val EXPLORE = "explore"
     const val CREATE = "create?story={story}&pageId={pageId}&groupId={groupId}&communityName={communityName}"
     const val CLIPS = "clips"
+    const val GAMES = "games"
     const val PROFILE = "profile"
     const val WALLET = "wallet"
     const val MARKETPLACE = "marketplace"
@@ -185,6 +189,7 @@ private val PrimaryTabs = listOf(
     BottomNavTab(LumaRoutes.EXPLORE, "Search", Icons.Filled.Search, Icons.Outlined.Search, "tab_explore"),
     BottomNavTab("create?story=false", "Create", Icons.Filled.AddBox, Icons.Outlined.AddBox, "tab_create"),
     BottomNavTab(LumaRoutes.CLIPS, "Clips", Icons.Filled.SmartDisplay, Icons.Outlined.SmartDisplay, "tab_clips"),
+    BottomNavTab(LumaRoutes.GAMES, "Games", Icons.Filled.SportsEsports, Icons.Outlined.SportsEsports, "tab_games"),
     BottomNavTab(LumaRoutes.PROFILE, "Profile", Icons.Filled.Person, Icons.Outlined.Person, "tab_profile")
 )
 
@@ -617,6 +622,7 @@ private fun LumaApp(
         LumaRoutes.HOME,
         LumaRoutes.EXPLORE,
         LumaRoutes.CLIPS,
+        LumaRoutes.GAMES,
         LumaRoutes.PROFILE
     )
 
@@ -800,6 +806,9 @@ private fun LumaApp(
                         navController = navController,
                         startDestination = LumaRoutes.HOME
                     ) {
+                        composable(LumaRoutes.GAMES) {
+                            GamesScreen()
+                        }
                         composable(LumaRoutes.HOME) {
                             HomeScreen(
                                 profile = profile,

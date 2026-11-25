@@ -568,6 +568,23 @@ fun CreatePostScreen(
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize()
                     )
+                    if (videoDurationMs > 300_000L) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(10.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color.Black.copy(alpha = 0.72f))
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                        ) {
+                            Text(
+                                text = "Long video (${MediaAssets.formatDuration(videoDurationMs)}) — Cover thumbnail applied automatically",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
                 } else if (!isStoryMode && allSelectedPhotoPaths.size > 1) {
                     val pagerState = rememberPagerState(pageCount = { allSelectedPhotoPaths.size })
                     Box(modifier = Modifier.fillMaxSize()) {

@@ -778,9 +778,9 @@ object MediaAssets {
         }
 
         val reason = if (sawExportErrorOrTimeout && sourceFile.length() > MAX_CHUNKED_RAW_BYTES) {
-            "This video is too large to sync across users. Please pick or trim a shorter clip (under ~2 minutes)."
+            "This video file is large. Please select a shorter clip or compress it before uploading."
         } else {
-            "Video exceeded the 8 MB cloud clip limit. Please trim it slightly and try again."
+            "Video file could not be processed. Please try another MP4 video."
         }
         return PreparedVideoPayload(failureReason = reason)
     }
