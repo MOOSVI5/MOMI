@@ -47,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
@@ -67,6 +68,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.compose.ContentFrame
 import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
@@ -79,6 +81,17 @@ import kotlinx.coroutines.withContext
 val LocalRemoteVideoResolver = staticCompositionLocalOf<
     (suspend (collectionName: String, mediaId: String, expectedChunksCount: Long) -> Uri?)?
 > { null }
+
+@OptIn(UnstableApi::class)
+private fun buildFeedVideoLoadControl(): DefaultLoadControl = DefaultLoadControl.Builder()
+    .setBufferDurationsMs(
+        /* minBufferMs = */ 4_000,
+        /* maxBufferMs = */ 15_000,
+        /* bufferForPlaybackMs = */ 500,
+        /* bufferForPlaybackAfterRebufferMs = */ 1_000
+    )
+    .setPrioritizeTimeOverSizeThresholds(true)
+    .build()
 
 /**
  * Lightweight ExoPlayer music accompaniment for Photo Posts, Photo Stories, Photo Clips, and Post Composer preview.
@@ -265,19 +278,11 @@ fun MomiVideoPlayer(
     var playbackProgress by remember(playableUri) { mutableFloatStateOf(0f) }
 
     LaunchedEffect(isPlaying) {
-        if (!isPlaying) {
+        if (isPlaying) {
+            playbackFailed = false
+        } else {
             userPaused = false
             isBuffering = false
-        }
-    }
-
-    LaunchedEffect(isBuffering, isPlaying, userPaused, playableUri) {
-        if (isPlaying && isBuffering && !userPaused && playableUri != null) {
-            delay(15_000L)
-            if (isBuffering && isPlaying && !userPaused) {
-                isBuffering = false
-                playbackFailed = true
-            }
         }
     }
 
@@ -288,6 +293,7 @@ fun MomiVideoPlayer(
         }
     }
 
+    val currentIsPlaying by rememberUpdatedState(isPlaying)
     val currentUserPaused by rememberUpdatedState(userPaused)
     val currentOnDoubleTap by rememberUpdatedState(onDoubleTap)
     val currentOnRequestPlay by rememberUpdatedState(onRequestPlay)
@@ -333,6 +339,7 @@ fun MomiVideoPlayer(
         if (shouldHoldPlayer) {
             val exoPlayer = remember(activeUri, retryNonce) {
                 ExoPlayer.Builder(context)
+                    .setLoadControl(buildFeedVideoLoadControl())
                     .setAudioAttributes(
                         AudioAttributes.Builder()
                             .setUsage(C.USAGE_MEDIA)
@@ -371,25 +378,49 @@ fun MomiVideoPlayer(
 
             LaunchedEffect(exoPlayer, musicPlayer, userPaused, isPlaying) {
                 val shouldPlay = isPlaying && !userPaused
-                if (shouldPlay && exoPlayer.playbackState == Player.STATE_IDLE) {
-                    exoPlayer.prepare()
-                }
-                exoPlayer.playWhenReady = shouldPlay
                 if (shouldPlay) {
+                    when (exoPlayer.playbackState) {
+                        Player.STATE_IDLE -> exoPlayer.prepare()
+                        Player.STATE_ENDED -> exoPlayer.seekTo(0L)
+                    }
+                    isBuffering = exoPlayer.playbackState == Player.STATE_BUFFERING
+                    exoPlayer.playWhenReady = true
                     if (!exoPlayer.isPlaying) exoPlayer.play()
                 } else {
+                    isBuffering = false
+                    exoPlayer.playWhenReady = false
                     exoPlayer.pause()
                 }
 
                 musicPlayer?.let { mp ->
-                    if (shouldPlay && mp.playbackState == Player.STATE_IDLE) {
-                        mp.prepare()
-                    }
-                    mp.playWhenReady = shouldPlay
                     if (shouldPlay) {
+                        when (mp.playbackState) {
+                            Player.STATE_IDLE -> mp.prepare()
+                            Player.STATE_ENDED -> mp.seekTo(0L)
+                        }
+                        mp.playWhenReady = true
                         if (!mp.isPlaying) mp.play()
                     } else {
+                        mp.playWhenReady = false
                         mp.pause()
+                    }
+                }
+            }
+
+            LaunchedEffect(exoPlayer, isPlaying, isBuffering, userPaused) {
+                if (isPlaying && isBuffering && !userPaused) {
+                    delay(6_500L)
+                    if (isPlaying && isBuffering && !userPaused) {
+                        val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
+                        exoPlayer.seekTo(pos)
+                        exoPlayer.prepare()
+                        exoPlayer.playWhenReady = true
+                        exoPlayer.play()
+                        delay(8_500L)
+                        if (isPlaying && isBuffering && !userPaused) {
+                            isBuffering = false
+                            playbackFailed = true
+                        }
                     }
                 }
             }
@@ -405,8 +436,8 @@ fun MomiVideoPlayer(
                 musicPlayer?.volume = if (isMuted) 0f else 1f
             }
 
-            LaunchedEffect(exoPlayer, userPaused, showProgressBar) {
-                while (showProgressBar && !userPaused) {
+            LaunchedEffect(exoPlayer, isPlaying, userPaused, showProgressBar) {
+                while (isPlaying && showProgressBar && !userPaused) {
                     val dur = exoPlayer.duration
                     if (dur > 0L) {
                         playbackProgress = (exoPlayer.currentPosition.toFloat() / dur.toFloat()).coerceIn(0f, 1f)
@@ -424,15 +455,22 @@ fun MomiVideoPlayer(
 
                     override fun onPlaybackStateChanged(playbackState: Int) {
                         when (playbackState) {
-                            Player.STATE_BUFFERING -> isBuffering = true
+                            Player.STATE_BUFFERING -> if (currentIsPlaying) isBuffering = true
                             Player.STATE_READY -> {
                                 playbackFailed = false
                                 isBuffering = false
+                                val shouldPlay = currentIsPlaying && !currentUserPaused
+                                exoPlayer.playWhenReady = shouldPlay
+                                if (shouldPlay && !exoPlayer.isPlaying) {
+                                    exoPlayer.play()
+                                }
                             }
                             Player.STATE_ENDED -> {
                                 isBuffering = false
                                 exoPlayer.seekTo(0L)
-                                if (!currentUserPaused) exoPlayer.play()
+                                val shouldPlay = currentIsPlaying && !currentUserPaused
+                                exoPlayer.playWhenReady = shouldPlay
+                                if (shouldPlay) exoPlayer.play() else exoPlayer.pause()
                             }
                             else -> isBuffering = false
                         }
@@ -453,12 +491,24 @@ fun MomiVideoPlayer(
                             musicPlayer?.pause()
                         }
                         Lifecycle.Event.ON_RESUME -> {
-                            val shouldPlay = !currentUserPaused
+                            val shouldPlay = currentIsPlaying && !currentUserPaused
                             exoPlayer.playWhenReady = shouldPlay
-                            if (shouldPlay) exoPlayer.play()
+                            if (shouldPlay) {
+                                if (exoPlayer.playbackState == Player.STATE_IDLE) {
+                                    exoPlayer.prepare()
+                                }
+                                exoPlayer.play()
+                            } else {
+                                exoPlayer.pause()
+                            }
                             musicPlayer?.let { mp ->
                                 mp.playWhenReady = shouldPlay
-                                if (shouldPlay) mp.play()
+                                if (shouldPlay) {
+                                    if (mp.playbackState == Player.STATE_IDLE) mp.prepare()
+                                    mp.play()
+                                } else {
+                                    mp.pause()
+                                }
                             }
                         }
                         else -> Unit
@@ -477,7 +527,8 @@ fun MomiVideoPlayer(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .clipToBounds(),
+                    .clipToBounds()
+                    .alpha(if (isPlaying && firstFrameRendered) 1f else 0f),
                 contentAlignment = Alignment.Center
             ) {
                 ContentFrame(
@@ -488,61 +539,64 @@ fun MomiVideoPlayer(
                 )
             }
 
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .pointerInput(playableUri) {
-                        detectTapGestures(
-                            onTap = {
-                                userPaused = !userPaused
-                                showTapPlayIndicator = true
-                            },
-                            onDoubleTap = {
-                                currentOnDoubleTap?.invoke()
-                            }
-                        )
-                    }
-            )
-
-            AnimatedVisibility(
-                visible = userPaused || showTapPlayIndicator,
-                enter = fadeIn(),
-                exit = fadeOut(),
-                modifier = Modifier.align(Alignment.Center)
-            ) {
+            if (isPlaying) {
                 Box(
                     modifier = Modifier
-                        .size(56.dp)
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.55f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = if (userPaused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
-                        contentDescription = if (userPaused) "Paused" else "Playing",
-                        tint = Color.White,
-                        modifier = Modifier.size(30.dp)
-                    )
-                }
-            }
+                        .fillMaxSize()
+                        .pointerInput(playableUri) {
+                            detectTapGestures(
+                                onTap = {
+                                    userPaused = !userPaused
+                                    showTapPlayIndicator = true
+                                },
+                                onDoubleTap = {
+                                    currentOnDoubleTap?.invoke()
+                                }
+                            )
+                        }
+                )
 
-            if (showProgressBar && firstFrameRendered) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .fillMaxWidth()
-                        .height(2.5.dp)
-                        .background(Color.White.copy(alpha = 0.22f))
+                AnimatedVisibility(
+                    visible = userPaused || showTapPlayIndicator,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier.align(Alignment.Center)
                 ) {
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth(playbackProgress)
-                            .fillMaxHeight()
-                            .background(MaterialTheme.colorScheme.primary)
-                    )
+                            .size(56.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.55f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (userPaused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
+                            contentDescription = if (userPaused) "Paused" else "Playing",
+                            tint = Color.White,
+                            modifier = Modifier.size(30.dp)
+                        )
+                    }
+                }
+
+                if (showProgressBar && firstFrameRendered) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth()
+                            .height(2.5.dp)
+                            .background(Color.White.copy(alpha = 0.22f))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(playbackProgress)
+                                .fillMaxHeight()
+                                .background(MaterialTheme.colorScheme.primary)
+                        )
+                    }
                 }
             }
-        } else if (!isPlaying && !isPrebuffering && activeUri != null && !playbackFailed) {
+        }
+        if (!isPlaying && activeUri != null && !playbackFailed) {
             Box(
                 modifier = Modifier
                     .align(Alignment.Center)
@@ -560,7 +614,7 @@ fun MomiVideoPlayer(
             }
         }
 
-        if ((isLoadingRemoteVideo && playableUri == null) || (isBuffering && !userPaused && !playbackFailed)) {
+        if ((isLoadingRemoteVideo && playableUri == null) || (isPlaying && isBuffering && !userPaused && !playbackFailed)) {
             Box(
                 modifier = Modifier
                     .align(Alignment.Center)

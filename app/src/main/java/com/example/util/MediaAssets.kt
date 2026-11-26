@@ -536,18 +536,24 @@ object MediaAssets {
 
             val out = ByteArrayOutputStream()
             var quality = 78
-            while (quality >= 40) {
+            while (quality >= 20) {
                 out.reset()
                 bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
                 if (out.size() <= 95_000) break
-                quality -= 12
+                quality -= 10
+            }
+            if (out.size() > 135_000) {
+                val smaller = Bitmap.createScaledBitmap(bitmap, 224, 224, true)
+                out.reset()
+                smaller.compress(Bitmap.CompressFormat.JPEG, 60, out)
+                if (smaller !== bitmap) smaller.recycle()
             }
             bitmap.recycle()
 
             val bytes = out.toByteArray()
             if (bytes.isEmpty()) return null
             val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-            if (b64.length <= 180_000) b64 else null
+            if (b64.length <= 200_000) b64 else null
         }.getOrNull()
     }
 

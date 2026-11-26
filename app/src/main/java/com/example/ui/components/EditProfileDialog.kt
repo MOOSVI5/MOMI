@@ -63,15 +63,15 @@ fun EditProfileDialog(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
-    var displayName by remember { mutableStateOf(profile.displayName) }
-    var username by remember { mutableStateOf(profile.username) }
-    var category by remember { mutableStateOf(profile.category) }
-    var bio by remember { mutableStateOf(profile.bio) }
-    var website by remember { mutableStateOf(profile.website) }
-    var pickedAvatarPath by remember { mutableStateOf<String?>(null) }
-    var previewAvatarData by remember { mutableStateOf(profile.avatarData) }
-    var removeAvatar by remember { mutableStateOf(false) }
-    var isProcessingPhoto by remember { mutableStateOf(false) }
+    var displayName by remember(profile.userId) { mutableStateOf(profile.displayName) }
+    var username by remember(profile.userId) { mutableStateOf(profile.username) }
+    var category by remember(profile.userId) { mutableStateOf(profile.category) }
+    var bio by remember(profile.userId) { mutableStateOf(profile.bio) }
+    var website by remember(profile.userId) { mutableStateOf(profile.website) }
+    var pickedAvatarPath by remember(profile.userId) { mutableStateOf<String?>(null) }
+    var previewAvatarData by remember(profile.userId) { mutableStateOf(profile.avatarData) }
+    var removeAvatar by remember(profile.userId) { mutableStateOf(false) }
+    var isProcessingPhoto by remember(profile.userId) { mutableStateOf(false) }
 
     val avatarPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -84,9 +84,11 @@ fun EditProfileDialog(
                     val encoded = MediaAssets.encodeAvatarFileToBase64(saved)
                     saved to encoded
                 }
-                if (localPath != null && encodedPreview != null) {
+                if (localPath != null) {
                     pickedAvatarPath = localPath
-                    previewAvatarData = encodedPreview
+                    if (encodedPreview != null) {
+                        previewAvatarData = encodedPreview
+                    }
                     removeAvatar = false
                 }
                 isProcessingPhoto = false

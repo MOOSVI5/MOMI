@@ -126,9 +126,12 @@ fun ReelsScreen(
             modifier = Modifier.fillMaxSize()
         ) { page ->
             val reel = reels[page]
+            val isActivePage = pagerState.currentPage == page
+            val isPrebufferPage = !isActivePage && (page == pagerState.currentPage + 1)
             ReelPageItem(
                 reel = reel,
-                isActivePage = pagerState.currentPage == page,
+                isActivePage = isActivePage,
+                isPrebufferPage = isPrebufferPage,
                 isOwnReel = reel.userId == currentUserId && !reel.id.startsWith("showcase_"),
                 onLikeToggle = { onLikeToggle(reel) },
                 onDoubleTapLike = { onDoubleTapLike(reel) },
@@ -179,6 +182,7 @@ fun ReelsScreen(
 private fun ReelPageItem(
     reel: Post,
     isActivePage: Boolean,
+    isPrebufferPage: Boolean,
     isOwnReel: Boolean,
     onLikeToggle: () -> Unit,
     onDoubleTapLike: () -> Unit,
@@ -250,6 +254,7 @@ private fun ReelPageItem(
                 fallbackImageUrl = reel.imageUrl,
                 filterTag = reel.filterTag,
                 isPlaying = isActivePage,
+                isPrebuffering = isPrebufferPage,
                 localAudioPath = reel.localAudioPath,
                 audioData = reel.audioData,
                 audioUrl = reel.audioUrl,

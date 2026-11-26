@@ -821,7 +821,10 @@ class MomiViewModel(
             val pendingCount = pendingComments[post.id]?.size?.toLong() ?: 0L
 
             post.copy(
-                authorAvatarUrl = if (isShowcase) null else (authorProfile?.avatarUrl ?: post.authorAvatarUrl),
+                authorUsername = if (isShowcase) post.authorUsername else (authorProfile?.username?.ifBlank { post.authorUsername } ?: post.authorUsername),
+                authorDisplayName = if (isShowcase) post.authorDisplayName else (authorProfile?.displayName?.ifBlank { post.authorDisplayName } ?: post.authorDisplayName),
+                authorAvatarKey = if (isShowcase) post.authorAvatarKey else (authorProfile?.avatarKey?.ifBlank { post.authorAvatarKey } ?: post.authorAvatarKey),
+                authorAvatarUrl = if (isShowcase) null else if (authorProfile != null) authorProfile.avatarUrl else post.authorAvatarUrl,
                 authorAvatarData = if (isShowcase) null else authorProfile?.avatarData,
                 authorVerified = if (isShowcase) post.authorVerified else (authorProfile?.isVerified ?: post.authorVerified),
                 isLiked = desiredLiked,
@@ -879,7 +882,7 @@ class MomiViewModel(
             .map { story ->
                 val p = profilesByUid[story.userId]
                 story.copy(
-                    avatarUrl = p?.avatarUrl ?: story.avatarUrl,
+                    avatarUrl = if (p != null) p.avatarUrl else story.avatarUrl,
                     avatarData = p?.avatarData,
                     isOwnStory = story.userId == currentUserId,
                     isSeen = seen.contains(story.id)
@@ -1973,6 +1976,29 @@ class MomiViewModel(
         }
     }
 
+    private fun applyLocalProfileSnapshot(snapshot: UserProfile) {
+        supaProfiles.update { list ->
+            if (list.any { it.userId == snapshot.userId }) {
+                list.map { if (it.userId == snapshot.userId) snapshot else it }
+            } else {
+                listOf(snapshot) + list
+            }
+        }
+        cachedProfiles.update { list ->
+            if (list.any { it.userId == snapshot.userId }) {
+                list.map { if (it.userId == snapshot.userId) snapshot else it }
+            } else {
+                listOf(snapshot) + list
+            }
+        }
+        if (snapshot.userId == currentUserId) {
+            cachedProfile.value = snapshot
+            cachedAppContext?.let { ctx ->
+                AppearancePrefs.saveCachedProfileJson(ctx, snapshot.userId, serializeProfileToJson(snapshot))
+            }
+        }
+    }
+
     fun updateProfile(
         displayName: String,
         username: String,
@@ -1982,50 +2008,92 @@ class MomiViewModel(
         pickedAvatarLocalPath: String? = null,
         removeAvatar: Boolean = false
     ) {
-        val currentProfile = profile.value ?: fallbackProfile()
+        val previousProfile = profile.value ?: fallbackProfile()
         viewModelScope.launch {
-            var nextAvatarUrl: String? = if (removeAvatar) null else currentProfile.avatarUrl
-            var nextAvatarData: String? = if (removeAvatar) null else currentProfile.avatarData
-            if (!removeAvatar && !pickedAvatarLocalPath.isNullOrBlank()) {
-                val uploadedAvatar = supabaseBackend.uploadImageToStorage(
+            val cleanDisplayName = displayName.trim().take(80).ifBlank { previousProfile.displayName }
+            val cleanUsername = username.trim().lowercase().replace(Regex("[^a-z0-9._]"), "")
+                .take(50)
+                .ifBlank { previousProfile.username }
+            val cleanCategory = category.trim().take(60)
+            val cleanBio = bio.trim().take(240)
+            val cleanWebsite = website.trim().take(120)
+
+            val hasPickedAvatar = !removeAvatar && !pickedAvatarLocalPath.isNullOrBlank()
+            val encodedPreview = if (hasPickedAvatar) {
+                withContext(Dispatchers.IO) {
+                    MediaAssets.encodeAvatarFileToBase64(pickedAvatarLocalPath)
+                }
+            } else {
+                null
+            }
+
+            val optimistic = previousProfile.copy(
+                displayName = cleanDisplayName,
+                username = cleanUsername,
+                category = cleanCategory,
+                bio = cleanBio,
+                website = cleanWebsite,
+                avatarUrl = when {
+                    removeAvatar -> null
+                    hasPickedAvatar -> null
+                    else -> previousProfile.avatarUrl
+                },
+                avatarData = when {
+                    removeAvatar -> null
+                    hasPickedAvatar -> encodedPreview ?: previousProfile.avatarData
+                    else -> previousProfile.avatarData
+                }
+            )
+            pendingProfileOverride = optimistic to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
+            applyLocalProfileSnapshot(optimistic)
+
+            val uploadedAvatar = if (hasPickedAvatar) {
+                supabaseBackend.uploadImageToStorage(
                     bucket = "momi-avatars",
                     objectPath = "avatars/${currentUserId}_${System.currentTimeMillis()}.jpg",
                     localImagePath = pickedAvatarLocalPath
                 )
-                if (uploadedAvatar != null) {
-                    nextAvatarUrl = uploadedAvatar
-                    nextAvatarData = null
-                } else {
-                    nextAvatarData = withContext(Dispatchers.IO) {
-                        MediaAssets.encodeAvatarFileToBase64(pickedAvatarLocalPath)
-                    } ?: currentProfile.avatarData
-                }
+            } else {
+                null
             }
 
-            val updated = currentProfile.copy(
-                displayName = displayName.trim().take(80).ifBlank { currentProfile.displayName },
-                username = username.trim().lowercase().replace(Regex("[^a-z0-9._]"), "").take(50).ifBlank { currentProfile.username },
-                category = category.trim().take(60),
-                bio = bio.trim().take(240),
-                website = website.trim().take(120),
-                avatarUrl = nextAvatarUrl,
-                avatarData = nextAvatarData
+            val finalProfile = optimistic.copy(
+                avatarUrl = when {
+                    removeAvatar -> null
+                    hasPickedAvatar -> uploadedAvatar
+                    else -> previousProfile.avatarUrl
+                },
+                avatarData = when {
+                    removeAvatar -> null
+                    hasPickedAvatar -> encodedPreview ?: previousProfile.avatarData
+                    else -> previousProfile.avatarData
+                }
             )
-            pendingProfileOverride = updated to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
-            supaProfiles.update { list ->
-                if (list.any { it.userId == updated.userId }) list.map { if (it.userId == updated.userId) updated else it }
-                else listOf(updated) + list
-            }
-            cachedProfile.value = updated
-            cachedAppContext?.let { ctx ->
-                AppearancePrefs.saveCachedProfileJson(ctx, updated.userId, serializeProfileToJson(updated))
-            }
-            supabaseBackend.upsertProfile(updated)
+            pendingProfileOverride = finalProfile to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
+            applyLocalProfileSnapshot(finalProfile)
+
+            supabaseBackend.upsertProfile(finalProfile)
                 .onSuccess {
+                    val remoteConfirmed = withContext(Dispatchers.IO) {
+                        supabaseClient.fetchProfileByUserId(finalProfile.userId)
+                    }
+                    val confirmed = if (remoteConfirmed != null) {
+                        remoteConfirmed.copy(
+                            email = remoteConfirmed.email.ifBlank { finalProfile.email },
+                            avatarUrl = if (removeAvatar) null else (remoteConfirmed.avatarUrl ?: finalProfile.avatarUrl),
+                            avatarData = if (removeAvatar) null else (remoteConfirmed.avatarData ?: finalProfile.avatarData)
+                        )
+                    } else {
+                        finalProfile
+                    }
+                    pendingProfileOverride = confirmed to (System.currentTimeMillis() + 3_000L)
+                    applyLocalProfileSnapshot(confirmed)
+                    launch { refreshFromSupabase(forceEnsureProfile = false) }
                     _statusNotice.value = "Profile saved!"
                 }
                 .onFailure {
                     pendingProfileOverride = null
+                    applyLocalProfileSnapshot(previousProfile)
                     _errorMessage.value = unwrapErrorMessage(it, "Could not update profile")
                 }
         }
@@ -3820,9 +3888,12 @@ class MomiViewModel(
                     val ownRemote = mergedProfiles.firstOrNull { it.userId == currentUserId }
                         ?: if (cleanEmail != null) mergedProfiles.firstOrNull { it.email.equals(cleanEmail, ignoreCase = true) } else null
                     if (ownRemote != null) {
-                        cachedProfile.value = ownRemote
+                        val hydratedOwn = ownRemote.copy(
+                            email = ownRemote.email.ifBlank { cleanEmail.orEmpty() }
+                        )
+                        cachedProfile.value = hydratedOwn
                         cachedAppContext?.let { ctx ->
-                            AppearancePrefs.saveCachedProfileJson(ctx, currentUserId, serializeProfileToJson(ownRemote))
+                            AppearancePrefs.saveCachedProfileJson(ctx, currentUserId, serializeProfileToJson(hydratedOwn))
                         }
                     }
                 }
@@ -4022,40 +4093,11 @@ class MomiViewModel(
         }
     }
 
-    private fun serializeProfileToJson(p: UserProfile): String = JSONObject().apply {
-        put("userId", p.userId)
-        put("username", p.username)
-        put("email", p.email)
-        put("displayName", p.displayName)
-        put("category", p.category)
-        put("bio", p.bio)
-        put("website", p.website)
-        put("avatarKey", p.avatarKey)
-        put("avatarUrl", p.avatarUrl ?: "")
-        put("avatarData", p.avatarData?.take(60_000) ?: "")
-        put("isVerified", p.isVerified)
-        put("role", p.role)
-    }.toString()
+    private fun serializeProfileToJson(p: UserProfile): String =
+        ProfileLocalCacheCodec.serializeProfileToJson(p)
 
-    private fun parseProfileFromJson(raw: String): UserProfile? = runCatching {
-        val o = JSONObject(raw)
-        val uid = o.optString("userId").takeIf { it.isNotBlank() } ?: return@runCatching null
-        UserProfile(
-            id = uid,
-            userId = uid,
-            username = o.optString("username", "momi.creator"),
-            email = o.optString("email"),
-            displayName = o.optString("displayName", "Momi Creator"),
-            category = o.optString("category"),
-            bio = o.optString("bio"),
-            website = o.optString("website"),
-            avatarKey = o.optString("avatarKey", "avatar_aria"),
-            avatarUrl = o.optString("avatarUrl").takeIf { it.isNotBlank() },
-            avatarData = o.optString("avatarData").takeIf { it.isNotBlank() },
-            isVerified = o.optBoolean("isVerified", false),
-            role = o.optString("role", MomiRoles.USER)
-        )
-    }.getOrNull()
+    private fun parseProfileFromJson(raw: String): UserProfile? =
+        ProfileLocalCacheCodec.parseProfileFromJson(raw)
 
     private fun serializePostsToJson(posts: List<Post>): String {
         val arr = JSONArray()
@@ -4168,4 +4210,64 @@ class MomiViewModel(
         const val RATE_LIMIT_FRIENDLY_MESSAGE =
             "Supabase rate limit reached briefly — cached content remains visible. Retrying shortly."
     }
+}
+
+internal object ProfileLocalCacheCodec {
+    fun serializeProfileToJson(p: UserProfile): String = MomiSupabaseSchema.toJsonString(
+        linkedMapOf(
+            "userId" to p.userId,
+            "username" to p.username,
+            "email" to p.email,
+            "displayName" to p.displayName,
+            "category" to p.category,
+            "bio" to p.bio,
+            "website" to p.website,
+            "avatarKey" to p.avatarKey,
+            "avatarUrl" to (p.avatarUrl ?: ""),
+            "avatarData" to (p.avatarData ?: ""),
+            "followersCount" to p.followersCount,
+            "followingCount" to p.followingCount,
+            "isVerified" to p.isVerified,
+            "role" to p.role,
+            "moderationScopes" to p.moderationScopes,
+            "assignedByEmail" to (p.assignedByEmail ?: ""),
+            "partnerConsent" to p.partnerConsent
+        )
+    )
+
+    fun parseProfileFromJson(raw: String): UserProfile? = runCatching {
+        val o = JSONObject(raw)
+        val uid = o.optString("userId").takeIf { it.isNotBlank() } ?: return@runCatching null
+        val scopesArr = o.optJSONArray("moderationScopes")
+        val scopes = if (scopesArr != null) {
+            buildList(scopesArr.length()) {
+                for (i in 0 until scopesArr.length()) {
+                    val s = scopesArr.optString(i)
+                    if (s.isNotBlank() && s != "null") add(s)
+                }
+            }
+        } else {
+            emptyList()
+        }
+        UserProfile(
+            id = uid,
+            userId = uid,
+            username = o.optString("username", "momi.creator"),
+            email = o.optString("email"),
+            displayName = o.optString("displayName", "Momi Creator"),
+            category = o.optString("category"),
+            bio = o.optString("bio"),
+            website = o.optString("website"),
+            avatarKey = o.optString("avatarKey", "avatar_aria"),
+            avatarUrl = o.optString("avatarUrl").takeIf { it.isNotBlank() },
+            avatarData = o.optString("avatarData").takeIf { it.isNotBlank() },
+            followersCount = o.optLong("followersCount", 0L),
+            followingCount = o.optLong("followingCount", 0L),
+            isVerified = o.optBoolean("isVerified", false),
+            role = o.optString("role", MomiRoles.USER),
+            moderationScopes = scopes,
+            assignedByEmail = o.optString("assignedByEmail").takeIf { it.isNotBlank() },
+            partnerConsent = o.optBoolean("partnerConsent", false)
+        )
+    }.getOrNull()
 }

@@ -330,4 +330,80 @@ class SupabaseMigrationTest {
         assertFalse(MomiSupabaseSchema.isJwtExpiredOrExpiringSoon(freshJwt))
         assertFalse(MomiSupabaseSchema.isJwtExpiredOrExpiringSoon(""))
     }
+
+    @Test
+    fun profileUpsertOmitsEmailAndLocalCachePreservesFullPhotoAndBio() {
+        val longAvatarBase64 = "A".repeat(95_000)
+        val profile = UserProfile(
+            id = "uid_42",
+            userId = "uid_42",
+            username = "momi.test",
+            email = "test@momi.app",
+            displayName = "Ali Updated",
+            category = "Photographer",
+            bio = "Capturing streets and golden hour.",
+            website = "https://momi.app/@ali",
+            avatarKey = "avatar_aria",
+            avatarUrl = "https://example.supabase.co/storage/v1/object/public/momi-avatars/avatars/uid_42.jpg",
+            avatarData = longAvatarBase64,
+            followersCount = 12L,
+            followingCount = 7L,
+            isVerified = true,
+            partnerConsent = true
+        )
+
+        val row = MomiSupabaseSchema.toProfileRow(profile)
+        assertFalse(row.containsKey("email"))
+        assertEquals("Ali Updated", row["display_name"])
+        assertEquals("Capturing streets and golden hour.", row["bio"])
+        assertEquals(longAvatarBase64, row["avatar_data"])
+
+        val encodedJson = com.example.ui.viewmodel.ProfileLocalCacheCodec.serializeProfileToJson(profile)
+        assertTrue(encodedJson.contains("\"displayName\": \"Ali Updated\""))
+        assertTrue(encodedJson.contains("\"bio\": \"Capturing streets and golden hour.\""))
+        assertTrue(encodedJson.contains(longAvatarBase64))
+        assertTrue(encodedJson.contains("\"avatarUrl\": \"https://example.supabase.co/storage/v1/object/public/momi-avatars/avatars/uid_42.jpg\""))
+        assertTrue(encodedJson.contains("\"followersCount\": 12"))
+        assertTrue(encodedJson.contains("\"followingCount\": 7"))
+        assertTrue(encodedJson.contains("\"partnerConsent\": true"))
+    }
+
+    @Test
+    fun nextPrebufferPlayablePostSelectsUpcomingVideo() {
+        val posts = listOf(
+            Post(id = "photo_1", mediaType = "IMAGE"),
+            Post(id = "video_1", mediaType = "VIDEO", videoUrl = "https://example.com/1.mp4"),
+            Post(id = "photo_2", mediaType = "IMAGE"),
+            Post(id = "video_2", mediaType = "VIDEO", videoUrl = "https://example.com/2.mp4")
+        )
+        val playableIds = setOf("video_1", "video_2")
+
+        assertEquals(
+            "video_2",
+            com.example.ui.screens.findNextPrebufferPlayablePostId(
+                posts = posts,
+                playablePostIds = playableIds,
+                activePlayablePostId = "video_1",
+                firstVisiblePostIndex = 0
+            )
+        )
+        assertEquals(
+            "video_1",
+            com.example.ui.screens.findNextPrebufferPlayablePostId(
+                posts = posts,
+                playablePostIds = playableIds,
+                activePlayablePostId = null,
+                firstVisiblePostIndex = 0
+            )
+        )
+        assertEquals(
+            null,
+            com.example.ui.screens.findNextPrebufferPlayablePostId(
+                posts = posts,
+                playablePostIds = playableIds,
+                activePlayablePostId = "video_2",
+                firstVisiblePostIndex = 2
+            )
+        )
+    }
 }

@@ -188,6 +188,35 @@ fun HomeScreen(
 
     val resolvedActivePlayablePostId = manualPlayingPostId?.takeIf { playablePostIds.contains(it) } ?: activePlayablePostId
 
+    val firstVisiblePostIndex by remember(displayedPosts) {
+        derivedStateOf {
+            val postIdSet = displayedPosts.mapTo(HashSet()) { it.id }
+            val firstVisibleId = listState.layoutInfo.visibleItemsInfo
+                .asSequence()
+                .mapNotNull { it.key as? String }
+                .firstOrNull { it in postIdSet }
+            if (firstVisibleId != null) {
+                displayedPosts.indexOfFirst { it.id == firstVisibleId }.coerceAtLeast(0)
+            } else {
+                0
+            }
+        }
+    }
+
+    val prebufferPlayablePostId = remember(
+        displayedPosts,
+        playablePostIds,
+        resolvedActivePlayablePostId,
+        firstVisiblePostIndex
+    ) {
+        findNextPrebufferPlayablePostId(
+            posts = displayedPosts,
+            playablePostIds = playablePostIds,
+            activePlayablePostId = resolvedActivePlayablePostId,
+            firstVisiblePostIndex = firstVisiblePostIndex
+        )
+    }
+
     LaunchedEffect(listState.isScrollInProgress) {
         if (listState.isScrollInProgress) {
             manualPlayingPostId = null
@@ -700,6 +729,7 @@ fun HomeScreen(
                         isOwnPost = post.userId == profile?.userId && !post.id.startsWith("showcase_"),
                         isAdminViewActive = isAdminViewActive,
                         isPlaybackActive = post.id == resolvedActivePlayablePostId,
+                        isPrebufferActive = post.id == prebufferPlayablePostId && post.id != resolvedActivePlayablePostId,
                         externalMuted = feedMuted,
                         onMuteChange = { feedMuted = it },
                         onPostClick = { onPostClick(post) },
@@ -874,5 +904,25 @@ private fun SuggestedCreatorsSection(
             thickness = 0.5.dp,
             color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
         )
+    }
+}
+
+internal fun findNextPrebufferPlayablePostId(
+    posts: List<Post>,
+    playablePostIds: Set<String>,
+    activePlayablePostId: String?,
+    firstVisiblePostIndex: Int = 0
+): String? {
+    if (posts.isEmpty() || playablePostIds.isEmpty()) return null
+    return if (activePlayablePostId != null) {
+        val activeIdx = posts.indexOfFirst { it.id == activePlayablePostId }
+        if (activeIdx < 0) return null
+        posts.drop(activeIdx + 1).firstOrNull { it.id in playablePostIds }?.id
+    } else {
+        val startIdx = firstVisiblePostIndex.coerceIn(0, posts.lastIndex)
+        posts.drop(startIdx)
+            .take(5)
+            .firstOrNull { it.id in playablePostIds }
+            ?.id
     }
 }

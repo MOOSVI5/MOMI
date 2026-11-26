@@ -268,7 +268,6 @@ object MomiSupabaseSchema {
         return linkedMapOf(
             "user_id" to uid,
             "username" to profile.username.ifBlank { "momi.${uid.take(6)}" }.take(50),
-            "email" to profile.email.trim().lowercase(Locale.US).take(160),
             "display_name" to profile.displayName.ifBlank { "Momi Creator" }.take(80),
             "category" to profile.category.take(80),
             "bio" to profile.bio.take(300),
@@ -1207,15 +1206,15 @@ class MomiSupabaseClient(
             "resolution=merge-duplicates,return=minimal"
         }
 
-        val jsonBody = MomiSupabaseSchema.toJsonString(rows)
+        var workingRows = rows
         var token = ensureFreshAccessToken(explicit = accessToken)
 
-        fun buildUpsertReq(bearerToken: String?): Request {
+        fun buildUpsertReq(bearerToken: String?, payloadJson: String): Request {
             val requestBuilder = Request.Builder()
                 .url("$baseUrl/rest/v1/$table$conflictQuery")
                 .header("Content-Type", "application/json")
                 .header("Prefer", preferHeader)
-                .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+                .post(payloadJson.toRequestBody(JSON_MEDIA_TYPE))
             MomiSupabaseSchema.buildAuthHeaders(anonKey, bearerToken).forEach { (k, v) ->
                 requestBuilder.header(k, v)
             }
@@ -1226,25 +1225,45 @@ class MomiSupabaseClient(
             var code = 0
             var bodyString = ""
             var ok = false
-            httpClient.newCall(buildUpsertReq(token)).execute().use { response ->
-                code = response.code
-                bodyString = response.body?.string().orEmpty()
-                ok = response.isSuccessful
-            }
-            if (!ok && accessToken.isNullOrBlank() && code == 401) {
-                token = ensureFreshAccessToken(forceRefresh = true)
-                httpClient.newCall(buildUpsertReq(token)).execute().use { retry ->
-                    code = retry.code
-                    bodyString = retry.body?.string().orEmpty()
-                    ok = retry.isSuccessful
+            var attempts = 0
+            while (attempts < 4) {
+                attempts++
+                val jsonBody = MomiSupabaseSchema.toJsonString(workingRows)
+                httpClient.newCall(buildUpsertReq(token, jsonBody)).execute().use { response ->
+                    code = response.code
+                    bodyString = response.body?.string().orEmpty()
+                    ok = response.isSuccessful
                 }
+                if (!ok && accessToken.isNullOrBlank() && code == 401) {
+                    token = ensureFreshAccessToken(forceRefresh = true)
+                    httpClient.newCall(buildUpsertReq(token, jsonBody)).execute().use { retry ->
+                        code = retry.code
+                        bodyString = retry.body?.string().orEmpty()
+                        ok = retry.isSuccessful
+                    }
+                }
+                if (ok) break
+                if (code == 400 && bodyString.contains("PGRST204", ignoreCase = true)) {
+                    val missingCol = Regex("Could not find the '([^']+)' column of")
+                        .find(bodyString)?.groupValues?.getOrNull(1)
+                    if (!missingCol.isNullOrBlank() &&
+                        missingCol != "id" &&
+                        missingCol != "user_id" &&
+                        workingRows.any { it.containsKey(missingCol) }
+                    ) {
+                        android.util.Log.w("MomiSupabase", "Stripping missing column '$missingCol' from $table upsert and retrying")
+                        workingRows = workingRows.map { row -> row - missingCol }
+                        continue
+                    }
+                }
+                break
             }
             if (!ok) {
                 android.util.Log.e("MomiSupabase", "Upsert into $table failed HTTP $code: $bodyString")
                 val detail = bodyString.take(160).takeIf { it.isNotBlank() }?.let { " — $it" }.orEmpty()
                 error("Upsert into $table failed (HTTP $code)$detail")
             }
-            rows.size
+            workingRows.size
         }
     }
 
@@ -1264,15 +1283,15 @@ class MomiSupabaseClient(
         if (cleanQuery.isBlank()) {
             return@withContext Result.failure(IllegalArgumentException("Filter query required for patch"))
         }
-        val jsonBody = MomiSupabaseSchema.toJsonString(fields)
+        var workingFields = fields
         var token = ensureFreshAccessToken(explicit = accessToken)
 
-        fun buildPatchReq(bearerToken: String?): Request {
+        fun buildPatchReq(bearerToken: String?, payloadJson: String): Request {
             val requestBuilder = Request.Builder()
                 .url("$baseUrl/rest/v1/$table?$cleanQuery")
                 .header("Content-Type", "application/json")
                 .header("Prefer", "return=minimal")
-                .patch(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+                .patch(payloadJson.toRequestBody(JSON_MEDIA_TYPE))
             MomiSupabaseSchema.buildAuthHeaders(anonKey, bearerToken).forEach { (k, v) ->
                 requestBuilder.header(k, v)
             }
@@ -1283,18 +1302,38 @@ class MomiSupabaseClient(
             var code = 0
             var bodyString = ""
             var ok = false
-            httpClient.newCall(buildPatchReq(token)).execute().use { response ->
-                code = response.code
-                bodyString = response.body?.string().orEmpty()
-                ok = response.isSuccessful
-            }
-            if (!ok && accessToken.isNullOrBlank() && code == 401) {
-                token = ensureFreshAccessToken(forceRefresh = true)
-                httpClient.newCall(buildPatchReq(token)).execute().use { retry ->
-                    code = retry.code
-                    bodyString = retry.body?.string().orEmpty()
-                    ok = retry.isSuccessful
+            var attempts = 0
+            while (attempts < 4 && workingFields.isNotEmpty()) {
+                attempts++
+                val jsonBody = MomiSupabaseSchema.toJsonString(workingFields)
+                httpClient.newCall(buildPatchReq(token, jsonBody)).execute().use { response ->
+                    code = response.code
+                    bodyString = response.body?.string().orEmpty()
+                    ok = response.isSuccessful
                 }
+                if (!ok && accessToken.isNullOrBlank() && code == 401) {
+                    token = ensureFreshAccessToken(forceRefresh = true)
+                    httpClient.newCall(buildPatchReq(token, jsonBody)).execute().use { retry ->
+                        code = retry.code
+                        bodyString = retry.body?.string().orEmpty()
+                        ok = retry.isSuccessful
+                    }
+                }
+                if (ok) break
+                if (code == 400 && bodyString.contains("PGRST204", ignoreCase = true)) {
+                    val missingCol = Regex("Could not find the '([^']+)' column of")
+                        .find(bodyString)?.groupValues?.getOrNull(1)
+                    if (!missingCol.isNullOrBlank() && workingFields.containsKey(missingCol)) {
+                        android.util.Log.w("MomiSupabase", "Stripping missing column '$missingCol' from $table patch and retrying")
+                        workingFields = workingFields - missingCol
+                        if (workingFields.isEmpty()) {
+                            ok = true
+                            break
+                        }
+                        continue
+                    }
+                }
+                break
             }
             if (!ok) {
                 android.util.Log.e("MomiSupabase", "Patch $table failed HTTP $code: $bodyString")
@@ -1448,12 +1487,6 @@ class MomiSupabaseClient(
         // Critical: never overwrite an already-customized remote profile with fallback defaults!
         val existing = fetchProfileByUserId(userId)
         if (existing != null) {
-            val cleanEmail = email.trim().lowercase(Locale.US)
-            if (cleanEmail.isNotBlank() && existing.email.isBlank()) {
-                runCatching {
-                    patchRows("profiles", "user_id=eq.${URLEncoder.encode(userId, "UTF-8")}", mapOf("email" to cleanEmail))
-                }
-            }
             return Result.success(Unit)
         }
         val cleanEmail = email.trim().lowercase(Locale.US)
@@ -1501,11 +1534,7 @@ class MomiSupabaseClient(
         }
         val token = resolvedAccessToken(accessToken)
         val encSource = URLEncoder.encode(cleanSource, "UTF-8")
-        // 1. Ensure target profile exists first (without violating email uniqueness if source holds email)
-        val sourceProf = fetchProfileByUserId(cleanSource)
-        if (sourceProf != null && sourceProf.email.isNotBlank()) {
-            runCatching { patchRows("profiles", "user_id=eq.$encSource", mapOf("email" to ""), accessToken = token) }
-        }
+        // 1. Ensure target profile exists first
         upsertRows("profiles", listOf(MomiSupabaseSchema.toProfileRow(targetProfile)), accessToken = token, onConflict = "user_id")
             .onFailure { return@withContext Result.failure(it) }
 
@@ -1886,8 +1915,13 @@ class MomiSupabaseClient(
                 }
             }
 
+            val parsedProfiles = parseProfiles(profilesJson).toMutableList()
+            if (uid.isNotEmpty() && parsedProfiles.none { it.userId == uid }) {
+                fetchProfileByUserId(uid)?.let { parsedProfiles.add(0, it) }
+            }
+
             SupabaseFeedBundle(
-                profiles = parseProfiles(profilesJson),
+                profiles = parsedProfiles,
                 posts = parsePosts(postsJson),
                 stories = parseStories(storiesJson),
                 products = parseProducts(productsJson),
