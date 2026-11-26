@@ -244,6 +244,7 @@ class MomiViewModel(
     private val pendingMinViews = ConcurrentHashMap<String, Pair<Long, Long>>()
     private val pendingMinLikes = ConcurrentHashMap<String, Pair<Long, Long>>()
     private val pendingCreatedPosts = ConcurrentHashMap<String, Pair<Post, Long>>()
+    private val pendingCreatedStories = ConcurrentHashMap<String, Pair<Story, Long>>()
     private val pendingDeletedPostIds = ConcurrentHashMap<String, Long>()
     @Volatile private var pendingProfileOverride: Pair<UserProfile, Long>? = null
     private val recordedPostViewIds = mutableSetOf<String>()
@@ -1902,22 +1903,39 @@ class MomiViewModel(
         audioTitle: String,
         localAudioPath: String?,
         caption: String,
+        backgroundColorKey: String = "",
+        textOverlay: String = "",
+        textOverlayStyle: String = "D",
+        textOverlayPositionY: Float = 0.5f,
         onComplete: (Boolean) -> Unit
     ) {
         val currentProfile = fallbackProfile()
+        val cleanBgKey = backgroundColorKey.trim().lowercase()
+        val isColorCanvas = cleanBgKey.isNotBlank()
+        val effectiveMediaType = if (isColorCanvas) "IMAGE" else mediaType
+        val effectiveLocalImagePath = if (isColorCanvas) null else localImagePath
+        val effectiveLocalVideoPath = if (isColorCanvas) null else localVideoPath
+        val effectiveVideoDurationMs = if (isColorCanvas) 0L else videoDurationMs
         viewModelScope.launch {
             val storyId = "story_${UUID.randomUUID()}"
-            val uploaded = supabaseBackend.prepareAndUploadPostMedia(
-                context = context.applicationContext,
-                mediaId = storyId,
-                localImagePath = localImagePath,
-                localExtraImagePaths = emptyList(),
-                mediaType = mediaType,
-                localVideoPath = localVideoPath,
-                localAudioPath = localAudioPath
-            )
+            val needsMediaUpload = !effectiveLocalImagePath.isNullOrBlank() ||
+                (effectiveMediaType == "VIDEO" && !effectiveLocalVideoPath.isNullOrBlank()) ||
+                !localAudioPath.isNullOrBlank()
+            val uploaded = if (needsMediaUpload) {
+                supabaseBackend.prepareAndUploadPostMedia(
+                    context = context.applicationContext,
+                    mediaId = storyId,
+                    localImagePath = effectiveLocalImagePath,
+                    localExtraImagePaths = emptyList(),
+                    mediaType = effectiveMediaType,
+                    localVideoPath = effectiveLocalVideoPath,
+                    localAudioPath = localAudioPath
+                )
+            } else {
+                com.example.data.supabase.UploadedMediaUrls()
+            }
             if (uploaded.failureReason != null ||
-                (mediaType == "VIDEO" && uploaded.videoUrl == null && uploaded.videoDataFallback == null)
+                (effectiveMediaType == "VIDEO" && uploaded.videoUrl == null && uploaded.videoDataFallback == null)
             ) {
                 _errorMessage.value = uploaded.failureReason ?: "Could not upload story clip."
                 onComplete(false)
@@ -1929,27 +1947,35 @@ class MomiViewModel(
                 username = currentProfile.username,
                 avatarKey = currentProfile.avatarKey,
                 avatarUrl = currentProfile.avatarUrl,
-                imageKey = imageKey,
+                imageKey = com.example.util.StoryOverlayCodec.encodeImageKey(imageKey, cleanBgKey),
                 imageUrl = uploaded.imageUrl,
                 imageData = uploaded.imageDataFallback,
-                mediaType = mediaType,
+                mediaType = effectiveMediaType,
                 videoUrl = uploaded.videoUrl,
                 videoData = uploaded.videoDataFallback,
-                videoDurationMs = videoDurationMs,
+                videoDurationMs = effectiveVideoDurationMs,
                 audioTitle = audioTitle.trim().take(80),
                 audioUrl = uploaded.audioUrl,
                 audioData = uploaded.audioDataFallback,
                 caption = caption.trim().take(240),
+                backgroundColorKey = cleanBgKey,
+                textOverlay = textOverlay.trim().take(160),
+                textOverlayStyle = textOverlayStyle,
+                textOverlayPositionY = textOverlayPositionY.coerceIn(0.18f, 0.82f),
                 createdAt = Timestamp.now(),
                 isOwnStory = true,
                 isSeen = false
             )
+            pendingCreatedStories[newStory.id] = newStory to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
+            supaStories.update { current -> listOf(newStory) + current.filterNot { it.id == newStory.id } }
             supabaseBackend.createStory(currentProfile, newStory)
                 .onSuccess {
-                    supaStories.update { current -> listOf(newStory) + current.filterNot { it.id == newStory.id } }
+                    _statusNotice.value = "24-hour story published!"
                     onComplete(true)
                 }
                 .onFailure { err ->
+                    pendingCreatedStories.remove(newStory.id)
+                    supaStories.update { current -> current.filterNot { it.id == newStory.id } }
                     _errorMessage.value = unwrapErrorMessage(err, "Could not share story")
                     onComplete(false)
                 }
@@ -3870,6 +3896,7 @@ class MomiViewModel(
                 pendingMinViews.entries.removeIf { it.value.second <= nowMs }
                 pendingMinLikes.entries.removeIf { it.value.second <= nowMs }
                 pendingCreatedPosts.entries.removeIf { it.value.second <= nowMs }
+                pendingCreatedStories.entries.removeIf { it.value.second <= nowMs }
                 pendingDeletedPostIds.entries.removeIf { it.value <= nowMs }
                 if ((pendingProfileOverride?.second ?: 0L) <= nowMs) {
                     pendingProfileOverride = null
@@ -3927,9 +3954,18 @@ class MomiViewModel(
                 }
 
                 val cutoffStoryMs = nowMs - MomiSupabaseSchema.STORY_TTL_MS
-                val validStories = bundle.stories.filter { story ->
+                val validServerStories = bundle.stories.filter { story ->
                     val createdMs = story.createdAt?.toDate()?.time
                     createdMs == null || createdMs >= cutoffStoryMs
+                }
+                val serverStoryIds = validServerStories.map { it.id }.toSet()
+                val validStories = buildList {
+                    pendingCreatedStories.values.forEach { (pendingStory, _) ->
+                        if (pendingStory.id !in serverStoryIds) {
+                            add(pendingStory)
+                        }
+                    }
+                    addAll(validServerStories)
                 }
                 supaStories.value = validStories
                 cachedStories.value = validStories

@@ -233,6 +233,10 @@ data class Story(
     val audioUrl: String? = null,
     val audioData: String? = null,
     val caption: String = "",
+    val backgroundColorKey: String = "",
+    val textOverlay: String = "",
+    val textOverlayStyle: String = "D",
+    val textOverlayPositionY: Float = 0.5f,
     val isSeen: Boolean = false,
     val isOwnStory: Boolean = false,
     val createdAt: Timestamp? = null,
@@ -240,6 +244,9 @@ data class Story(
 ) {
     val isVideoStory: Boolean
         get() = mediaType == "VIDEO" || !localVideoPath.isNullOrBlank() || !videoUrl.isNullOrBlank() || !videoData.isNullOrBlank() || videoChunksCount > 0L
+
+    val hasBackgroundColorCanvas: Boolean
+        get() = backgroundColorKey.isNotBlank() && !isVideoStory && localImagePath.isNullOrBlank() && imageUrl.isNullOrBlank() && imageData.isNullOrBlank()
 }
 
 data class FollowEdge(

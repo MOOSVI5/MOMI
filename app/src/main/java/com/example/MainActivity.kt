@@ -985,7 +985,7 @@ private fun LumaApp(
                                         }
                                     }
                                 },
-                                onPublishStory = { imageKey, localPath, mediaType, localVideoPath, videoDurationMs, audioTitle, localAudioPath, caption, onFinished ->
+                                onPublishStory = { imageKey, localPath, mediaType, localVideoPath, videoDurationMs, audioTitle, localAudioPath, caption, backgroundColorKey, textOverlay, textOverlayStyle, textOverlayPositionY, onFinished ->
                                     viewModel.createStory(
                                         context = context,
                                         imageKey = imageKey,
@@ -995,7 +995,11 @@ private fun LumaApp(
                                         videoDurationMs = videoDurationMs,
                                         audioTitle = audioTitle,
                                         localAudioPath = localAudioPath,
-                                        caption = caption
+                                        caption = caption,
+                                        backgroundColorKey = backgroundColorKey,
+                                        textOverlay = textOverlay,
+                                        textOverlayStyle = textOverlayStyle,
+                                        textOverlayPositionY = textOverlayPositionY
                                     ) { succeeded ->
                                         onFinished(succeeded)
                                         if (succeeded) {
@@ -1475,6 +1479,10 @@ private fun LumaApp(
                                 onMarkSeen = viewModel::markStorySeen,
                                 onAuthorClick = { userId, username ->
                                     openUserProfile(userId, username, false)
+                                },
+                                onAddStoryClick = {
+                                    navController.popBackStack()
+                                    navController.navigate(LumaRoutes.createRoute(true))
                                 },
                                 onClose = { navController.popBackStack() }
                             )

@@ -406,4 +406,71 @@ class SupabaseMigrationTest {
             )
         )
     }
+
+    @Test
+    fun storyBackgroundColorAndTextOverlayEncodeDecodeSafely() {
+        val bgKey = com.example.util.StoryOverlayCodec.encodeImageKey(
+            imageKey = "img_post_coastal",
+            backgroundColorKey = "maroon"
+        )
+        assertEquals("bg:maroon", bgKey)
+        assertTrue(bgKey.length <= 64)
+        assertEquals("maroon", com.example.util.StoryOverlayCodec.decodeBackgroundColorKey(bgKey))
+        assertEquals("", com.example.util.StoryOverlayCodec.decodeBackgroundColorKey("img_post_coastal"))
+        assertTrue(com.example.util.StoryBackgroundCatalog.isColorKey("sunset"))
+        assertFalse(com.example.util.StoryBackgroundCatalog.isColorKey("unknown"))
+
+        val encodedCaption = com.example.util.StoryOverlayCodec.encodeCaptionWithOverlay(
+            caption = "Evening vibe",
+            textOverlay = "100% Golden Hour [Live]\nTap to listen",
+            styleCode = "N",
+            positionY = 0.24f
+        )
+        assertTrue(encodedCaption.length <= 300)
+        val decoded = com.example.util.StoryOverlayCodec.decodeCaptionWithOverlay(encodedCaption)
+        assertEquals("100% Golden Hour [Live]\nTap to listen", decoded.textOverlay)
+        assertEquals("N", decoded.styleCode)
+        assertEquals(0.24f, decoded.positionY, 0.01f)
+        assertEquals("Evening vibe", decoded.caption)
+
+        val legacyDecoded = com.example.util.StoryOverlayCodec.decodeCaptionWithOverlay("Plain legacy caption")
+        assertEquals("", legacyDecoded.textOverlay)
+        assertEquals("Plain legacy caption", legacyDecoded.caption)
+
+        val story = Story(
+            id = "story_bg_1",
+            userId = "uid_1",
+            username = "ali.momi",
+            imageKey = "img_post_coastal",
+            mediaType = "IMAGE",
+            caption = "Golden mood",
+            backgroundColorKey = "violet",
+            textOverlay = "Hello 24h story!",
+            textOverlayStyle = "L",
+            textOverlayPositionY = 0.76f
+        )
+        val row = MomiSupabaseSchema.toStoryRow(story)
+        assertEquals("bg:violet", row["image_key"])
+        assertEquals("IMAGE", row["media_type"])
+        val rowCaption = row["caption"] as String
+        assertTrue(rowCaption.length <= 300)
+        val decodedFromRow = com.example.util.StoryOverlayCodec.decodeCaptionWithOverlay(rowCaption)
+        assertEquals("Hello 24h story!", decodedFromRow.textOverlay)
+        assertEquals("L", decodedFromRow.styleCode)
+        assertEquals(0.76f, decodedFromRow.positionY, 0.01f)
+        assertEquals("Golden mood", decodedFromRow.caption)
+
+        val now = 1_700_000_000_000L
+        assertEquals(
+            "23h left",
+            com.example.util.StoryOverlayCodec.formatRemainingTtl(createdAtMs = now - 3_600_000L, nowMs = now)
+        )
+        assertEquals(
+            "45m left",
+            com.example.util.StoryOverlayCodec.formatRemainingTtl(
+                createdAtMs = now - (23 * 3_600_000L + 15 * 60_000L),
+                nowMs = now
+            )
+        )
+    }
 }

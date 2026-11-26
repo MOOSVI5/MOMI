@@ -23,6 +23,7 @@ import com.example.data.model.Story
 import com.example.data.model.Timestamp
 import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
+import com.example.util.StoryOverlayCodec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -344,7 +345,7 @@ object MomiSupabaseSchema {
         "user_id" to story.userId,
         "username" to story.username.ifBlank { "momi.creator" }.take(50),
         "avatar_key" to story.avatarKey.ifBlank { "avatar_aria" }.take(64),
-        "image_key" to story.imageKey.ifBlank { "img_post_coastal" }.take(64),
+        "image_key" to StoryOverlayCodec.encodeImageKey(story.imageKey, story.backgroundColorKey),
         "image_url" to story.imageUrl,
         "image_data" to story.imageData,
         "media_type" to story.mediaType.ifBlank { "IMAGE" },
@@ -354,7 +355,12 @@ object MomiSupabaseSchema {
         "audio_title" to story.audioTitle.take(120),
         "audio_url" to story.audioUrl,
         "audio_data" to story.audioData,
-        "caption" to story.caption.take(300),
+        "caption" to StoryOverlayCodec.encodeCaptionWithOverlay(
+            caption = story.caption,
+            textOverlay = story.textOverlay,
+            styleCode = story.textOverlayStyle,
+            positionY = story.textOverlayPositionY
+        ),
         "created_at" to formatTimestampIso(story.createdAt)
     )
 
@@ -2171,13 +2177,16 @@ class MomiSupabaseClient(
             if (id.isBlank()) continue
             val createdAt = parseIsoTimestamp(o.optString("created_at"))
             if (createdAt != null && createdAt.toDate().time < cutoffMs) continue
+            val rawImageKey = o.optString("image_key", "img_post_coastal")
+            val bgColorKey = StoryOverlayCodec.decodeBackgroundColorKey(rawImageKey)
+            val decodedOverlay = StoryOverlayCodec.decodeCaptionWithOverlay(o.optString("caption"))
             add(
                 Story(
                     id = id,
                     userId = o.optString("user_id"),
                     username = o.optString("username", "momi.creator"),
                     avatarKey = o.optString("avatar_key", "avatar_aria"),
-                    imageKey = o.optString("image_key", "img_post_coastal"),
+                    imageKey = rawImageKey,
                     imageUrl = o.optCleanString("image_url"),
                     imageData = o.optCleanString("image_data"),
                     mediaType = o.optString("media_type", "IMAGE"),
@@ -2187,7 +2196,11 @@ class MomiSupabaseClient(
                     audioTitle = o.optString("audio_title"),
                     audioUrl = o.optCleanString("audio_url"),
                     audioData = o.optCleanString("audio_data"),
-                    caption = o.optString("caption"),
+                    caption = decodedOverlay.caption,
+                    backgroundColorKey = bgColorKey,
+                    textOverlay = decodedOverlay.textOverlay,
+                    textOverlayStyle = decodedOverlay.styleCode,
+                    textOverlayPositionY = decodedOverlay.positionY,
                     createdAt = createdAt
                 )
             )

@@ -28,9 +28,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -53,6 +55,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -62,10 +65,13 @@ import com.example.ui.components.LumaAvatar
 import com.example.ui.components.MomiMusicAudioPlayer
 import com.example.ui.components.MomiVideoPlayer
 import com.example.ui.components.PostMediaImage
+import com.example.ui.components.StoryColorBackground
+import com.example.ui.components.StoryOverlayPlacementBox
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.MaroonBright
 import com.example.ui.theme.SilkBlueLight
 import com.example.util.MediaAssets
+import com.example.util.StoryOverlayCodec
 import kotlinx.coroutines.delay
 
 @Composable
@@ -74,6 +80,7 @@ fun StoryViewerScreen(
     initialStoryId: String,
     onMarkSeen: (String) -> Unit,
     onAuthorClick: (userId: String, username: String) -> Unit = { _, _ -> },
+    onAddStoryClick: (() -> Unit)? = null,
     onClose: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -156,6 +163,15 @@ fun StoryViewerScreen(
                 )
             }
     ) {
+        val effectiveBgKey = currentStory.backgroundColorKey.ifBlank {
+            StoryOverlayCodec.decodeBackgroundColorKey(currentStory.imageKey)
+        }
+        val showColorCanvas = effectiveBgKey.isNotBlank() &&
+            !currentStory.isVideoStory &&
+            currentStory.localImagePath.isNullOrBlank() &&
+            currentStory.imageUrl.isNullOrBlank() &&
+            currentStory.imageData.isNullOrBlank()
+
         if (currentStory.isVideoStory) {
             MomiVideoPlayer(
                 mediaId = currentStory.id,
@@ -186,15 +202,24 @@ fun StoryViewerScreen(
                 modifier = Modifier.fillMaxSize()
             )
         } else {
-            PostMediaImage(
-                imageKey = currentStory.imageKey,
-                localImagePath = currentStory.localImagePath,
-                imageData = currentStory.imageData,
-                imageUrl = currentStory.imageUrl,
-                filterTag = "NONE",
-                contentDescription = "Story by ${currentStory.username}",
-                modifier = Modifier.fillMaxSize()
-            )
+            if (showColorCanvas) {
+                StoryColorBackground(
+                    backgroundColorKey = effectiveBgKey,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("story_viewer_color_canvas")
+                )
+            } else {
+                PostMediaImage(
+                    imageKey = currentStory.imageKey,
+                    localImagePath = currentStory.localImagePath,
+                    imageData = currentStory.imageData,
+                    imageUrl = currentStory.imageUrl,
+                    filterTag = "NONE",
+                    contentDescription = "Story by ${currentStory.username}",
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
             val hasMusic = currentStory.audioTitle.isNotBlank() ||
                 !currentStory.localAudioPath.isNullOrBlank() ||
                 !currentStory.audioData.isNullOrBlank() ||
@@ -226,6 +251,19 @@ fun StoryViewerScreen(
                     )
                 }
             }
+        }
+
+        if (currentStory.textOverlay.isNotBlank()) {
+            StoryOverlayPlacementBox(
+                textOverlay = currentStory.textOverlay,
+                styleCode = currentStory.textOverlayStyle,
+                positionY = currentStory.textOverlayPositionY,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
+                    .padding(top = 84.dp, bottom = 120.dp)
+            )
         }
 
         // Top Scrim + Progress Segments + Header
@@ -301,17 +339,56 @@ fun StoryViewerScreen(
                         color = Color.White.copy(alpha = 0.75f),
                         fontSize = 12.sp
                     )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color.White.copy(alpha = 0.16f))
+                            .padding(horizontal = 7.dp, vertical = 2.dp)
+                            .testTag("story_viewer_ttl_badge"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Schedule,
+                            contentDescription = "24-hour story expiry",
+                            tint = Color.White.copy(alpha = 0.9f),
+                            modifier = Modifier.size(11.dp)
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text(
+                            text = StoryOverlayCodec.formatRemainingTtl(currentStory.createdAt?.toDate()?.time),
+                            color = Color.White.copy(alpha = 0.9f),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
 
-                IconButton(
-                    onClick = onClose,
-                    modifier = Modifier.minimumInteractiveComponentSize()
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Close,
-                        contentDescription = "Close story",
-                        tint = Color.White
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (currentStory.isOwnStory && onAddStoryClick != null) {
+                        IconButton(
+                            onClick = onAddStoryClick,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("story_viewer_add_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Add,
+                                contentDescription = "Create new story",
+                                tint = Color.White
+                            )
+                        }
+                    }
+                    IconButton(
+                        onClick = onClose,
+                        modifier = Modifier.minimumInteractiveComponentSize()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = "Close story",
+                            tint = Color.White
+                        )
+                    }
                 }
             }
         }

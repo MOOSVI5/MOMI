@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -40,14 +41,18 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.AudioFile
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.RotateRight
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Tag
+import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.LocationOn
 import androidx.compose.material.icons.outlined.PhotoLibrary
@@ -81,6 +86,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
@@ -98,7 +104,11 @@ import com.example.ui.components.LumaAvatar
 import com.example.ui.components.MomiMusicAudioPlayer
 import com.example.ui.components.MomiVideoPlayer
 import com.example.ui.components.PostMediaImage
+import com.example.ui.components.StoryColorBackground
+import com.example.ui.components.StoryOverlayPlacementBox
 import com.example.util.MediaAssets
+import com.example.util.StoryBackgroundCatalog
+import com.example.util.StoryTextOverlayStyle
 import com.example.util.StudioMusicCatalog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -156,6 +166,10 @@ fun CreatePostScreen(
         audioTitle: String,
         localAudioPath: String?,
         caption: String,
+        backgroundColorKey: String,
+        textOverlay: String,
+        textOverlayStyle: String,
+        textOverlayPositionY: Float,
         onFinished: (Boolean) -> Unit
     ) -> Unit,
     onGoLiveClick: () -> Unit = {},
@@ -171,6 +185,10 @@ fun CreatePostScreen(
     var mediaType by remember { mutableStateOf("IMAGE") }
     var localVideoPath by remember { mutableStateOf<String?>(null) }
     var videoDurationMs by remember { mutableLongStateOf(0L) }
+    var selectedStoryBgKey by remember { mutableStateOf("") }
+    var storyTextOverlay by remember { mutableStateOf("") }
+    var storyOverlayStyle by remember { mutableStateOf(StoryTextOverlayStyle.PILL_DARK.code) }
+    var storyOverlayPosY by remember { mutableFloatStateOf(0.5f) }
     var selectedAudioTitle by remember { mutableStateOf("") }
     var localAudioPath by remember { mutableStateOf<String?>(null) }
     var previewMuted by remember { mutableStateOf(false) }
@@ -207,7 +225,8 @@ fun CreatePostScreen(
         )
     }
     val previewAspectFloat = when {
-        !isStoryMode && mediaType == "IMAGE" -> AspectOptions.firstOrNull { it.first == selectedAspectRatio }?.second ?: 1f
+        isStoryMode -> 0.68f
+        mediaType == "IMAGE" -> AspectOptions.firstOrNull { it.first == selectedAspectRatio }?.second ?: 1f
         else -> 1f
     }
 
@@ -223,6 +242,7 @@ fun CreatePostScreen(
                     }
                 }
                 if (savedPaths.isNotEmpty()) {
+                    selectedStoryBgKey = ""
                     localImagePath = savedPaths.first()
                     localExtraImagePaths = savedPaths.drop(1)
                     localVideoPath = null
@@ -244,6 +264,7 @@ fun CreatePostScreen(
                     MediaAssets.copyPickedImageToInternalStorage(context, uri)
                 }
                 if (savedPath != null) {
+                    selectedStoryBgKey = ""
                     localImagePath = savedPath
                     localExtraImagePaths = emptyList()
                     localVideoPath = null
@@ -265,6 +286,7 @@ fun CreatePostScreen(
                     MediaAssets.copyPickedVideoToInternalStorage(context, uri)
                 }
                 if (extracted != null) {
+                    selectedStoryBgKey = ""
                     localVideoPath = extracted.localVideoPath
                     localImagePath = extracted.thumbnailPath
                     localExtraImagePaths = emptyList()
@@ -334,15 +356,20 @@ fun CreatePostScreen(
                 onClick = {
                     isPublishing = true
                     if (isStoryMode) {
+                        val usingColorCanvas = selectedStoryBgKey.isNotBlank()
                         onPublishStory(
                             selectedImageKey,
-                            localImagePath,
-                            mediaType,
-                            localVideoPath,
-                            videoDurationMs,
+                            if (usingColorCanvas) null else localImagePath,
+                            if (usingColorCanvas) "IMAGE" else mediaType,
+                            if (usingColorCanvas) null else localVideoPath,
+                            if (usingColorCanvas) 0L else videoDurationMs,
                             selectedAudioTitle,
                             localAudioPath,
-                            caption
+                            caption,
+                            selectedStoryBgKey,
+                            storyTextOverlay,
+                            storyOverlayStyle,
+                            storyOverlayPosY
                         ) { _ ->
                             isPublishing = false
                         }
@@ -541,15 +568,36 @@ fun CreatePostScreen(
                 }
             }
             val hasSelectedMusic = selectedAudioTitle.isNotBlank() || !localAudioPath.isNullOrBlank()
+            val showStoryColorCanvas = isStoryMode && selectedStoryBgKey.isNotBlank()
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(previewAspectFloat)
-                    .clipToBounds()
+                    .then(
+                        if (isStoryMode) {
+                            Modifier
+                                .padding(horizontal = 24.dp, vertical = 10.dp)
+                                .widthIn(max = 360.dp)
+                                .fillMaxWidth()
+                                .align(Alignment.CenterHorizontally)
+                                .aspectRatio(previewAspectFloat)
+                                .clip(RoundedCornerShape(20.dp))
+                        } else {
+                            Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(previewAspectFloat)
+                                .clipToBounds()
+                        }
+                    )
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center
             ) {
-                if (mediaType == "VIDEO" && localVideoPath != null) {
+                if (showStoryColorCanvas) {
+                    StoryColorBackground(
+                        backgroundColorKey = selectedStoryBgKey,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag("story_preview_color_canvas")
+                    )
+                } else if (mediaType == "VIDEO" && localVideoPath != null) {
                     MomiVideoPlayer(
                         mediaId = localVideoPath.orEmpty(),
                         localVideoPath = localVideoPath,
@@ -691,6 +739,45 @@ fun CreatePostScreen(
                     )
                 }
 
+                if (isStoryMode && storyTextOverlay.isNotBlank()) {
+                    StoryOverlayPlacementBox(
+                        textOverlay = storyTextOverlay,
+                        styleCode = storyOverlayStyle,
+                        positionY = storyOverlayPosY,
+                        onPositionYChange = { storyOverlayPosY = it },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(vertical = 36.dp)
+                    )
+                }
+
+                if (isStoryMode) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(12.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.Black.copy(alpha = 0.58f))
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                            .testTag("story_24h_badge"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Schedule,
+                            contentDescription = "Temporary 24-hour story",
+                            tint = Color.White,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = "24h Temporary",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
                 if (!isStoryMode && taggedUsernames.isNotEmpty()) {
                     Row(
                         modifier = Modifier
@@ -759,6 +846,265 @@ fun CreatePostScreen(
                                 color = Color.White,
                                 style = MaterialTheme.typography.labelLarge,
                                 fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (isStoryMode) {
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Story Background Color Palette
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Filled.Palette,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Background Color",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Text(
+                        text = if (selectedStoryBgKey.isBlank()) "Photo / Video" else StoryBackgroundCatalog.byKey(selectedStoryBgKey)?.label.orEmpty(),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    item(key = "story_bg_media") {
+                        val isMediaActive = selectedStoryBgKey.isBlank()
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clickable { selectedStoryBgKey = "" }
+                                .testTag("story_bg_media")
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    .border(
+                                        width = if (isMediaActive) 2.5.dp else 1.dp,
+                                        color = if (isMediaActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                                        shape = CircleShape
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.PhotoLibrary,
+                                    contentDescription = "Use photo or video background",
+                                    tint = if (isMediaActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Media",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isMediaActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    items(StoryBackgroundCatalog.options, key = { it.key }) { bgOpt ->
+                        val active = selectedStoryBgKey == bgOpt.key
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clickable {
+                                    selectedStoryBgKey = bgOpt.key
+                                    mediaType = "IMAGE"
+                                    localImagePath = null
+                                    localVideoPath = null
+                                    videoDurationMs = 0L
+                                }
+                                .testTag("story_bg_${bgOpt.key}")
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        Brush.linearGradient(
+                                            colors = listOf(Color(bgOpt.startColorArgb), Color(bgOpt.endColorArgb))
+                                        )
+                                    )
+                                    .border(
+                                        width = if (active) 3.dp else 1.dp,
+                                        color = if (active) MaterialTheme.colorScheme.onBackground else Color.White.copy(alpha = 0.4f),
+                                        shape = CircleShape
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (active) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Check,
+                                        contentDescription = "${bgOpt.label} selected",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = bgOpt.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                                color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Story Text Overlay Composer
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Filled.TextFields,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Text Overlay",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    if (storyTextOverlay.isNotBlank()) {
+                        Text(
+                            text = "Drag text on preview",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = storyTextOverlay,
+                    onValueChange = { if (it.length <= 160) storyTextOverlay = it },
+                    placeholder = { Text("Add bold text on your story...") },
+                    trailingIcon = {
+                        if (storyTextOverlay.isNotEmpty()) {
+                            IconButton(
+                                onClick = { storyTextOverlay = "" },
+                                modifier = Modifier.minimumInteractiveComponentSize()
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Close,
+                                    contentDescription = "Clear text overlay"
+                                )
+                            }
+                        }
+                    },
+                    minLines = 1,
+                    maxLines = 3,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                        .testTag("story_overlay_input")
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(StoryTextOverlayStyle.entries, key = { it.code }) { styleOpt ->
+                        val active = storyOverlayStyle == styleOpt.code
+                        Box(
+                            modifier = Modifier
+                                .heightIn(min = 38.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(
+                                    if (active) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.surfaceVariant
+                                )
+                                .clickable { storyOverlayStyle = styleOpt.code }
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                                .testTag("story_overlay_style_${styleOpt.code}"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = styleOpt.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                                color = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "Position",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    listOf("Top" to 0.24f, "Center" to 0.50f, "Bottom" to 0.76f).forEach { (posLabel, posVal) ->
+                        val active = kotlin.math.abs(storyOverlayPosY - posVal) < 0.12f
+                        Box(
+                            modifier = Modifier
+                                .heightIn(min = 36.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(
+                                    if (active) MaterialTheme.colorScheme.secondaryContainer
+                                    else MaterialTheme.colorScheme.surfaceVariant
+                                )
+                                .clickable { storyOverlayPosY = posVal }
+                                .padding(horizontal = 12.dp, vertical = 7.dp)
+                                .testTag("story_overlay_pos_${posLabel.lowercase()}"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = posLabel,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                                color = if (active) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
@@ -900,10 +1246,11 @@ fun CreatePostScreen(
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(MediaAssets.presetPhotoOptions) { (key, label) ->
-                    val selected = mediaType == "IMAGE" && localImagePath == null && selectedImageKey == key
+                    val selected = selectedStoryBgKey.isBlank() && mediaType == "IMAGE" && localImagePath == null && selectedImageKey == key
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.clickable {
+                            selectedStoryBgKey = ""
                             localImagePath = null
                             localExtraImagePaths = emptyList()
                             localVideoPath = null
