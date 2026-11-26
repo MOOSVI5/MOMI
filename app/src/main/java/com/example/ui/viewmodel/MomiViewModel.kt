@@ -77,6 +77,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -1397,9 +1398,10 @@ class MomiViewModel(
         val clean = prompt.trim()
         if (clean.isEmpty() || _aiUiState.value is AiAssistantUiState.Generating) return
 
-        val historyPairs = _aiMessages.value
-            .filter { it.id != "welcome_ai" && !it.isError && it.text.isNotBlank() }
-            .map { it.isUser to it.text }
+        val isImageGen = listOf(
+            "generate image", "generate a image", "draw", "create image", "imagen",
+            "picture of", "photo of", "ai art", "🎨"
+        ).any { clean.lowercase().contains(it) }
 
         val userTurnId = "user_${UUID.randomUUID()}"
         val botTurnId = "ai_${UUID.randomUUID()}"
@@ -1409,34 +1411,70 @@ class MomiViewModel(
         _aiUiState.value = AiAssistantUiState.Generating
 
         viewModelScope.launch {
-            aiAssistantRepository.streamReply(
-                userPrompt = clean,
-                history = historyPairs,
-                userOverrideKey = _userGeminiApiKey.value
-            ).collect { chunkResult ->
-                chunkResult.onSuccess { replyText ->
-                    _aiMessages.update { turns ->
-                        val existing = turns.any { it.id == botTurnId }
-                        if (existing) {
-                            turns.map { turn ->
-                                if (turn.id == botTurnId) turn.copy(text = replyText, isError = false) else turn
-                            }
-                        } else {
-                            turns + AiAssistantTurn(id = botTurnId, isUser = false, text = replyText, isError = false)
-                        }
+            if (isImageGen) {
+                try {
+                    val (replyText, bitmap) = withTimeout(60_000L) {
+                        aiAssistantRepository.generateImage(
+                            userPrompt = clean,
+                            userOverrideKey = _userGeminiApiKey.value
+                        )
                     }
-                    _aiStatus.value = aiAssistantRepository.currentConfigStatus(_userGeminiApiKey.value)
-                }.onFailure { err ->
-                    val fallback = aiAssistantRepository.generateBuiltInMomiReply(clean)
                     _aiMessages.update { turns ->
-                        turns + AiAssistantTurn(id = botTurnId, isUser = false, text = fallback, isError = false)
+                        turns + AiAssistantTurn(
+                            id = botTurnId,
+                            isUser = false,
+                            text = replyText,
+                            isError = false,
+                            imageBitmap = bitmap
+                        )
                     }
+                } catch (e: Exception) {
+                    val fallbackText = "Failed to generate image: ${e.localizedMessage ?: "Unknown error"}"
+                    _aiMessages.update { turns ->
+                        turns + AiAssistantTurn(
+                            id = botTurnId,
+                            isUser = false,
+                            text = fallbackText,
+                            isError = true
+                        )
+                    }
+                } finally {
                     _aiUiState.value = AiAssistantUiState.Idle
-                    Log.w(TAG, "AI fallback used", err)
                 }
-            }
-            if (_aiUiState.value is AiAssistantUiState.Generating) {
-                _aiUiState.value = AiAssistantUiState.Idle
+            } else {
+                val historyPairs = _aiMessages.value
+                    .filter { it.id != "welcome_ai" && !it.isError && it.text.isNotBlank() }
+                    .map { it.isUser to it.text }
+
+                aiAssistantRepository.streamReply(
+                    userPrompt = clean,
+                    history = historyPairs,
+                    userOverrideKey = _userGeminiApiKey.value
+                ).collect { chunkResult ->
+                    chunkResult.onSuccess { replyText ->
+                        _aiMessages.update { turns ->
+                            val existing = turns.any { it.id == botTurnId }
+                            if (existing) {
+                                turns.map { turn ->
+                                    if (turn.id == botTurnId) turn.copy(text = replyText, isError = false) else turn
+                                }
+                            } else {
+                                turns + AiAssistantTurn(id = botTurnId, isUser = false, text = replyText, isError = false)
+                            }
+                        }
+                        _aiStatus.value = aiAssistantRepository.currentConfigStatus(_userGeminiApiKey.value)
+                    }.onFailure { err ->
+                        val fallback = aiAssistantRepository.generateBuiltInMomiReply(clean)
+                        _aiMessages.update { turns ->
+                            turns + AiAssistantTurn(id = botTurnId, isUser = false, text = fallback, isError = false)
+                        }
+                        _aiUiState.value = AiAssistantUiState.Idle
+                        Log.w(TAG, "AI fallback used", err)
+                    }
+                }
+                if (_aiUiState.value is AiAssistantUiState.Generating) {
+                    _aiUiState.value = AiAssistantUiState.Idle
+                }
             }
         }
     }

@@ -162,6 +162,7 @@ fun MomiVideoPlayer(
     filterTag: String,
     isPlaying: Boolean,
     modifier: Modifier = Modifier,
+    isPrebuffering: Boolean = false,
     videoUrl: String? = null,
     fallbackImageUrl: String? = null,
     videoChunksCount: Long = 0L,
@@ -260,7 +261,7 @@ fun MomiVideoPlayer(
     val isMuted = externalMuted ?: internalMuted
     var userPaused by remember(mediaId) { mutableStateOf(false) }
     var showTapPlayIndicator by remember { mutableStateOf(false) }
-    var firstFrameRendered by remember(playableUri, isPlaying) { mutableStateOf(false) }
+    var firstFrameRendered by remember(playableUri) { mutableStateOf(false) }
     var playbackProgress by remember(playableUri) { mutableFloatStateOf(0f) }
 
     LaunchedEffect(isPlaying) {
@@ -272,7 +273,7 @@ fun MomiVideoPlayer(
 
     LaunchedEffect(isBuffering, isPlaying, userPaused, playableUri) {
         if (isPlaying && isBuffering && !userPaused && playableUri != null) {
-            delay(10_000L)
+            delay(15_000L)
             if (isBuffering && isPlaying && !userPaused) {
                 isBuffering = false
                 playbackFailed = true
@@ -312,9 +313,7 @@ fun MomiVideoPlayer(
                             detectTapGestures(
                                 onTap = {
                                     if (playbackFailed) {
-                                        MediaAssets.invalidateCachedVideo(context, mediaId)
                                         playbackFailed = false
-                                        playableUri = null
                                         retryNonce++
                                     } else if (!isPlaying) {
                                         currentOnRequestPlay?.invoke()
@@ -330,9 +329,8 @@ fun MomiVideoPlayer(
         )
 
         val activeUri = playableUri
-        // Only hold an active MediaCodec hardware video decoder when this slot is actually playing!
-        // Prevents hardware decoder exhaustion and "video getting stuck" across LazyColumn/Pager items.
-        if (activeUri != null && !playbackFailed && isPlaying) {
+        val shouldHoldPlayer = activeUri != null && !playbackFailed && (isPlaying || isPrebuffering)
+        if (shouldHoldPlayer) {
             val exoPlayer = remember(activeUri, retryNonce) {
                 ExoPlayer.Builder(context)
                     .setAudioAttributes(
@@ -345,7 +343,7 @@ fun MomiVideoPlayer(
                     .build()
                     .apply {
                         repeatMode = Player.REPEAT_MODE_ONE
-                        playWhenReady = !currentUserPaused
+                        playWhenReady = isPlaying && !currentUserPaused
                         setMediaItem(MediaItem.fromUri(activeUri))
                         prepare()
                     }
@@ -364,26 +362,35 @@ fun MomiVideoPlayer(
                         .build()
                         .apply {
                             repeatMode = Player.REPEAT_MODE_ONE
+                            playWhenReady = isPlaying && !currentUserPaused
                             setMediaItem(MediaItem.fromUri(uri))
                             prepare()
                         }
                 }
             }
 
-            LaunchedEffect(exoPlayer, musicPlayer, userPaused) {
-                val shouldPlay = !userPaused
+            LaunchedEffect(exoPlayer, musicPlayer, userPaused, isPlaying) {
+                val shouldPlay = isPlaying && !userPaused
                 if (shouldPlay && exoPlayer.playbackState == Player.STATE_IDLE) {
                     exoPlayer.prepare()
                 }
                 exoPlayer.playWhenReady = shouldPlay
-                if (shouldPlay) exoPlayer.play() else exoPlayer.pause()
+                if (shouldPlay) {
+                    if (!exoPlayer.isPlaying) exoPlayer.play()
+                } else {
+                    exoPlayer.pause()
+                }
 
                 musicPlayer?.let { mp ->
                     if (shouldPlay && mp.playbackState == Player.STATE_IDLE) {
                         mp.prepare()
                     }
                     mp.playWhenReady = shouldPlay
-                    if (shouldPlay) mp.play() else mp.pause()
+                    if (shouldPlay) {
+                        if (!mp.isPlaying) mp.play()
+                    } else {
+                        mp.pause()
+                    }
                 }
             }
 
@@ -433,7 +440,6 @@ fun MomiVideoPlayer(
 
                     override fun onPlayerError(error: PlaybackException) {
                         Log.w("MomiVideoPlayer", "Playback error for $mediaId: ${error.errorCodeName}", error)
-                        MediaAssets.invalidateCachedVideo(context, mediaId)
                         isBuffering = false
                         playbackFailed = true
                     }
@@ -536,7 +542,7 @@ fun MomiVideoPlayer(
                     )
                 }
             }
-        } else if (!isPlaying && activeUri != null && !playbackFailed) {
+        } else if (!isPlaying && !isPrebuffering && activeUri != null && !playbackFailed) {
             Box(
                 modifier = Modifier
                     .align(Alignment.Center)
@@ -578,9 +584,7 @@ fun MomiVideoPlayer(
                     .clip(RoundedCornerShape(18.dp))
                     .background(Color.Black.copy(alpha = 0.72f))
                     .clickable {
-                        MediaAssets.invalidateCachedVideo(context, mediaId)
                         playbackFailed = false
-                        playableUri = null
                         retryNonce++
                     }
                     .padding(horizontal = 14.dp, vertical = 8.dp),
