@@ -17,10 +17,16 @@ import {
   filterActiveStories24h,
   filterCssForTag,
   formatCount,
+  formatVideoDurationMs,
   initialsForUsername,
   isOwnerEmail,
+  isValidEmailAddress,
   MAX_IMAGE_BASE64_CHARS,
+  MAX_STORY_VIDEO_DURATION_MS,
+  MAX_VIDEO_DURATION_MS,
   normalizeColorScheme,
+  normalizeEmail,
+  normalizePhoneE164,
   normalizeUsername,
   parseDeepLinkFromLocation,
   POST_BOOST_OPTIONS,
@@ -76,10 +82,12 @@ import {
   supabaseFetchAuthUser,
   supabaseRefreshSession,
   supabaseResendSignupOtp,
+  supabaseSendWhatsAppOtp,
   supabaseSignInWithPassword,
   supabaseSignOut,
   supabaseSignUpWithEmail,
   supabaseVerifyEmailOtp,
+  supabaseVerifyWhatsAppOtp,
   syncBundleToSupabase,
   uploadWebFileToStorage,
   upsertSupabaseTable
@@ -193,6 +201,8 @@ const state = {
     uploadedFile: null,
     uploadedVideoUrl: null,
     uploadedVideoFile: null,
+    autoThumbUrl: null,
+    autoThumbBlob: null,
     videoDurationMs: 0,
     filterTag: 'NONE',
     aspectRatio: '1:1',
@@ -498,9 +508,22 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !modalBackdrop.classList.contains('hidden')) closeModal();
 });
 
-// Authentication (Supabase Auth: Google OAuth + Email/Password)
+// Authentication (Supabase Auth: Google OAuth + WhatsApp OTP + Email/Password)
 const googleSignInBtn = document.getElementById('googleSignInBtn');
 const defaultGoogleSignInHtml = googleSignInBtn.innerHTML;
+const toggleWhatsAppAuthBtn = document.getElementById('toggleWhatsAppAuthBtn');
+const whatsappAuthForm = document.getElementById('whatsappAuthForm');
+const waDisplayNameInput = document.getElementById('waDisplayNameInput');
+const waPhoneInput = document.getElementById('waPhoneInput');
+const waEmailInput = document.getElementById('waEmailInput');
+const sendWaOtpBtn = document.getElementById('sendWaOtpBtn');
+const waOtpVerifyBox = document.getElementById('waOtpVerifyBox');
+const waOtpTargetLabel = document.getElementById('waOtpTargetLabel');
+const waOtpInput = document.getElementById('waOtpInput');
+const verifyWaOtpBtn = document.getElementById('verifyWaOtpBtn');
+const resendWaOtpBtn = document.getElementById('resendWaOtpBtn');
+const changeWaPhoneBtn = document.getElementById('changeWaPhoneBtn');
+
 const toggleEmailAuthBtn = document.getElementById('toggleEmailAuthBtn');
 const emailAuthForm = document.getElementById('emailAuthForm');
 const authDisplayNameWrap = document.getElementById('authDisplayNameWrap');
@@ -518,6 +541,7 @@ const resendOtpBtn = document.getElementById('resendOtpBtn');
 let signInPending = false;
 let isEmailSignUpMode = false;
 let pendingOtpEmail = '';
+let pendingWaPhone = '';
 
 function isStandalonePwaMode() {
   return Boolean(
@@ -557,7 +581,7 @@ function clearAuthNotices() {
 }
 
 function showOtpVerificationPanel(email) {
-  pendingOtpEmail = String(email || '').trim().toLowerCase();
+  pendingOtpEmail = normalizeEmail(email);
   if (!otpVerifyBox) return;
   if (otpTargetLabel) {
     otpTargetLabel.textContent = `Enter the 6-digit verification code sent to ${pendingOtpEmail}.`;
@@ -572,9 +596,28 @@ function hideOtpVerificationPanel() {
   otpVerifyBox?.classList.add('hidden');
 }
 
+function showWhatsAppOtpPanel(phone) {
+  pendingWaPhone = normalizePhoneE164(phone) || String(phone || '').trim();
+  if (!waOtpVerifyBox) return;
+  if (waOtpTargetLabel) {
+    waOtpTargetLabel.textContent = `Enter the 6-digit WhatsApp OTP sent to ${pendingWaPhone}.`;
+  }
+  waOtpVerifyBox.classList.remove('hidden');
+  waOtpInput?.focus();
+}
+
+function hideWhatsAppOtpPanel() {
+  pendingWaPhone = '';
+  if (waOtpInput) waOtpInput.value = '';
+  waOtpVerifyBox?.classList.add('hidden');
+}
+
 function setSignInBusy(busy) {
   signInPending = busy;
   googleSignInBtn.disabled = busy;
+  if (sendWaOtpBtn) sendWaOtpBtn.disabled = busy;
+  if (verifyWaOtpBtn) verifyWaOtpBtn.disabled = busy;
+  if (resendWaOtpBtn) resendWaOtpBtn.disabled = busy;
   if (emailSignInBtn) emailSignInBtn.disabled = busy;
   if (verifyOtpBtn) verifyOtpBtn.disabled = busy;
   if (resendOtpBtn) resendOtpBtn.disabled = busy;
@@ -597,8 +640,103 @@ function updateEmailAuthModeUi() {
   }
 }
 
+toggleWhatsAppAuthBtn?.addEventListener('click', () => {
+  clearAuthNotices();
+  emailAuthForm?.classList.add('hidden');
+  hideOtpVerificationPanel();
+  if (toggleEmailAuthBtn) toggleEmailAuthBtn.textContent = 'Use Email & Password';
+  whatsappAuthForm?.classList.toggle('hidden');
+  const open = !whatsappAuthForm?.classList.contains('hidden');
+  if (!open) hideWhatsAppOtpPanel();
+  if (open) waPhoneInput?.focus();
+});
+
+whatsappAuthForm?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (signInPending) return;
+  clearAuthNotices();
+  const phone = normalizePhoneE164(waPhoneInput?.value || '');
+  const displayName = String(waDisplayNameInput?.value || '').trim();
+  const email = normalizeEmail(waEmailInput?.value || '');
+  if (!phone) {
+    showAuthError('Enter a valid WhatsApp number in international format (e.g. +923001234567).');
+    return;
+  }
+  if (email && !isValidEmailAddress(email)) {
+    showAuthError('Enter a valid email address or leave the optional email blank.');
+    return;
+  }
+  setSignInBusy(true);
+  if (sendWaOtpBtn) sendWaOtpBtn.textContent = 'Sending WhatsApp OTP...';
+  try {
+    const { phone: cleanPhone } = await supabaseSendWhatsAppOtp(SUPABASE_WEB_CONFIG, phone, { displayName, email });
+    showAuthInfo(`6-digit OTP code sent on WhatsApp to ${cleanPhone}. Enter it below to verify.`);
+    showWhatsAppOtpPanel(cleanPhone);
+  } catch (err) {
+    showAuthError(err?.message || 'Could not send WhatsApp OTP.');
+  } finally {
+    setSignInBusy(false);
+    if (sendWaOtpBtn) sendWaOtpBtn.textContent = 'Send WhatsApp OTP Code';
+  }
+});
+
+verifyWaOtpBtn?.addEventListener('click', async () => {
+  if (signInPending) return;
+  clearAuthNotices();
+  const phone = pendingWaPhone || normalizePhoneE164(waPhoneInput?.value || '');
+  const code = String(waOtpInput?.value || '').trim();
+  const displayName = String(waDisplayNameInput?.value || '').trim();
+  const email = normalizeEmail(waEmailInput?.value || '');
+  if (!phone) {
+    showAuthError('Enter your WhatsApp phone number above first.');
+    return;
+  }
+  setSignInBusy(true);
+  if (verifyWaOtpBtn) verifyWaOtpBtn.textContent = 'Verifying...';
+  try {
+    const { session } = await supabaseVerifyWhatsAppOtp(SUPABASE_WEB_CONFIG, phone, code, { displayName, email });
+    hideWhatsAppOtpPanel();
+    whatsappAuthForm?.classList.add('hidden');
+    applyAuthSession(session);
+  } catch (err) {
+    showAuthError(err?.message || 'WhatsApp OTP invalid or expired. Tap Resend.');
+  } finally {
+    setSignInBusy(false);
+    if (verifyWaOtpBtn) verifyWaOtpBtn.textContent = 'Verify & Sign In';
+  }
+});
+
+resendWaOtpBtn?.addEventListener('click', async () => {
+  if (signInPending) return;
+  clearAuthNotices();
+  const phone = pendingWaPhone || normalizePhoneE164(waPhoneInput?.value || '');
+  const displayName = String(waDisplayNameInput?.value || '').trim();
+  const email = normalizeEmail(waEmailInput?.value || '');
+  if (!phone) {
+    showAuthError('Enter your WhatsApp phone number above first.');
+    return;
+  }
+  setSignInBusy(true);
+  try {
+    const { phone: cleanPhone } = await supabaseSendWhatsAppOtp(SUPABASE_WEB_CONFIG, phone, { displayName, email });
+    showAuthInfo(`Fresh WhatsApp OTP sent to ${cleanPhone}.`);
+  } catch (err) {
+    showAuthError(err?.message || 'Could not resend WhatsApp OTP.');
+  } finally {
+    setSignInBusy(false);
+  }
+});
+
+changeWaPhoneBtn?.addEventListener('click', () => {
+  clearAuthNotices();
+  hideWhatsAppOtpPanel();
+  waPhoneInput?.focus();
+});
+
 toggleEmailAuthBtn?.addEventListener('click', () => {
   clearAuthNotices();
+  whatsappAuthForm?.classList.add('hidden');
+  hideWhatsAppOtpPanel();
   emailAuthForm?.classList.toggle('hidden');
   const open = !emailAuthForm?.classList.contains('hidden');
   toggleEmailAuthBtn.textContent = open ? 'Hide Email Form' : 'Use Email & Password';
@@ -617,6 +755,7 @@ googleSignInBtn.addEventListener('click', () => {
   if (signInPending) return;
   clearAuthNotices();
   hideOtpVerificationPanel();
+  hideWhatsAppOtpPanel();
   const redirectTarget = `${window.location.origin}${window.location.pathname}${window.location.search}`;
   const oauthUrl = buildSupabaseGoogleOAuthUrl(SUPABASE_WEB_CONFIG, redirectTarget);
   if (!oauthUrl) {
@@ -813,14 +952,17 @@ function saveCachedWebWorkspace(uid) {
 }
 
 function buildFallbackProfile(user) {
-  const email = String(user.email || '').trim().toLowerCase();
-  const username = normalizeUsername(email || user.displayName, user.uid);
+  const email = normalizeEmail(user.email || '');
+  const phone = normalizePhoneE164(user.phone || '');
+  const baseHandle = email || (phone ? `wa_${phone.slice(-6)}` : user.displayName);
+  const username = normalizeUsername(baseHandle, user.uid);
   const displayName = (user.displayName || username).slice(0, 80);
   const avatarKeys = ['avatar_aria', 'avatar_elena', 'avatar_kenji', 'avatar_nord', 'avatar_matcha', 'avatar_sora'];
   const avatarKey = avatarKeys[Math.abs(user.uid.charCodeAt(0) + user.uid.length) % avatarKeys.length];
   return {
     userId: user.uid,
     email,
+    phone,
     username,
     displayName,
     category: 'Visual Creator',
@@ -942,28 +1084,49 @@ async function initializeSupabaseWorkspace(user) {
 
 async function ensureUserSeededInSupabase(user) {
   const uid = user.uid;
-  const email = String(user.email || '').trim().toLowerCase();
+  const email = normalizeEmail(user.email || '');
+  const phone = normalizePhoneE164(user.phone || '');
   const fallback = buildFallbackProfile(user);
   try {
-    const queryFilter = email
-      ? `select=*&or=(user_id.eq.${encodeURIComponent(uid)},email.ilike.${encodeURIComponent(email)})&limit=2`
-      : `select=*&user_id=eq.${encodeURIComponent(uid)}&limit=1`;
+    const orParts = [`user_id.eq.${encodeURIComponent(uid)}`];
+    if (email) orParts.push(`email.ilike.${encodeURIComponent(email)}`);
+    if (phone) orParts.push(`phone.eq.${encodeURIComponent(phone)}`);
+    const queryFilter = `select=*&or=(${orParts.join(',')})&limit=3`;
     const existingProfiles = await selectSupabaseTable(
       SUPABASE_WEB_CONFIG,
       'profiles',
       queryFilter
     );
-    const matched = existingProfiles.find((p) => p.user_id === uid) || existingProfiles[0] || null;
+    const matched = existingProfiles.find((p) => p.user_id === uid) ||
+      (email ? existingProfiles.find((p) => normalizeEmail(p.email || '') === email) : null) ||
+      (phone ? existingProfiles.find((p) => normalizePhoneE164(p.phone || '') === phone) : null) ||
+      existingProfiles[0] ||
+      null;
     if (matched) {
       const hydrated = mapSupabaseProfileToWeb(matched);
       if (matched.user_id && matched.user_id !== uid) {
-        const mergedProfile = { ...state.profile, ...hydrated, userId: uid, email: email || hydrated.email };
+        const mergedProfile = {
+          ...state.profile,
+          ...hydrated,
+          userId: uid,
+          email: email || hydrated.email,
+          phone: phone || hydrated.phone
+        };
         state.profile = mergedProfile;
         await mergeSupabaseProfileIntoTarget(SUPABASE_WEB_CONFIG, matched.user_id, mergedProfile).catch(() => undefined);
       } else {
-        state.profile = { ...state.profile, ...hydrated, userId: hydrated.userId || uid };
-        if (email && !matched.email && matched.user_id === uid) {
-          await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'profiles', `user_id=eq.${encodeURIComponent(uid)}`, { email }).catch(() => undefined);
+        state.profile = {
+          ...state.profile,
+          ...hydrated,
+          userId: hydrated.userId || uid,
+          email: hydrated.email || email,
+          phone: hydrated.phone || phone
+        };
+        const alignPatch = {};
+        if (email && !matched.email) alignPatch.email = email;
+        if (phone && !matched.phone) alignPatch.phone = phone;
+        if (Object.keys(alignPatch).length > 0 && matched.user_id === uid) {
+          await patchSupabaseRows(SUPABASE_WEB_CONFIG, 'profiles', `user_id=eq.${encodeURIComponent(uid)}`, alignPatch).catch(() => undefined);
         }
       }
       saveCachedWebWorkspace(uid);
@@ -974,6 +1137,7 @@ async function ensureUserSeededInSupabase(user) {
         [{
           user_id: uid,
           email,
+          phone,
           username: fallback.username,
           display_name: fallback.displayName,
           category: fallback.category,
@@ -1085,9 +1249,11 @@ async function refreshAllFromSupabase({ showErrors = false, forceRender = false 
         if (overrideIdx >= 0) mappedCreators[overrideIdx] = { ...mappedCreators[overrideIdx], ...pm.profile.data };
       }
       state.creators = mappedCreators;
-      const myEmail = String(state.user.email || '').trim().toLowerCase();
+      const myEmail = normalizeEmail(state.user.email || '');
+      const myPhone = normalizePhoneE164(state.user.phone || '');
       const mine = mappedCreators.find((p) => p.userId === state.user.uid) ||
-        (myEmail ? mappedCreators.find((p) => p.email === myEmail) : null);
+        (myEmail ? mappedCreators.find((p) => p.email === myEmail) : null) ||
+        (myPhone ? mappedCreators.find((p) => p.phone === myPhone) : null);
       if (mine) {
         state.profile = { ...state.profile, ...mine, ...(pm.profile?.data || {}) };
       } else if (pm.profile?.data) {
@@ -2101,12 +2267,16 @@ function renderCreateStudio() {
   const isClipMode = s.mode === 'CLIP';
   const isStoryMode = s.mode === 'STORY';
 
+  const activeThumbSrc = s.uploadedSrc || s.autoThumbUrl || resolveImageSrc({ imageKey: s.imageKey });
+  const maxAllowedMs = isStoryMode ? MAX_STORY_VIDEO_DURATION_MS : MAX_VIDEO_DURATION_MS;
+  const videoTooLong = Boolean(s.uploadedVideoUrl) && s.videoDurationMs > MAX_VIDEO_DURATION_MS;
+
   mainStage.innerHTML = `
     <div class="stage-wide">
       <div class="section-header">
         <div>
           <h2>Create Studio</h2>
-          <div class="muted small">Upload photos or HD video clips directly to Supabase Storage</div>
+          <div class="muted small">Upload photos or up to 80-minute HD videos with custom cover thumbnails</div>
         </div>
         <div class="chip-row">
           <button type="button" class="chip ${s.mode === 'POST' ? 'active' : ''}" data-studio-mode="POST">Photo Post</button>
@@ -2126,9 +2296,11 @@ function renderCreateStudio() {
           </div>
 
           <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
-            <label class="btn-primary btn-sm" for="studioFileInput">${isClipMode ? 'Choose Cover Photo' : 'Upload Photo'}</label>
-            <input id="studioFileInput" type="file" accept="image/*" class="hidden" />
-            <label class="btn-outline btn-sm" for="studioVideoInput">${s.uploadedVideoUrl ? 'Change Video' : 'Upload Video (.mp4)'}</label>
+            ${!s.uploadedVideoUrl ? `
+              <label class="btn-primary btn-sm" for="studioFileInput">Upload Photo</label>
+              <input id="studioFileInput" type="file" accept="image/*" class="hidden" />
+            ` : ''}
+            <label class="${s.uploadedVideoUrl ? 'btn-primary btn-sm' : 'btn-outline btn-sm'}" for="studioVideoInput">${s.uploadedVideoUrl ? 'Change Video (max 80m)' : 'Upload Video (up to 80m)'}</label>
             <input id="studioVideoInput" type="file" accept="video/*" class="hidden" />
             ${!s.uploadedVideoUrl ? '<button type="button" class="btn-outline btn-sm" id="studioRotateBtn">Rotate 90&deg;</button>' : ''}
             <button type="button" class="btn-ghost btn-sm" id="studioResetEditBtn">Reset</button>
@@ -2176,10 +2348,33 @@ function renderCreateStudio() {
           ` : `
             <div class="consent-row">
               <div>
-                <strong>Video Ready for Upload</strong>
-                <div class="muted small">Selected video will stream directly via Supabase Video Storage.</div>
+                <strong>Video Ready (${formatVideoDurationMs(s.videoDurationMs)} / ${isStoryMode ? '0:30' : '80:00'})</strong>
+                <div class="muted small">
+                  ${
+                    videoTooLong
+                      ? '<span style="color:#fca5a5;">Video exceeds the 80-minute limit. Please select a shorter video.</span>'
+                      : 'Large videos stream reliably via chunked resumable upload to Supabase Storage.'
+                  }
+                </div>
               </div>
               <button type="button" class="btn-outline btn-sm" id="clearStudioVideoBtn">Remove Video</button>
+            </div>
+
+            <div class="studio-thumb-card">
+              <div class="studio-thumb-row">
+                <img id="studioThumbPreview" src="${escapeHtml(activeThumbSrc)}" alt="Video cover thumbnail" class="studio-thumb-img" />
+                <div style="flex:1;min-width:160px;">
+                  <strong>Video Cover Thumbnail</strong>
+                  <div class="muted small" style="margin-top:2px;">
+                    ${s.uploadedFile ? 'Custom cover selected — shown in Feed, Explore &amp; Profile.' : 'Auto-captured frame from your video (or pick a custom image).'}
+                  </div>
+                </div>
+              </div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <label class="btn-outline btn-sm" for="studioThumbInput">Choose Custom Thumbnail</label>
+                <input id="studioThumbInput" type="file" accept="image/*" class="hidden" />
+                ${s.uploadedFile ? '<button type="button" class="btn-ghost btn-sm" id="resetStudioThumbBtn">Use Auto Frame</button>' : ''}
+              </div>
             </div>
           `}
         </div>
@@ -2254,9 +2449,35 @@ function renderCreateStudio() {
             </label>
           ` : ''}
 
-          <button type="button" class="btn-primary btn-lg full-width" id="publishPostBtn" ${s.publishing ? 'disabled' : ''}>
-            ${s.publishing ? 'Uploading & Publishing...' : (isStoryMode ? 'Share 24h Story' : (isClipMode || s.uploadedVideoUrl ? 'Publish Video Clip' : 'Publish Post'))}
+          <button
+            type="button"
+            class="btn-primary btn-lg full-width btn-publish-story ${s.publishing ? 'is-publishing' : ''} ${s.saved ? 'is-saved' : ''}"
+            id="publishPostBtn"
+            aria-live="polite"
+            ${s.publishing ? 'disabled' : ''}
+          >
+            <span class="publish-btn-spinner" aria-hidden="true"></span>
+            <span class="publish-btn-check" aria-hidden="true">&#10003;</span>
+            <span class="publish-btn-label" id="publishPostBtnLabel">
+              ${
+                s.saved
+                  ? 'Saved to Supabase!'
+                  : (s.publishing
+                    ? (isStoryMode ? 'Uploading & saving story...' : 'Uploading & Publishing...')
+                    : (isStoryMode ? 'Publish Story' : (isClipMode || s.uploadedVideoUrl ? 'Publish Video Clip' : 'Publish Post')))
+              }
+            </span>
           </button>
+          <div class="publish-status-track ${s.publishing || s.saved ? 'is-visible' : ''} ${s.saved ? 'is-saved' : ''}" id="studioPublishStatus" aria-live="polite">
+            <div class="publish-status-row">
+              <span class="publish-status-text" id="studioPublishStatusText">
+                ${s.saved ? 'Story saved to Supabase! Returning to feed...' : (isStoryMode ? 'Uploading story media & saving to Supabase...' : 'Uploading media & saving to Supabase...')}
+              </span>
+            </div>
+            <div class="publish-progress-bar">
+              <div class="publish-progress-fill"></div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -2276,36 +2497,125 @@ function renderCreateStudio() {
   };
   redraw();
 
-  document.getElementById('studioFileInput').onchange = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const fileInputEl = document.getElementById('studioFileInput');
+  if (fileInputEl) {
+    fileInputEl.onchange = (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      if (s.uploadedSrc?.startsWith('blob:')) URL.revokeObjectURL(s.uploadedSrc);
+      s.uploadedSrc = URL.createObjectURL(file);
+      s.uploadedFile = file;
+      renderCreateStudio();
+    };
+  }
+
+  const thumbInputEl = document.getElementById('studioThumbInput');
+  if (thumbInputEl) {
+    thumbInputEl.onchange = (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      if (s.uploadedSrc?.startsWith('blob:')) URL.revokeObjectURL(s.uploadedSrc);
+      s.uploadedSrc = URL.createObjectURL(file);
+      s.uploadedFile = file;
+      renderCreateStudio();
+    };
+  }
+
+  document.getElementById('resetStudioThumbBtn')?.addEventListener('click', () => {
     if (s.uploadedSrc?.startsWith('blob:')) URL.revokeObjectURL(s.uploadedSrc);
-    s.uploadedSrc = URL.createObjectURL(file);
-    s.uploadedFile = file;
+    s.uploadedSrc = null;
+    s.uploadedFile = null;
     renderCreateStudio();
+  });
+
+  const attachStudioVideoMetadataListeners = (vidEl) => {
+    if (!vidEl) return;
+    const captureFrame = () => {
+      try {
+        if (!vidEl.videoWidth || !vidEl.videoHeight) return;
+        const c = document.createElement('canvas');
+        const scale = Math.min(1, 720 / vidEl.videoWidth);
+        c.width = Math.max(1, Math.round(vidEl.videoWidth * scale));
+        c.height = Math.max(1, Math.round(vidEl.videoHeight * scale));
+        const ctx = c.getContext('2d');
+        ctx.drawImage(vidEl, 0, 0, c.width, c.height);
+        c.toBlob((blob) => {
+          if (!blob) return;
+          if (s.autoThumbUrl?.startsWith('blob:')) URL.revokeObjectURL(s.autoThumbUrl);
+          s.autoThumbBlob = blob;
+          s.autoThumbUrl = URL.createObjectURL(blob);
+          const previewImg = document.getElementById('studioThumbPreview');
+          if (previewImg && !s.uploadedFile) previewImg.src = s.autoThumbUrl;
+        }, 'image/jpeg', 0.85);
+      } catch {
+        // Ignore cross-origin / codec capture failure
+      }
+    };
+    vidEl.onloadedmetadata = () => {
+      s.videoDurationMs = Math.round((vidEl.duration || 0) * 1000);
+      if (s.videoDurationMs > MAX_VIDEO_DURATION_MS) {
+        showToast('Video exceeds the 80-minute limit. Please choose a video up to 80 minutes.');
+      }
+      renderCreateStudio();
+    };
+    vidEl.onloadeddata = () => {
+      if (!s.autoThumbBlob) captureFrame();
+    };
+    vidEl.onseeked = () => {
+      if (!s.uploadedFile && !s.autoThumbBlob) captureFrame();
+    };
   };
+
+  const currentVidPreview = document.getElementById('studioVideoPreview');
+  if (currentVidPreview && s.uploadedVideoUrl) {
+    currentVidPreview.onloadeddata = () => {
+      if (!s.autoThumbBlob) {
+        try {
+          if (currentVidPreview.videoWidth && currentVidPreview.videoHeight) {
+            const c = document.createElement('canvas');
+            const scale = Math.min(1, 720 / currentVidPreview.videoWidth);
+            c.width = Math.max(1, Math.round(currentVidPreview.videoWidth * scale));
+            c.height = Math.max(1, Math.round(currentVidPreview.videoHeight * scale));
+            c.getContext('2d').drawImage(currentVidPreview, 0, 0, c.width, c.height);
+            c.toBlob((blob) => {
+              if (!blob) return;
+              if (s.autoThumbUrl?.startsWith('blob:')) URL.revokeObjectURL(s.autoThumbUrl);
+              s.autoThumbBlob = blob;
+              s.autoThumbUrl = URL.createObjectURL(blob);
+              const previewImg = document.getElementById('studioThumbPreview');
+              if (previewImg && !s.uploadedFile) previewImg.src = s.autoThumbUrl;
+            }, 'image/jpeg', 0.85);
+          }
+        } catch {
+          // Ignore frame capture error
+        }
+      }
+    };
+  }
 
   document.getElementById('studioVideoInput').onchange = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
     if (s.uploadedVideoUrl?.startsWith('blob:')) URL.revokeObjectURL(s.uploadedVideoUrl);
+    if (s.autoThumbUrl?.startsWith('blob:')) URL.revokeObjectURL(s.autoThumbUrl);
     s.uploadedVideoUrl = URL.createObjectURL(file);
     s.uploadedVideoFile = file;
+    s.autoThumbUrl = null;
+    s.autoThumbBlob = null;
+    s.videoDurationMs = 0;
     s.mode = 'CLIP';
     s.isReel = true;
     renderCreateStudio();
-    const vidEl = document.getElementById('studioVideoPreview');
-    if (vidEl) {
-      vidEl.onloadedmetadata = () => {
-        s.videoDurationMs = Math.round((vidEl.duration || 0) * 1000);
-      };
-    }
+    attachStudioVideoMetadataListeners(document.getElementById('studioVideoPreview'));
   };
 
   document.getElementById('clearStudioVideoBtn')?.addEventListener('click', () => {
     if (s.uploadedVideoUrl?.startsWith('blob:')) URL.revokeObjectURL(s.uploadedVideoUrl);
+    if (s.autoThumbUrl?.startsWith('blob:')) URL.revokeObjectURL(s.autoThumbUrl);
     s.uploadedVideoUrl = null;
     s.uploadedVideoFile = null;
+    s.autoThumbUrl = null;
+    s.autoThumbBlob = null;
     s.videoDurationMs = 0;
     s.mode = 'POST';
     renderCreateStudio();
@@ -2395,8 +2705,33 @@ function renderCreateStudio() {
 
   document.getElementById('publishPostBtn').onclick = async () => {
     if (!state.profile || s.publishing) return;
+    if (s.uploadedVideoFile && s.videoDurationMs > MAX_VIDEO_DURATION_MS) {
+      showToast('Videos up to 80 minutes are supported. Please select a video within 80:00.');
+      return;
+    }
     s.publishing = true;
-    renderCreateStudio();
+    s.saved = false;
+    const publishBtn = document.getElementById('publishPostBtn');
+    const publishLabel = document.getElementById('publishPostBtnLabel');
+    const publishStatus = document.getElementById('studioPublishStatus');
+    const publishStatusText = document.getElementById('studioPublishStatusText');
+    if (publishBtn) {
+      publishBtn.disabled = true;
+      publishBtn.classList.remove('is-saved');
+      publishBtn.classList.add('is-publishing');
+    }
+    if (publishLabel) {
+      publishLabel.textContent = isStoryMode ? 'Uploading & saving story...' : 'Uploading & Publishing...';
+    }
+    if (publishStatus) {
+      publishStatus.classList.remove('is-saved');
+      publishStatus.classList.add('is-visible');
+    }
+    if (publishStatusText) {
+      publishStatusText.textContent = isStoryMode
+        ? 'Uploading story media & saving to Supabase...'
+        : 'Uploading media & saving to Supabase...';
+    }
     try {
       await ensureUserSeededInSupabase(state.user);
 
@@ -2405,27 +2740,46 @@ function renderCreateStudio() {
       let videoUrl = null;
       const itemId = makeClientId(isStoryMode ? 'story' : 'post');
 
-      // Upload image/cover frame to Supabase Storage
-      const hasCustomOrEditedImage = Boolean(s.uploadedSrc) || s.filterTag !== 'NONE' || s.aspectRatio !== '1:1' || s.rotationDeg !== 0 || s.brightness !== 0 || s.contrast !== 1 || s.warmth !== 0;
-      if (hasCustomOrEditedImage && !s.uploadedVideoFile) {
-        const exportCanvas = document.createElement('canvas');
-        await renderEditedCanvas(exportCanvas, activeSrc, s);
-        const blob = await new Promise((resolve) => exportCanvas.toBlob(resolve, 'image/jpeg', 0.88));
-        if (blob) {
+      // Upload image or video cover thumbnail to Supabase Storage
+      if (s.uploadedVideoFile) {
+        const thumbSource = s.uploadedFile || s.autoThumbBlob;
+        if (thumbSource) {
+          const thumbExt = s.uploadedFile
+            ? ((s.uploadedFile.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg')
+            : 'jpg';
           imageUrl = await uploadWebFileToStorage(
             SUPABASE_WEB_CONFIG,
             'momi-media',
-            `posts/${state.user.uid}/${itemId}.jpg`,
-            blob,
-            'image/jpeg'
+            `posts/${state.user.uid}/${itemId}_cover.${thumbExt}`,
+            thumbSource,
+            thumbSource.type || 'image/jpeg'
           );
+          if (!imageUrl) {
+            imageData = await compressFileToBase64(thumbSource, 960, MAX_IMAGE_BASE64_CHARS).catch(() => null);
+          }
         }
-        if (!imageUrl) {
-          imageData = exportCanvasToBase64Jpeg(exportCanvas, MAX_IMAGE_BASE64_CHARS);
+      } else {
+        const hasCustomOrEditedImage = Boolean(s.uploadedSrc) || s.filterTag !== 'NONE' || s.aspectRatio !== '1:1' || s.rotationDeg !== 0 || s.brightness !== 0 || s.contrast !== 1 || s.warmth !== 0;
+        if (hasCustomOrEditedImage) {
+          const exportCanvas = document.createElement('canvas');
+          await renderEditedCanvas(exportCanvas, activeSrc, s);
+          const blob = await new Promise((resolve) => exportCanvas.toBlob(resolve, 'image/jpeg', 0.88));
+          if (blob) {
+            imageUrl = await uploadWebFileToStorage(
+              SUPABASE_WEB_CONFIG,
+              'momi-media',
+              `posts/${state.user.uid}/${itemId}.jpg`,
+              blob,
+              'image/jpeg'
+            );
+          }
+          if (!imageUrl) {
+            imageData = exportCanvasToBase64Jpeg(exportCanvas, MAX_IMAGE_BASE64_CHARS);
+          }
         }
       }
 
-      // Upload video to Supabase Storage if selected
+      // Upload video to Supabase Storage if selected (auto chunked TUS for long up to 80-min videos)
       if (s.uploadedVideoFile) {
         const ext = (s.uploadedVideoFile.name.split('.').pop() || 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp4';
         videoUrl = await uploadWebFileToStorage(
@@ -2508,8 +2862,28 @@ function renderCreateStudio() {
         showToast('Published to Momi across Web & Android!');
       }
 
+      s.publishing = false;
+      s.saved = true;
+      if (publishBtn) {
+        publishBtn.classList.remove('is-publishing');
+        publishBtn.classList.add('is-saved');
+      }
+      if (publishLabel) {
+        publishLabel.textContent = 'Saved to Supabase!';
+      }
+      if (publishStatus) {
+        publishStatus.classList.add('is-saved');
+      }
+      if (publishStatusText) {
+        publishStatusText.textContent = isStoryMode
+          ? 'Story saved to Supabase! Returning to feed...'
+          : 'Saved to Supabase! Returning to feed...';
+      }
+      await new Promise((resolve) => setTimeout(resolve, 420));
+
       if (s.uploadedSrc?.startsWith('blob:')) URL.revokeObjectURL(s.uploadedSrc);
       if (s.uploadedVideoUrl?.startsWith('blob:')) URL.revokeObjectURL(s.uploadedVideoUrl);
+      if (s.autoThumbUrl?.startsWith('blob:')) URL.revokeObjectURL(s.autoThumbUrl);
 
       state.studio = {
         mode: 'POST',
@@ -2518,6 +2892,8 @@ function renderCreateStudio() {
         uploadedFile: null,
         uploadedVideoUrl: null,
         uploadedVideoFile: null,
+        autoThumbUrl: null,
+        autoThumbBlob: null,
         videoDurationMs: 0,
         filterTag: 'NONE',
         aspectRatio: '1:1',
@@ -2534,13 +2910,26 @@ function renderCreateStudio() {
         isReel: false,
         hashtags: [],
         taggedUsernames: [],
-        publishing: false
+        publishing: false,
+        saved: false
       };
       await refreshAllFromSupabase({ showErrors: false });
       navigateTo('home');
     } catch (err) {
       s.publishing = false;
-      renderCreateStudio();
+      s.saved = false;
+      if (publishBtn) {
+        publishBtn.disabled = false;
+        publishBtn.classList.remove('is-publishing', 'is-saved');
+      }
+      if (publishLabel) {
+        publishLabel.textContent = isStoryMode
+          ? 'Publish Story'
+          : (isClipMode || s.uploadedVideoUrl ? 'Publish Video Clip' : 'Publish Post');
+      }
+      if (publishStatus) {
+        publishStatus.classList.remove('is-visible', 'is-saved');
+      }
       showToast(err?.message || 'Publish failed.');
     }
   };
@@ -4008,7 +4397,9 @@ function openEditProfileModal() {
       bio: patch.bio,
       website: patch.website,
       avatarUrl: patch.avatar_url,
-      avatarData: patch.avatar_data
+      avatarData: patch.avatar_data,
+      email: p.email || normalizeEmail(state.user?.email || ''),
+      phone: p.phone || normalizePhoneE164(state.user?.phone || '')
     };
     state.pendingMutations.profile = { data: optimistic, expiresAt: Date.now() + 12000 };
     state.profile = { ...state.profile, ...optimistic };

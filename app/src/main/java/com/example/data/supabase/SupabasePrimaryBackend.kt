@@ -33,6 +33,7 @@ import com.example.util.StudioMusicCatalog
 import com.example.data.model.Timestamp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.net.URLEncoder
 import java.util.UUID
 
@@ -122,20 +123,25 @@ class SupabasePrimaryBackend(
         var videoFallback: String? = null
         var videoChunksFallback: List<String> = emptyList()
         if (mediaType == "VIDEO" && !localVideoPath.isNullOrBlank()) {
-            val rawVideo = MediaAssets.readUploadBytesUpToLimit(localVideoPath, maxBytes = 100_000_000L)
-            if (rawVideo != null) {
-                videoUrl = client.uploadStorageBytes(
+            val videoFile = File(localVideoPath)
+            var storageErr: String? = null
+            if (videoFile.exists() && videoFile.length() > 0L) {
+                val uploadRes = client.uploadStorageFile(
                     bucket = "momi-videos",
                     objectPath = "videos/$mediaId.mp4",
-                    bytes = rawVideo,
+                    file = videoFile,
                     contentType = "video/mp4"
-                ).getOrNull()
+                )
+                videoUrl = uploadRes.getOrNull()
+                storageErr = uploadRes.exceptionOrNull()?.message
             }
             if (videoUrl == null) {
                 val payload = MediaAssets.prepareVideoPayloadForFirestore(context.applicationContext, localVideoPath)
                 if (!payload.isReady) {
                     return UploadedMediaUrls(
-                        failureReason = payload.failureReason ?: "Could not upload or prepare video clip."
+                        failureReason = storageErr?.takeIf { it.isNotBlank() }
+                            ?: payload.failureReason
+                            ?: "Could not upload or prepare video clip."
                     )
                 }
                 videoFallback = payload.inlineVideoData
@@ -165,7 +171,7 @@ class SupabasePrimaryBackend(
     }
 
     suspend fun createPost(profile: UserProfile, post: Post): Result<Unit> {
-        client.ensureProfileExists(profile.userId, profile.username, profile.displayName, profile.avatarKey, profile.avatarUrl, profile.email)
+        client.ensureProfileExists(profile.userId, profile.username, profile.displayName, profile.avatarKey, profile.avatarUrl, profile.email, profile.phone)
         return client.upsertRows("posts", listOf(MomiSupabaseSchema.toPostRow(post)), onConflict = "id").map { Unit }
     }
 
@@ -173,7 +179,7 @@ class SupabasePrimaryBackend(
         client.deleteRows("posts", "id=eq.${urlEncode(postId)}")
 
     suspend fun createStory(profile: UserProfile, story: Story): Result<Unit> {
-        client.ensureProfileExists(profile.userId, profile.username, profile.displayName, profile.avatarKey, profile.avatarUrl, profile.email)
+        client.ensureProfileExists(profile.userId, profile.username, profile.displayName, profile.avatarKey, profile.avatarUrl, profile.email, profile.phone)
         return client.upsertRows("stories", listOf(MomiSupabaseSchema.toStoryRow(story)), onConflict = "id").map { Unit }
     }
 

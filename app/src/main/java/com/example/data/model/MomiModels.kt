@@ -62,6 +62,7 @@ data class UserProfile(
     val userId: String = "",
     val username: String = "",
     val email: String = "",
+    val phone: String = "",
     val displayName: String = "",
     val category: String = "",
     val bio: String = "",

@@ -37,6 +37,8 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.io.RandomAccessFile
 import java.net.URI
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
@@ -44,6 +46,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
+import okhttp3.RequestBody.Companion.asRequestBody
 
 data class SupabaseHealthResult(
     val configured: Boolean,
@@ -59,7 +62,8 @@ data class SupabaseAuthSession(
     val userId: String,
     val email: String?,
     val displayName: String? = null,
-    val avatarUrl: String? = null
+    val avatarUrl: String? = null,
+    val phone: String? = null
 )
 
 data class SupabaseSignUpResult(
@@ -99,10 +103,35 @@ data class SupabaseFeedBundle(
 
 object MomiSupabaseSchema {
     const val STORY_TTL_MS = 86_400_000L
+    const val MAX_VIDEO_DURATION_MS = 4_800_000L // 80 minutes
     const val POSTS_LIMIT = 20L
     const val FOLLOWS_LIMIT = 100L
     const val MARKERS_LIMIT = 80L
     const val TRANSACTIONS_LIMIT = 25L
+
+    private val EMAIL_REGEX = Regex("""^[^\s@]+@[^\s@]+\.[^\s@]{2,}$""")
+    private val E164_REGEX = Regex("""^\+[1-9]\d{6,14}$""")
+
+    fun normalizeEmail(raw: String?): String =
+        raw?.trim()?.lowercase(Locale.US).orEmpty()
+
+    fun isValidEmailAddress(raw: String?): Boolean {
+        val clean = normalizeEmail(raw)
+        return clean.length in 5..160 && EMAIL_REGEX.matches(clean)
+    }
+
+    fun normalizePhoneE164(raw: String?): String {
+        val stripped = raw?.trim().orEmpty().replace(Regex("""[\s\-().]"""), "")
+        if (stripped.isEmpty()) return ""
+        val withPlus = when {
+            stripped.startsWith("+") -> stripped
+            stripped.startsWith("00") -> "+${stripped.drop(2)}"
+            else -> "+$stripped"
+        }
+        return if (E164_REGEX.matches(withPlus)) withPlus else ""
+    }
+
+    fun isValidPhoneE164(raw: String?): Boolean = normalizePhoneE164(raw).isNotEmpty()
 
     val TABLES: Set<String> = setOf(
         "profiles",
@@ -269,6 +298,8 @@ object MomiSupabaseSchema {
         return linkedMapOf(
             "user_id" to uid,
             "username" to profile.username.ifBlank { "momi.${uid.take(6)}" }.take(50),
+            "email" to normalizeEmail(profile.email).take(160),
+            "phone" to normalizePhoneE164(profile.phone).take(32),
             "display_name" to profile.displayName.ifBlank { "Momi Creator" }.take(80),
             "category" to profile.category.take(80),
             "bio" to profile.bio.take(300),
@@ -304,7 +335,7 @@ object MomiSupabaseSchema {
         "media_type" to post.mediaType.ifBlank { "IMAGE" },
         "video_url" to post.videoUrl,
         "video_data" to post.videoData,
-        "video_duration_ms" to post.videoDurationMs.coerceAtLeast(0L),
+        "video_duration_ms" to post.videoDurationMs.coerceIn(0L, MAX_VIDEO_DURATION_MS),
         "filter_tag" to post.filterTag.ifBlank { "NONE" },
         "aspect_ratio" to post.aspectRatio.ifBlank { "1:1" },
         "tagged_usernames" to post.taggedUsernames,
@@ -351,7 +382,7 @@ object MomiSupabaseSchema {
         "media_type" to story.mediaType.ifBlank { "IMAGE" },
         "video_url" to story.videoUrl,
         "video_data" to story.videoData,
-        "video_duration_ms" to story.videoDurationMs.coerceAtLeast(0L),
+        "video_duration_ms" to story.videoDurationMs.coerceIn(0L, MAX_VIDEO_DURATION_MS),
         "audio_title" to story.audioTitle.take(120),
         "audio_url" to story.audioUrl,
         "audio_data" to story.audioData,
@@ -508,7 +539,7 @@ object MomiSupabaseSchema {
         "extra_image_datas" to product.extraImageDatas,
         "video_url" to product.videoUrl,
         "video_data" to product.videoData,
-        "video_duration_ms" to product.videoDurationMs.coerceAtLeast(0L),
+        "video_duration_ms" to product.videoDurationMs.coerceIn(0L, MAX_VIDEO_DURATION_MS),
         "stock_count" to product.stockCount.coerceIn(0L, 99999L),
         "is_featured" to product.isFeatured,
         "created_at" to formatTimestampIso(product.createdAt)
@@ -915,14 +946,21 @@ class MomiSupabaseClient(
     private fun parseAuthSession(
         json: JSONObject,
         displayNameHint: String? = null,
-        avatarUrlHint: String? = null
+        avatarUrlHint: String? = null,
+        emailHint: String? = null,
+        phoneHint: String? = null
     ): SupabaseAuthSession {
         val access = json.optString("access_token")
         val refresh = json.optString("refresh_token")
         val userObj = json.optJSONObject("user")
         val userId = userObj?.optString("id").orEmpty()
         val email = userObj?.optString("email")?.takeIf { it.isNotBlank() }
+            ?: emailHint?.let { MomiSupabaseSchema.normalizeEmail(it) }?.takeIf { it.isNotBlank() }
         val meta = userObj?.optJSONObject("user_metadata")
+        val rawPhone = userObj?.optString("phone")?.takeIf { it.isNotBlank() }
+            ?: meta?.optString("phone")?.takeIf { it.isNotBlank() }
+            ?: phoneHint?.takeIf { it.isNotBlank() }
+        val phone = rawPhone?.let { MomiSupabaseSchema.normalizePhoneE164(it).ifBlank { it } }
         val displayName = meta?.optString("full_name")?.takeIf { it.isNotBlank() }
             ?: meta?.optString("name")?.takeIf { it.isNotBlank() }
             ?: displayNameHint?.takeIf { it.isNotBlank() }
@@ -938,7 +976,8 @@ class MomiSupabaseClient(
             userId = userId,
             email = email,
             displayName = displayName,
-            avatarUrl = avatarUrl
+            avatarUrl = avatarUrl,
+            phone = phone
         )
     }
 
@@ -1026,9 +1065,18 @@ class MomiSupabaseClient(
         if (!isConfigured()) {
             return@withContext Result.failure(IllegalStateException("Supabase is not configured yet."))
         }
-        val cleanEmail = email.trim()
-        if (cleanEmail.isBlank() || password.length < 6) {
+        val cleanEmail = MomiSupabaseSchema.normalizeEmail(email)
+        if (!MomiSupabaseSchema.isValidEmailAddress(cleanEmail) || password.length < 6) {
             return@withContext Result.failure(IllegalArgumentException("Enter a valid email and password (6+ characters)."))
+        }
+        // Enforce 1 email = 1 Momi account before issuing signup request.
+        val existingByEmail = fetchProfileByEmail(cleanEmail)
+        if (existingByEmail != null) {
+            return@withContext Result.failure(
+                IllegalStateException(
+                    "An account already exists for $cleanEmail. One email can only have one Momi account — please sign in with Email or Google."
+                )
+            )
         }
         val bodyMap = linkedMapOf<String, Any?>(
             "email" to cleanEmail,
@@ -1054,8 +1102,12 @@ class MomiSupabaseClient(
                 }
                 val json = JSONObject(rawBody)
                 val access = json.optString("access_token")
+                val identities = json.optJSONObject("user")?.optJSONArray("identities")
+                if (access.isBlank() && identities != null && identities.length() == 0) {
+                    error("An account already exists for $cleanEmail. One email can only have one Momi account — please sign in with Email or Google.")
+                }
                 if (access.isNotBlank()) {
-                    val session = parseAuthSession(json, displayNameHint = cleanName)
+                    val session = parseAuthSession(json, displayNameHint = cleanName, emailHint = cleanEmail)
                     setActiveSessionAndPersist(session)
                     SupabaseSignUpResult(session = session, confirmationRequired = false, email = cleanEmail)
                 } else {
@@ -1073,7 +1125,7 @@ class MomiSupabaseClient(
         if (!isConfigured()) {
             return@withContext Result.failure(IllegalStateException("Supabase is not configured yet."))
         }
-        val cleanEmail = email.trim()
+        val cleanEmail = MomiSupabaseSchema.normalizeEmail(email)
         val cleanCode = otpCode.trim().filter { it.isDigit() || it.isLetter() }
         if (cleanEmail.isBlank() || cleanCode.length < 6) {
             return@withContext Result.failure(IllegalArgumentException("Enter the 6-digit verification code sent to $cleanEmail."))
@@ -1112,7 +1164,7 @@ class MomiSupabaseClient(
                 val detail = extractSupabaseAuthError(rawBody, "Invalid or expired verification code (HTTP $code)")
                 error(detail)
             }
-            val session = parseAuthSession(JSONObject(rawBody), displayNameHint = cleanName)
+            val session = parseAuthSession(JSONObject(rawBody), displayNameHint = cleanName, emailHint = cleanEmail)
             setActiveSessionAndPersist(session)
             session
         }
@@ -1122,7 +1174,7 @@ class MomiSupabaseClient(
         if (!isConfigured()) {
             return@withContext Result.failure(IllegalStateException("Supabase is not configured yet."))
         }
-        val cleanEmail = email.trim()
+        val cleanEmail = MomiSupabaseSchema.normalizeEmail(email)
         if (cleanEmail.isBlank()) {
             return@withContext Result.failure(IllegalArgumentException("Enter your email address first."))
         }
@@ -1142,6 +1194,154 @@ class MomiSupabaseClient(
                     error(extractSupabaseAuthError(rawBody, "Could not resend code (HTTP ${response.code})"))
                 }
                 Unit
+            }
+        }
+    }
+
+    suspend fun sendWhatsAppOtp(
+        phone: String,
+        displayName: String? = null,
+        email: String? = null
+    ): Result<String> = withContext(Dispatchers.IO) {
+        if (!isConfigured()) {
+            return@withContext Result.failure(IllegalStateException("Supabase is not configured yet."))
+        }
+        val cleanPhone = MomiSupabaseSchema.normalizePhoneE164(phone)
+        if (cleanPhone.isEmpty()) {
+            return@withContext Result.failure(
+                IllegalArgumentException("Enter a valid WhatsApp number in international E.164 format (e.g. +923001234567).")
+            )
+        }
+        val cleanEmail = MomiSupabaseSchema.normalizeEmail(email)
+        if (cleanEmail.isNotEmpty()) {
+            if (!MomiSupabaseSchema.isValidEmailAddress(cleanEmail)) {
+                return@withContext Result.failure(IllegalArgumentException("Enter a valid email address or leave it blank."))
+            }
+            val existingByEmail = fetchProfileByEmail(cleanEmail)
+            val existingPhone = MomiSupabaseSchema.normalizePhoneE164(existingByEmail?.phone)
+            if (existingByEmail != null && existingPhone != cleanPhone) {
+                return@withContext Result.failure(
+                    IllegalStateException(
+                        "An account already exists for $cleanEmail. One email can only have one Momi account — please sign in with Email or Google."
+                    )
+                )
+            }
+        }
+
+        val bodyMap = linkedMapOf<String, Any?>(
+            "phone" to cleanPhone,
+            "channel" to "whatsapp",
+            "create_user" to true
+        )
+        val metaData = linkedMapOf<String, Any?>("phone" to cleanPhone)
+        displayName?.trim()?.takeIf { it.isNotEmpty() }?.let { metaData["full_name"] = it }
+        if (cleanEmail.isNotEmpty()) metaData["email"] = cleanEmail
+        bodyMap["data"] = metaData
+
+        val request = Request.Builder()
+            .url("$baseUrl/auth/v1/otp")
+            .header("apikey", anonKey)
+            .header("Content-Type", "application/json")
+            .post(MomiSupabaseSchema.toJsonString(bodyMap).toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        runCatching {
+            httpClient.newCall(request).execute().use { response ->
+                val rawBody = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val detail = extractSupabaseAuthError(rawBody, "Failed to send WhatsApp OTP (HTTP ${response.code})")
+                    val hint = if (detail.contains("provider", ignoreCase = true) ||
+                        detail.contains("whatsapp", ignoreCase = true) ||
+                        detail.contains("sms", ignoreCase = true) ||
+                        detail.contains("not enabled", ignoreCase = true) ||
+                        detail.contains("twilio", ignoreCase = true)
+                    ) {
+                        "WhatsApp OTP requires Phone/WhatsApp (Twilio/Meta) to be enabled in Supabase Authentication -> Providers -> Phone. [$detail]"
+                    } else {
+                        detail
+                    }
+                    error(hint)
+                }
+                cleanPhone
+            }
+        }
+    }
+
+    suspend fun verifyWhatsAppOtp(
+        phone: String,
+        otpCode: String,
+        displayName: String? = null,
+        email: String? = null
+    ): Result<SupabaseAuthSession> = withContext(Dispatchers.IO) {
+        if (!isConfigured()) {
+            return@withContext Result.failure(IllegalStateException("Supabase is not configured yet."))
+        }
+        val cleanPhone = MomiSupabaseSchema.normalizePhoneE164(phone)
+        if (cleanPhone.isEmpty()) {
+            return@withContext Result.failure(
+                IllegalArgumentException("Enter a valid WhatsApp number in international format (e.g. +923001234567).")
+            )
+        }
+        val cleanCode = otpCode.trim().filter { it.isDigit() }
+        if (cleanCode.length !in 4..8) {
+            return@withContext Result.failure(
+                IllegalArgumentException("Enter the 6-digit WhatsApp OTP code sent to $cleanPhone.")
+            )
+        }
+        val cleanEmail = MomiSupabaseSchema.normalizeEmail(email)
+        if (cleanEmail.isNotEmpty()) {
+            if (!MomiSupabaseSchema.isValidEmailAddress(cleanEmail)) {
+                return@withContext Result.failure(IllegalArgumentException("Enter a valid email address or leave it blank."))
+            }
+            val existingByEmail = fetchProfileByEmail(cleanEmail)
+            val existingPhone = MomiSupabaseSchema.normalizePhoneE164(existingByEmail?.phone)
+            if (existingByEmail != null && existingPhone != cleanPhone) {
+                return@withContext Result.failure(
+                    IllegalStateException(
+                        "An account already exists for $cleanEmail. One email can only have one Momi account — please sign in with Email or Google."
+                    )
+                )
+            }
+        }
+
+        val payload = MomiSupabaseSchema.toJsonString(
+            linkedMapOf(
+                "type" to "sms",
+                "phone" to cleanPhone,
+                "token" to cleanCode
+            )
+        )
+        val request = Request.Builder()
+            .url("$baseUrl/auth/v1/verify")
+            .header("apikey", anonKey)
+            .header("Content-Type", "application/json")
+            .post(payload.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        runCatching {
+            httpClient.newCall(request).execute().use { response ->
+                val rawBody = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val detail = extractSupabaseAuthError(rawBody, "Invalid or expired WhatsApp OTP (HTTP ${response.code})")
+                    error(detail)
+                }
+                val cleanName = displayName?.trim()?.takeIf { it.isNotEmpty() }
+                val session = parseAuthSession(
+                    JSONObject(rawBody),
+                    displayNameHint = cleanName,
+                    emailHint = cleanEmail.takeIf { it.isNotEmpty() },
+                    phoneHint = cleanPhone
+                )
+                setActiveSessionAndPersist(session)
+                ensureProfileExists(
+                    userId = session.userId,
+                    username = cleanName ?: "wa_${cleanPhone.takeLast(6)}",
+                    displayName = cleanName ?: session.displayName ?: "Momi Creator",
+                    avatarUrl = session.avatarUrl,
+                    email = session.email.orEmpty().ifBlank { cleanEmail },
+                    phone = session.phone.orEmpty().ifBlank { cleanPhone }
+                )
+                session
             }
         }
     }
@@ -1464,6 +1664,202 @@ class MomiSupabaseClient(
         }
     }
 
+    suspend fun uploadStorageFile(
+        bucket: String,
+        objectPath: String,
+        file: File,
+        contentType: String,
+        accessToken: String? = null
+    ): Result<String> = withContext(Dispatchers.IO) {
+        if (!isConfigured()) {
+            return@withContext Result.failure(IllegalStateException("Supabase is not configured yet."))
+        }
+        if (bucket !in MomiSupabaseSchema.STORAGE_BUCKETS) {
+            return@withContext Result.failure(IllegalArgumentException("Unsupported storage bucket: $bucket"))
+        }
+        val safePath = objectPath.trim().trimStart('/').split('/')
+            .filter { it.isNotBlank() && it != "." && it != ".." }
+            .joinToString("/")
+        if (safePath.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Invalid storage object path"))
+        }
+        if (!file.exists() || file.length() <= 0L) {
+            return@withContext Result.failure(IllegalArgumentException("Media file could not be read"))
+        }
+        // Use chunked TUS resumable upload directly for large videos (> 45 MB) to avoid timeouts / 413s
+        if (file.length() > 45_000_000L) {
+            return@withContext uploadStorageFileResumableTus(bucket, safePath, file, contentType, accessToken)
+        }
+
+        val mediaType = contentType.toMediaType()
+        var token = ensureFreshAccessToken(explicit = accessToken)
+
+        fun buildStreamUploadReq(bearerToken: String?): Request {
+            val requestBuilder = Request.Builder()
+                .url("$baseUrl/storage/v1/object/$bucket/$safePath")
+                .header("x-upsert", "true")
+                .post(file.asRequestBody(mediaType))
+            MomiSupabaseSchema.buildAuthHeaders(anonKey, bearerToken).forEach { (k, v) ->
+                requestBuilder.header(k, v)
+            }
+            return requestBuilder.build()
+        }
+
+        var code = 0
+        var errBody = ""
+        var ok = false
+        val directResult = runCatching {
+            uploadHttpClient.newCall(buildStreamUploadReq(token)).execute().use { response ->
+                code = response.code
+                errBody = response.body?.string().orEmpty()
+                ok = response.isSuccessful
+            }
+            if (!ok && accessToken.isNullOrBlank() && code == 401) {
+                token = ensureFreshAccessToken(forceRefresh = true)
+                uploadHttpClient.newCall(buildStreamUploadReq(token)).execute().use { retry ->
+                    code = retry.code
+                    errBody = retry.body?.string().orEmpty()
+                    ok = retry.isSuccessful
+                }
+            }
+            if (!ok) {
+                android.util.Log.e("MomiSupabase", "Streaming upload $bucket/$safePath failed HTTP $code: $errBody")
+                error("Storage upload failed (HTTP $code)")
+            }
+            "$baseUrl/storage/v1/object/public/$bucket/$safePath"
+        }
+        if (directResult.isSuccess) return@withContext directResult
+        if (code == 413 || code == 504 || code == 408) {
+            return@withContext uploadStorageFileResumableTus(bucket, safePath, file, contentType, accessToken)
+        }
+        directResult
+    }
+
+    private fun encodeTusMetadata(entries: Map<String, String>): String {
+        return entries.entries.joinToString(",") { (k, v) ->
+            val b64 = android.util.Base64.encodeToString(v.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+            "$k $b64"
+        }
+    }
+
+    private suspend fun uploadStorageFileResumableTus(
+        bucket: String,
+        safePath: String,
+        file: File,
+        contentType: String,
+        accessToken: String? = null
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val totalBytes = file.length()
+        if (totalBytes <= 0L) {
+            return@withContext Result.failure(IllegalArgumentException("Media file is empty"))
+        }
+        var token = ensureFreshAccessToken(explicit = accessToken)
+        val metadataHeader = encodeTusMetadata(
+            linkedMapOf(
+                "bucketName" to bucket,
+                "objectName" to safePath,
+                "contentType" to contentType,
+                "cacheControl" to "3600"
+            )
+        )
+
+        fun buildCreateReq(bearerToken: String?): Request {
+            val builder = Request.Builder()
+                .url("$baseUrl/storage/v1/upload/resumable")
+                .header("Tus-Resumable", "1.0.0")
+                .header("Upload-Length", totalBytes.toString())
+                .header("Upload-Metadata", metadataHeader)
+                .header("x-upsert", "true")
+                .post(ByteArray(0).toRequestBody(null))
+            MomiSupabaseSchema.buildAuthHeaders(anonKey, bearerToken).forEach { (k, v) ->
+                builder.header(k, v)
+            }
+            return builder.build()
+        }
+
+        runCatching {
+            var locationHeader: String? = null
+            var createCode = 0
+            var createBody = ""
+            uploadHttpClient.newCall(buildCreateReq(token)).execute().use { response ->
+                createCode = response.code
+                createBody = response.body?.string().orEmpty()
+                if (response.isSuccessful) {
+                    locationHeader = response.header("Location")
+                }
+            }
+            if (locationHeader.isNullOrBlank() && accessToken.isNullOrBlank() && createCode == 401) {
+                token = ensureFreshAccessToken(forceRefresh = true)
+                uploadHttpClient.newCall(buildCreateReq(token)).execute().use { retry ->
+                    createCode = retry.code
+                    createBody = retry.body?.string().orEmpty()
+                    if (retry.isSuccessful) {
+                        locationHeader = retry.header("Location")
+                    }
+                }
+            }
+            val rawLoc = locationHeader?.trim().orEmpty()
+            if (rawLoc.isEmpty()) {
+                error("Resumable video upload initialization failed (HTTP $createCode: ${createBody.take(120)})")
+            }
+            val uploadUrl = when {
+                rawLoc.startsWith("https://", ignoreCase = true) || rawLoc.startsWith("http://", ignoreCase = true) -> rawLoc
+                rawLoc.startsWith("/") -> "$baseUrl$rawLoc"
+                else -> "$baseUrl/storage/v1/upload/resumable/$rawLoc"
+            }
+
+            val chunkSize = 5 * 1024 * 1024 // 5 MB chunks
+            val buffer = ByteArray(chunkSize)
+            RandomAccessFile(file, "r").use { raf ->
+                var offset = 0L
+                while (offset < totalBytes) {
+                    raf.seek(offset)
+                    val read = raf.read(buffer)
+                    if (read <= 0) break
+                    val chunkBytes = if (read == buffer.size) buffer else buffer.copyOf(read)
+
+                    fun buildPatchReq(bearerToken: String?): Request {
+                        val builder = Request.Builder()
+                            .url(uploadUrl)
+                            .header("Tus-Resumable", "1.0.0")
+                            .header("Upload-Offset", offset.toString())
+                            .header("Content-Type", "application/offset+octet-stream")
+                            .patch(chunkBytes.toRequestBody(TUS_OFFSET_MEDIA_TYPE))
+                        MomiSupabaseSchema.buildAuthHeaders(anonKey, bearerToken).forEach { (k, v) ->
+                            builder.header(k, v)
+                        }
+                        return builder.build()
+                    }
+
+                    var patchOk = false
+                    var patchCode = 0
+                    var patchErr = ""
+                    var nextOffsetHeader: String? = null
+                    uploadHttpClient.newCall(buildPatchReq(token)).execute().use { response ->
+                        patchCode = response.code
+                        patchOk = response.isSuccessful
+                        nextOffsetHeader = response.header("Upload-Offset")
+                        if (!patchOk) patchErr = response.body?.string().orEmpty()
+                    }
+                    if (!patchOk && accessToken.isNullOrBlank() && patchCode == 401) {
+                        token = ensureFreshAccessToken(forceRefresh = true)
+                        uploadHttpClient.newCall(buildPatchReq(token)).execute().use { retry ->
+                            patchCode = retry.code
+                            patchOk = retry.isSuccessful
+                            nextOffsetHeader = retry.header("Upload-Offset")
+                            if (!patchOk) patchErr = retry.body?.string().orEmpty()
+                        }
+                    }
+                    if (!patchOk) {
+                        error("Resumable video upload chunk failed at offset $offset (HTTP $patchCode: ${patchErr.take(120)})")
+                    }
+                    offset = nextOffsetHeader?.toLongOrNull() ?: (offset + read)
+                }
+            }
+            "$baseUrl/storage/v1/object/public/$bucket/$safePath"
+        }
+    }
+
     suspend fun fetchProfileByUserId(userId: String): UserProfile? = withContext(Dispatchers.IO) {
         if (!isConfigured() || userId.isBlank()) return@withContext null
         val encUid = URLEncoder.encode(userId.trim(), "UTF-8")
@@ -1473,11 +1869,20 @@ class MomiSupabaseClient(
     }
 
     suspend fun fetchProfileByEmail(email: String): UserProfile? = withContext(Dispatchers.IO) {
-        val cleanEmail = email.trim().lowercase(Locale.US)
+        val cleanEmail = MomiSupabaseSchema.normalizeEmail(email)
         if (!isConfigured() || cleanEmail.isBlank()) return@withContext null
         val encEmail = URLEncoder.encode(cleanEmail, "UTF-8")
         runCatching {
             parseProfiles(fetchJsonArray("$baseUrl/rest/v1/profiles?select=*&email=ilike.$encEmail&limit=1")).firstOrNull()
+        }.getOrNull()
+    }
+
+    suspend fun fetchProfileByPhone(phone: String): UserProfile? = withContext(Dispatchers.IO) {
+        val cleanPhone = MomiSupabaseSchema.normalizePhoneE164(phone)
+        if (!isConfigured() || cleanPhone.isBlank()) return@withContext null
+        val encPhone = URLEncoder.encode(cleanPhone, "UTF-8")
+        runCatching {
+            parseProfiles(fetchJsonArray("$baseUrl/rest/v1/profiles?select=*&phone=eq.$encPhone&limit=1")).firstOrNull()
         }.getOrNull()
     }
 
@@ -1487,15 +1892,34 @@ class MomiSupabaseClient(
         displayName: String = username,
         avatarKey: String = "avatar_aria",
         avatarUrl: String? = null,
-        email: String = ""
+        email: String = "",
+        phone: String = ""
     ): Result<Unit> {
         if (!isConfigured() || userId.isBlank()) return Result.success(Unit)
+        val cleanEmail = MomiSupabaseSchema.normalizeEmail(email)
+        val cleanPhone = MomiSupabaseSchema.normalizePhoneE164(phone)
+
         // Critical: never overwrite an already-customized remote profile with fallback defaults!
         val existing = fetchProfileByUserId(userId)
         if (existing != null) {
+            val alignPatch = linkedMapOf<String, Any?>()
+            if (cleanEmail.isNotBlank() && existing.email.isBlank()) {
+                val ownerByEmail = fetchProfileByEmail(cleanEmail)
+                if (ownerByEmail == null || ownerByEmail.userId == userId) {
+                    alignPatch["email"] = cleanEmail
+                }
+            }
+            if (cleanPhone.isNotBlank() && existing.phone.isBlank()) {
+                val ownerByPhone = fetchProfileByPhone(cleanPhone)
+                if (ownerByPhone == null || ownerByPhone.userId == userId) {
+                    alignPatch["phone"] = cleanPhone
+                }
+            }
+            if (alignPatch.isNotEmpty()) {
+                patchRows("profiles", "user_id=eq.${URLEncoder.encode(userId, "UTF-8")}", alignPatch)
+            }
             return Result.success(Unit)
         }
-        val cleanEmail = email.trim().lowercase(Locale.US)
         if (cleanEmail.isNotBlank()) {
             val existingByEmail = fetchProfileByEmail(cleanEmail)
             if (existingByEmail != null) {
@@ -1504,9 +1928,26 @@ class MomiSupabaseClient(
                         id = userId,
                         userId = userId,
                         email = cleanEmail,
+                        phone = cleanPhone.ifBlank { existingByEmail.phone },
                         avatarUrl = avatarUrl ?: existingByEmail.avatarUrl
                     )
                     mergeLegacyProfileIntoUser(existingByEmail.userId, migratedTarget)
+                }
+                return Result.success(Unit)
+            }
+        }
+        if (cleanPhone.isNotBlank()) {
+            val existingByPhone = fetchProfileByPhone(cleanPhone)
+            if (existingByPhone != null) {
+                if (existingByPhone.userId != userId) {
+                    val migratedTarget = existingByPhone.copy(
+                        id = userId,
+                        userId = userId,
+                        email = cleanEmail.ifBlank { existingByPhone.email },
+                        phone = cleanPhone,
+                        avatarUrl = avatarUrl ?: existingByPhone.avatarUrl
+                    )
+                    mergeLegacyProfileIntoUser(existingByPhone.userId, migratedTarget)
                 }
                 return Result.success(Unit)
             }
@@ -1516,6 +1957,7 @@ class MomiSupabaseClient(
             userId = userId,
             username = username.ifBlank { "momi.${userId.take(6)}" },
             email = cleanEmail,
+            phone = cleanPhone,
             displayName = displayName.ifBlank { "Momi Creator" },
             avatarKey = avatarKey.ifBlank { "avatar_aria" },
             avatarUrl = avatarUrl
@@ -2078,6 +2520,7 @@ class MomiSupabaseClient(
                     userId = uid,
                     username = o.optString("username", "momi.creator"),
                     email = o.optString("email"),
+                    phone = o.optString("phone"),
                     displayName = o.optString("display_name", "Momi Creator"),
                     category = o.optString("category"),
                     bio = o.optString("bio"),
@@ -2639,11 +3082,20 @@ class MomiSupabaseClient(
         }
 
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+        private val TUS_OFFSET_MEDIA_TYPE = "application/offset+octet-stream".toMediaType()
         private val defaultHttpClient: OkHttpClient by lazy {
             OkHttpClient.Builder()
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
                 .writeTimeout(45, TimeUnit.SECONDS)
+                .build()
+        }
+        private val uploadHttpClient: OkHttpClient by lazy {
+            OkHttpClient.Builder()
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(5, TimeUnit.MINUTES)
+                .writeTimeout(15, TimeUnit.MINUTES)
+                .callTimeout(25, TimeUnit.MINUTES)
                 .build()
         }
     }

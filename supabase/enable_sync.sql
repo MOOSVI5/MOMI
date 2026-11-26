@@ -7,9 +7,25 @@
 
 -- 1. Ensure extra media, email uniqueness, interactions, community & announcement columns exist on upgraded schemas
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS email text NOT NULL DEFAULT '';
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS phone text NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_email_lower
   ON public.profiles(lower(email))
   WHERE email <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_phone_e164
+  ON public.profiles(phone)
+  WHERE phone <> '';
+
+ALTER TABLE public.posts DROP CONSTRAINT IF EXISTS posts_video_duration_ms_check;
+ALTER TABLE public.posts ADD CONSTRAINT posts_video_duration_ms_check
+  CHECK (video_duration_ms BETWEEN 0 AND 4800000);
+
+ALTER TABLE public.stories DROP CONSTRAINT IF EXISTS stories_video_duration_ms_check;
+ALTER TABLE public.stories ADD CONSTRAINT stories_video_duration_ms_check
+  CHECK (video_duration_ms BETWEEN 0 AND 4800000);
+
+ALTER TABLE public.market_products DROP CONSTRAINT IF EXISTS market_products_video_duration_ms_check;
+ALTER TABLE public.market_products ADD CONSTRAINT market_products_video_duration_ms_check
+  CHECK (video_duration_ms BETWEEN 0 AND 4800000);
 
 ALTER TABLE public.user_interactions DROP CONSTRAINT IF EXISTS user_interactions_target_type_check;
 ALTER TABLE public.user_interactions ADD CONSTRAINT user_interactions_target_type_check
@@ -198,12 +214,14 @@ CREATE POLICY showcase_accounts_sync_write ON public.showcase_accounts
   FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
 
 -- 4. Ensure public Storage buckets exist for images, avatars, videos & audio
-INSERT INTO storage.buckets (id, name, public)
+INSERT INTO storage.buckets (id, name, public, file_size_limit)
 VALUES
-  ('momi-media', 'momi-media', true),
-  ('momi-avatars', 'momi-avatars', true),
-  ('momi-videos', 'momi-videos', true)
-ON CONFLICT (id) DO UPDATE SET public = true;
+  ('momi-media', 'momi-media', true, 52428800),
+  ('momi-avatars', 'momi-avatars', true, 20971520),
+  ('momi-videos', 'momi-videos', true, 524288000)
+ON CONFLICT (id) DO UPDATE
+SET public = true,
+    file_size_limit = EXCLUDED.file_size_limit;
 
 -- 5. Storage Object Policies for Momi media buckets
 DROP POLICY IF EXISTS momi_storage_select ON storage.objects;

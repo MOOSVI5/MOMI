@@ -533,6 +533,8 @@ body[data-theme="light"] .auth-error {
 /* Buttons & Inputs */
 .btn-primary {
   background: var(--gradient);
+  background-size: 160% 160%;
+  background-position: 0% 50%;
   color: #fff;
   border: none;
   border-radius: 12px;
@@ -544,6 +546,22 @@ body[data-theme="light"] .auth-error {
   justify-content: center;
   gap: 8px;
   white-space: nowrap;
+  transition:
+    transform 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.28s ease,
+    background-position 0.4s ease,
+    opacity 0.24s ease,
+    filter 0.24s ease;
+}
+
+.btn-primary:hover:not(:disabled) {
+  transform: translateY(-1px);
+  background-position: 100% 50%;
+  box-shadow: 0 8px 22px rgba(16, 185, 129, 0.24);
+}
+
+.btn-primary:active:not(:disabled) {
+  transform: scale(0.982);
 }
 
 .btn-primary:disabled,
@@ -1670,6 +1688,32 @@ body[data-theme="light"] .owner-pill-btn {
   padding-right: 4px;
 }
 
+.btn-whatsapp {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 12px 18px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(37, 211, 102, 0.45);
+  background: linear-gradient(135deg, #16a34a, #15803d);
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 0.94rem;
+  cursor: pointer;
+  transition: transform 0.16s ease, filter 0.16s ease, opacity 0.16s ease;
+}
+
+.btn-whatsapp:hover:not(:disabled) {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+.btn-whatsapp:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .otp-verify-box {
   display: grid;
   gap: 10px;
@@ -1678,6 +1722,31 @@ body[data-theme="light"] .owner-pill-btn {
   border-radius: var(--radius-md);
   background: var(--surface-alt);
   border: 1px solid var(--primary);
+}
+
+.studio-thumb-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+}
+
+.studio-thumb-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.studio-thumb-img {
+  width: 96px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #000000;
 }
 
 .ai-chat-thread {
@@ -1712,5 +1781,183 @@ body[data-theme="light"] .owner-pill-btn {
   background: var(--surface);
   border: 1px solid var(--border);
 }
+
+/* Publish Story Smooth CSS Transitions & Supabase Upload Feedback */
+.btn-publish-story {
+  position: relative;
+  overflow: hidden;
+  background-size: 220% 220%;
+  transition:
+    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.35s ease,
+    background-position 0.5s ease,
+    background-color 0.35s ease,
+    opacity 0.28s ease,
+    filter 0.28s ease;
+}
+
+.btn-publish-story .publish-btn-spinner {
+  width: 0;
+  height: 16px;
+  border-radius: 999px;
+  border: 0 solid rgba(255, 255, 255, 0.32);
+  border-top-color: #ffffff;
+  opacity: 0;
+  transform: scale(0.5);
+  margin-right: -8px;
+  transition:
+    width 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    margin-right 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.25s ease,
+    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.btn-publish-story .publish-btn-check {
+  width: 0;
+  overflow: hidden;
+  opacity: 0;
+  transform: scale(0.5);
+  margin-right: -8px;
+  font-size: 1rem;
+  line-height: 1;
+  transition:
+    width 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    margin-right 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.25s ease,
+    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.btn-publish-story .publish-btn-label {
+  transition: opacity 0.22s ease, transform 0.25s ease;
+}
+
+.btn-publish-story.is-publishing {
+  opacity: 0.96;
+  cursor: wait;
+  transform: scale(0.99);
+  background-position: 100% 50%;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.22), 0 10px 26px rgba(16, 185, 129, 0.28);
+  animation: momiPublishShimmer 1.5s ease-in-out infinite, momiPublishGlow 1.5s ease-in-out infinite;
+}
+
+.btn-publish-story.is-publishing .publish-btn-spinner {
+  width: 16px;
+  border-width: 2.2px;
+  opacity: 1;
+  margin-right: 0;
+  transform: scale(1);
+  animation: momiSpin 0.75s linear infinite;
+}
+
+.btn-publish-story.is-saved {
+  opacity: 1;
+  background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+  transform: scale(1.01);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.32), 0 10px 28px rgba(16, 185, 129, 0.36);
+  animation: none;
+}
+
+.btn-publish-story.is-saved .publish-btn-check {
+  width: 16px;
+  opacity: 1;
+  margin-right: 0;
+  transform: scale(1);
+}
+
+.publish-status-track {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transform: translateY(-6px);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  transition:
+    max-height 0.34s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.28s ease,
+    transform 0.34s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.publish-status-track.is-visible {
+  max-height: 76px;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.publish-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.publish-status-text {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--primary);
+  transition: color 0.25s ease;
+}
+
+.publish-progress-bar {
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.publish-progress-fill {
+  width: 42%;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--gradient);
+  animation: momiUploadProgress 1.25s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  transition: width 0.35s cubic-bezier(0.22, 1, 0.36, 1), background 0.3s ease;
+}
+
+.publish-status-track.is-saved .publish-progress-fill {
+  width: 100%;
+  animation: none;
+  background: #10b981;
+}
+
+@keyframes momiSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes momiPublishShimmer {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@keyframes momiPublishGlow {
+  0%, 100% {
+    box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.18), 0 8px 20px rgba(16, 185, 129, 0.24);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(16, 185, 129, 0.3), 0 12px 28px rgba(16, 185, 129, 0.36);
+  }
+}
+
+@keyframes momiUploadProgress {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(260%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn-primary,
+  .btn-publish-story,
+  .publish-status-track {
+    transition-duration: 0.12s;
+  }
+  .btn-publish-story.is-publishing {
+    animation: none;
+  }
+}
+
 
 

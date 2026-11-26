@@ -20,9 +20,15 @@ import {
   FILTER_OPTIONS,
   filterCssForTag,
   formatCount,
+  formatVideoDurationMs,
   initialsForUsername,
   isOwnerEmail,
+  isValidEmailAddress,
+  isValidPhoneE164,
+  MAX_VIDEO_DURATION_MS,
   normalizeColorScheme,
+  normalizeEmail,
+  normalizePhoneE164,
   normalizeUsername,
   parseDeepLinkFromLocation,
   POST_BOOST_OPTIONS,
@@ -66,8 +72,14 @@ import {
   parseSupabaseRealtimeMessage,
   SOCIAL_REALTIME_TABLES,
   supabaseResendSignupOtp,
+  supabaseSendWhatsAppOtp,
+  supabaseSignUpWithEmail,
   supabaseVerifyEmailOtp,
-  syncBundleToSupabase
+  supabaseVerifyWhatsAppOtp,
+  syncBundleToSupabase,
+  uploadWebFileResumableTus,
+  uploadWebFileToStorage,
+  upsertSupabaseTable
 } from '../supabase-client.js';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
@@ -568,3 +580,170 @@ test('JWT expiry detection flags expired PGRST303 tokens and preserves fresh tok
   assert.equal(isSupabaseJwtExpiringSoon(freshJwt), false);
   assert.equal(isSupabaseJwtExpiringSoon(''), false);
 });
+
+test('Publish Story button defines smooth CSS transitions and Supabase upload feedback states', () => {
+  const css = fs.readFileSync(path.join(REPO_ROOT, 'web', 'styles.css'), 'utf8');
+  const appJs = fs.readFileSync(path.join(REPO_ROOT, 'web', 'app.js'), 'utf8');
+
+  assert.ok(css.includes('.btn-publish-story'), 'Missing .btn-publish-story CSS class');
+  assert.ok(css.includes('.btn-publish-story.is-publishing'), 'Missing .btn-publish-story.is-publishing CSS state');
+  assert.ok(css.includes('.btn-publish-story.is-saved'), 'Missing .btn-publish-story.is-saved CSS state');
+  assert.ok(css.includes('.publish-status-track.is-visible'), 'Missing .publish-status-track.is-visible CSS state');
+  assert.ok(css.includes('transition:'), 'Missing CSS transition definitions');
+  assert.ok(css.includes('@keyframes momiUploadProgress'), 'Missing upload progress keyframe animation');
+
+  assert.ok(appJs.includes('btn-publish-story'), 'web/app.js must apply btn-publish-story class');
+  assert.ok(appJs.includes('Publish Story'), 'web/app.js must label the story action Publish Story');
+  assert.ok(appJs.includes('Uploading & saving story...'), 'web/app.js must show story upload feedback');
+  assert.ok(appJs.includes('Saved to Supabase!'), 'web/app.js must show saved confirmation transition');
+  assert.ok(appJs.includes("publishBtn.classList.add('is-publishing')"), 'web/app.js must transition button in place');
+});
+
+test('WhatsApp OTP auth, single-email-one-account enforcement, PGRST204 retry, and 80m video + thumbnail support work', async () => {
+  assert.equal(MAX_VIDEO_DURATION_MS, 4_800_000);
+  assert.equal(formatVideoDurationMs(4_800_000), '1:20:00');
+  assert.equal(formatVideoDurationMs(65_000), '1:05');
+
+  assert.equal(normalizePhoneE164('+92 300-1234567'), '+923001234567');
+  assert.equal(normalizePhoneE164('00923001234567'), '+923001234567');
+  assert.equal(normalizePhoneE164('123'), '');
+  assert.equal(isValidPhoneE164('+923001234567'), true);
+  assert.equal(isValidPhoneE164('bad'), false);
+  assert.equal(normalizeEmail('  User@Example.COM '), 'user@example.com');
+  assert.equal(isValidEmailAddress('user@example.com'), true);
+
+  const schemaSql = fs.readFileSync(path.join(REPO_ROOT, 'supabase', 'schema.sql'), 'utf8');
+  const enableSyncSql = fs.readFileSync(path.join(REPO_ROOT, 'supabase', 'enable_sync.sql'), 'utf8');
+  for (const sqlText of [schemaSql, enableSyncSql]) {
+    assert.ok(sqlText.includes('idx_profiles_phone_e164'));
+    assert.ok(sqlText.includes('4800000'));
+    assert.ok(sqlText.includes('524288000'));
+  }
+
+  const cfg = { url: 'https://qotuvugkapaspowhbsbf.supabase.co', anonKey: 'sb_publishable_LbrQBbU_4qH18qjopmNwIg_ALsMhlln' };
+
+  // WhatsApp OTP send & verify
+  const sentRequests = [];
+  const otpResult = await supabaseSendWhatsAppOtp(
+    cfg,
+    '+92 300 1234567',
+    { displayName: 'Ali', email: '' },
+    async (url, init) => {
+      sentRequests.push({ url, body: JSON.parse(init.body) });
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
+  );
+  assert.equal(otpResult.phone, '+923001234567');
+  assert.ok(sentRequests[0].url.endsWith('/auth/v1/otp'));
+  assert.equal(sentRequests[0].body.channel, 'whatsapp');
+  assert.equal(sentRequests[0].body.phone, '+923001234567');
+
+  const verifyResult = await supabaseVerifyWhatsAppOtp(
+    cfg,
+    '+923001234567',
+    '123456',
+    { displayName: 'Ali', email: 'ali@momi.app' },
+    async (url, init) => {
+      if (url.includes('/rest/v1/profiles')) {
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      const parsed = JSON.parse(init.body);
+      assert.equal(parsed.type, 'sms');
+      assert.equal(parsed.phone, '+923001234567');
+      assert.equal(parsed.token, '123456');
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: 'jwt_wa_1',
+          refresh_token: 'ref_wa_1',
+          expires_in: 3600,
+          user: { id: 'wa_uid_1', phone: '+923001234567', phone_confirmed_at: '2026-01-01T00:00:00Z' }
+        })
+      };
+    }
+  );
+  assert.equal(verifyResult.session.user.uid, 'wa_uid_1');
+  assert.equal(verifyResult.session.user.phone, '+923001234567');
+  assert.equal(verifyResult.session.user.email, 'ali@momi.app');
+
+  // Single-email-single-account guard on signup
+  await assert.rejects(
+    () => supabaseSignUpWithEmail(cfg, 'taken@momi.app', 'secret123', 'Ali', async (url) => {
+      if (url.includes('/rest/v1/profiles')) {
+        return { ok: true, status: 200, json: async () => [{ user_id: 'u_existing', email: 'taken@momi.app' }] };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    }),
+    /One email can only have one Momi account/i
+  );
+
+  // PGRST204 retry strips missing column
+  const upsertBodies = [];
+  await upsertSupabaseTable(
+    cfg,
+    'profiles',
+    [{ user_id: 'u1', username: 'ali', phone: '+923001234567' }],
+    '',
+    async (_url, init) => {
+      upsertBodies.push(JSON.parse(init.body));
+      if (upsertBodies.length === 1) {
+        return {
+          ok: false,
+          status: 400,
+          text: async () => '{"code":"PGRST204","message":"Could not find the \'phone\' column of \'profiles\' in the schema cache"}'
+        };
+      }
+      return { ok: true, status: 201, text: async () => '' };
+    },
+    'user_id'
+  );
+  assert.equal(upsertBodies.length, 2);
+  assert.equal('phone' in upsertBodies[1][0], false);
+
+  // TUS resumable chunked upload for large 80m video blobs
+  const tusCalls = [];
+  const largeFakeFile = {
+    size: 50 * 1024 * 1024,
+    type: 'video/mp4',
+    slice: (start, end) => new Uint8Array(end - start)
+  };
+  const uploadedUrl = await uploadWebFileToStorage(
+    cfg,
+    'momi-videos',
+    'videos/u1/long_80m.mp4',
+    largeFakeFile,
+    'video/mp4',
+    async (url, init) => {
+      tusCalls.push({ url, method: init.method, headers: init.headers });
+      if (init.method === 'POST') {
+        return {
+          ok: true,
+          status: 201,
+          headers: { get: (k) => (k.toLowerCase() === 'location' ? '/storage/v1/upload/resumable/tok_1' : null) }
+        };
+      }
+      const off = Number(init.headers['Upload-Offset'] || 0);
+      const len = init.body?.byteLength || 0;
+      return {
+        ok: true,
+        status: 204,
+        headers: { get: (k) => (k.toLowerCase() === 'upload-offset' ? String(off + len) : null) }
+      };
+    }
+  );
+  assert.equal(uploadedUrl, 'https://qotuvugkapaspowhbsbf.supabase.co/storage/v1/object/public/momi-videos/videos/u1/long_80m.mp4');
+  assert.equal(tusCalls[0].method, 'POST');
+  assert.ok(tusCalls[0].url.endsWith('/storage/v1/upload/resumable'));
+  assert.equal(tusCalls.filter((c) => c.method === 'PATCH').length, 10);
+  assert.equal(typeof uploadWebFileResumableTus, 'function');
+
+  const indexHtml = fs.readFileSync(path.join(REPO_ROOT, 'web', 'index.html'), 'utf8');
+  const appJs = fs.readFileSync(path.join(REPO_ROOT, 'web', 'app.js'), 'utf8');
+  assert.ok(indexHtml.includes('id="toggleWhatsAppAuthBtn"'));
+  assert.ok(indexHtml.includes('id="waOtpVerifyBox"'));
+  assert.ok(appJs.includes('studioThumbInput'));
+  assert.ok(appJs.includes('80:00'));
+});
+
+

@@ -1,4 +1,11 @@
-import { DEFAULT_MONETIZATION_CONFIG, SUPABASE_WEB_CONFIG } from './app-config.js';
+import {
+  DEFAULT_MONETIZATION_CONFIG,
+  isValidEmailAddress,
+  MAX_VIDEO_DURATION_MS,
+  normalizeEmail,
+  normalizePhoneE164,
+  SUPABASE_WEB_CONFIG
+} from './app-config.js';
 
 export const SUPABASE_SCHEMA_TABLES = [
   'profiles',
@@ -209,7 +216,8 @@ export function mapMomiSnapshotToSupabaseBundle({
     : allCreators
   ).map((p) => ({
     user_id: String(p.userId || p.id || ''),
-    email: String(p.email || '').trim().toLowerCase().slice(0, 160),
+    email: normalizeEmail(p.email || '').slice(0, 160),
+    phone: normalizePhoneE164(p.phone || '').slice(0, 32),
     username: String(p.username || 'momi.creator').slice(0, 50),
     display_name: String(p.displayName || 'Momi Creator').slice(0, 80),
     category: String(p.category || '').slice(0, 80),
@@ -245,7 +253,7 @@ export function mapMomiSnapshotToSupabaseBundle({
     media_type: String(p.mediaType || 'IMAGE'),
     video_url: p.videoUrl || null,
     video_data: p.videoData || null,
-    video_duration_ms: Number(p.videoDurationMs || 0),
+    video_duration_ms: Math.max(0, Math.min(MAX_VIDEO_DURATION_MS, Number(p.videoDurationMs || 0))),
     filter_tag: String(p.filterTag || 'NONE'),
     aspect_ratio: String(p.aspectRatio || '1:1'),
     tagged_usernames: Array.isArray(p.taggedUsernames) ? p.taggedUsernames : [],
@@ -281,7 +289,7 @@ export function mapMomiSnapshotToSupabaseBundle({
     media_type: String(s.mediaType || 'IMAGE'),
     video_url: s.videoUrl || null,
     video_data: s.videoData || null,
-    video_duration_ms: Number(s.videoDurationMs || 0),
+    video_duration_ms: Math.max(0, Math.min(MAX_VIDEO_DURATION_MS, Number(s.videoDurationMs || 0))),
     audio_title: String(s.audioTitle || '').slice(0, 120),
     audio_url: s.audioUrl || null,
     audio_data: s.audioData || null,
@@ -324,7 +332,7 @@ export function mapMomiSnapshotToSupabaseBundle({
     extra_image_datas: Array.isArray(p.extraImageDatas) ? p.extraImageDatas : [],
     video_url: p.videoUrl || null,
     video_data: p.videoData || null,
-    video_duration_ms: Number(p.videoDurationMs || 0),
+    video_duration_ms: Math.max(0, Math.min(MAX_VIDEO_DURATION_MS, Number(p.videoDurationMs || 0))),
     stock_count: Math.max(0, Number(p.stockCount || 0)),
     is_featured: Boolean(p.isFeatured),
     created_at: toIsoTimestamp(p.createdAt)
@@ -464,6 +472,13 @@ export async function selectSupabaseTable(
   }
 }
 
+function extractMissingColumnName(detail = '') {
+  if (!detail) return '';
+  if (!detail.includes('PGRST204') && !/could not find the/i.test(detail)) return '';
+  const m = detail.match(/Could not find the ['"\\]+([a-zA-Z0-9_]+)['"\\]+ column/i);
+  return m ? m[1] : '';
+}
+
 export async function upsertSupabaseTable(
   cfg = SUPABASE_WEB_CONFIG,
   table,
@@ -483,38 +498,52 @@ export async function upsertSupabaseTable(
 
   const conflictQuery = onConflict ? `?on_conflict=${encodeURIComponent(onConflict)}` : '';
   const anonKey = String(cfg.anonKey).trim();
+  let payloadRows = rows.map((r) => ({ ...r }));
   let effectiveToken = await ensureFreshWebAccessToken(cfg, fetchImpl, false, accessToken);
-  let res = await fetchImpl(`${baseUrl}/rest/v1/${table}${conflictQuery}`, {
-    method: 'POST',
-    headers: {
-      ...buildSupabaseAuthHeaders(anonKey, effectiveToken),
-      'Content-Type': 'application/json',
-      Prefer: 'resolution=merge-duplicates,return=minimal'
-    },
-    body: JSON.stringify(rows)
-  });
-  if (res.status === 401 && !accessToken) {
-    effectiveToken = await ensureFreshWebAccessToken(cfg, fetchImpl, true);
-    res = await fetchImpl(`${baseUrl}/rest/v1/${table}${conflictQuery}`, {
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    let res = await fetchImpl(`${baseUrl}/rest/v1/${table}${conflictQuery}`, {
       method: 'POST',
       headers: {
         ...buildSupabaseAuthHeaders(anonKey, effectiveToken),
         'Content-Type': 'application/json',
         Prefer: 'resolution=merge-duplicates,return=minimal'
       },
-      body: JSON.stringify(rows)
+      body: JSON.stringify(payloadRows)
     });
-  }
-  if (!res.ok) {
+    if (res.status === 401 && !accessToken) {
+      effectiveToken = await ensureFreshWebAccessToken(cfg, fetchImpl, true);
+      res = await fetchImpl(`${baseUrl}/rest/v1/${table}${conflictQuery}`, {
+        method: 'POST',
+        headers: {
+          ...buildSupabaseAuthHeaders(anonKey, effectiveToken),
+          'Content-Type': 'application/json',
+          Prefer: 'resolution=merge-duplicates,return=minimal'
+        },
+        body: JSON.stringify(payloadRows)
+      });
+    }
+    if (res.ok) {
+      return payloadRows.length;
+    }
     let detail = '';
     try {
       detail = await res.text();
     } catch {
       detail = '';
     }
+    const missingCol = res.status === 400 ? extractMissingColumnName(detail) : '';
+    if (missingCol && payloadRows.some((r) => Object.prototype.hasOwnProperty.call(r, missingCol))) {
+      payloadRows = payloadRows.map((r) => {
+        const copy = { ...r };
+        delete copy[missingCol];
+        return copy;
+      });
+      continue;
+    }
     throw new Error(`Upsert ${table} failed (HTTP ${res.status})${detail ? `: ${detail.slice(0, 140)}` : ''}`);
   }
-  return rows.length;
+  return payloadRows.length;
 }
 
 export async function patchSupabaseRows(
@@ -529,29 +558,47 @@ export async function patchSupabaseRows(
   if (!SUPABASE_SCHEMA_TABLES.includes(table)) return false;
   const anonKey = String(cfg.anonKey).trim();
   const cleanFilter = String(filterQuery).replace(/^\?/, '');
+  let payloadPatch = { ...(patch || {}) };
   let token = await ensureFreshWebAccessToken(cfg, fetchImpl);
-  let res = await fetchImpl(`${baseUrl}/rest/v1/${table}?${cleanFilter}`, {
-    method: 'PATCH',
-    headers: {
-      ...buildSupabaseAuthHeaders(anonKey, token),
-      'Content-Type': 'application/json',
-      Prefer: 'return=minimal'
-    },
-    body: JSON.stringify(patch)
-  });
-  if (res.status === 401) {
-    token = await ensureFreshWebAccessToken(cfg, fetchImpl, true);
-    res = await fetchImpl(`${baseUrl}/rest/v1/${table}?${cleanFilter}`, {
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    let res = await fetchImpl(`${baseUrl}/rest/v1/${table}?${cleanFilter}`, {
       method: 'PATCH',
       headers: {
         ...buildSupabaseAuthHeaders(anonKey, token),
         'Content-Type': 'application/json',
         Prefer: 'return=minimal'
       },
-      body: JSON.stringify(patch)
+      body: JSON.stringify(payloadPatch)
     });
+    if (res.status === 401) {
+      token = await ensureFreshWebAccessToken(cfg, fetchImpl, true);
+      res = await fetchImpl(`${baseUrl}/rest/v1/${table}?${cleanFilter}`, {
+        method: 'PATCH',
+        headers: {
+          ...buildSupabaseAuthHeaders(anonKey, token),
+          'Content-Type': 'application/json',
+          Prefer: 'return=minimal'
+        },
+        body: JSON.stringify(payloadPatch)
+      });
+    }
+    if (res.ok) return true;
+    let detail = '';
+    try {
+      detail = await res.text();
+    } catch {
+      detail = '';
+    }
+    const missingCol = res.status === 400 ? extractMissingColumnName(detail) : '';
+    if (missingCol && Object.prototype.hasOwnProperty.call(payloadPatch, missingCol)) {
+      delete payloadPatch[missingCol];
+      if (Object.keys(payloadPatch).length === 0) return true;
+      continue;
+    }
+    return false;
   }
-  return res.ok;
+  return false;
 }
 
 export async function deleteSupabaseRows(
@@ -606,7 +653,8 @@ export async function mergeSupabaseProfileIntoTarget(
   const targetRow = {
     user_id: cleanTarget,
     username: String(targetProfile.username || 'momi.user').slice(0, 50),
-    email: String(targetProfile.email || '').trim().toLowerCase().slice(0, 160),
+    email: normalizeEmail(targetProfile.email || '').slice(0, 160),
+    phone: normalizePhoneE164(targetProfile.phone || '').slice(0, 32),
     display_name: String(targetProfile.displayName || targetProfile.username || 'Momi Creator').slice(0, 80),
     category: String(targetProfile.category || '').slice(0, 80),
     bio: String(targetProfile.bio || '').slice(0, 300),
@@ -615,7 +663,7 @@ export async function mergeSupabaseProfileIntoTarget(
     avatar_url: targetProfile.avatarUrl || null,
     is_verified: Boolean(targetProfile.isVerified)
   };
-  await patchSupabaseRows(cfg, 'profiles', `user_id=eq.${encSource}`, { email: '' }, fetchImpl).catch(() => {});
+  await patchSupabaseRows(cfg, 'profiles', `user_id=eq.${encSource}`, { email: '', phone: '' }, fetchImpl).catch(() => {});
   await upsertSupabaseTable(cfg, 'profiles', [targetRow], token, fetchImpl, 'user_id');
 
   const countRes = await fetchImpl(`${baseUrl}/rest/v1/posts?select=id&user_id=eq.${encSource}`, { headers }).catch(() => null);
@@ -677,6 +725,115 @@ export async function mergeSupabaseProfileIntoTarget(
   return { movedPosts };
 }
 
+function encodeUtf8Base64(value = '') {
+  const bytes = new TextEncoder().encode(String(value));
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 1) bin += String.fromCharCode(bytes[i]);
+  return typeof globalThis.btoa === 'function'
+    ? globalThis.btoa(bin)
+    : Buffer.from(bytes).toString('base64');
+}
+
+const TUS_CHUNK_SIZE_BYTES = 5 * 1024 * 1024;
+const DIRECT_UPLOAD_LIMIT_BYTES = 45 * 1024 * 1024;
+
+export async function uploadWebFileResumableTus(
+  cfg = SUPABASE_WEB_CONFIG,
+  bucket = 'momi-videos',
+  objectPath = '',
+  blobOrFile,
+  contentType = 'video/mp4',
+  fetchImpl = globalThis.fetch
+) {
+  const baseUrl = normalizeSupabaseUrl(cfg?.url);
+  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) return null;
+  if (!SUPABASE_STORAGE_BUCKETS.includes(bucket) || !objectPath || !blobOrFile) return null;
+  const totalBytes = Number(blobOrFile.size || blobOrFile.byteLength || 0);
+  if (totalBytes <= 0) return null;
+
+  const anonKey = String(cfg.anonKey).trim();
+  const safePath = String(objectPath)
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/');
+  const mime = contentType || blobOrFile.type || 'application/octet-stream';
+  const metadataHeader = [
+    `bucketName ${encodeUtf8Base64(bucket)}`,
+    `objectName ${encodeUtf8Base64(objectPath)}`,
+    `contentType ${encodeUtf8Base64(mime)}`,
+    `cacheControl ${encodeUtf8Base64('3600')}`
+  ].join(',');
+
+  try {
+    let token = await ensureFreshWebAccessToken(cfg, fetchImpl);
+    let createRes = await fetchImpl(`${baseUrl}/storage/v1/upload/resumable`, {
+      method: 'POST',
+      headers: {
+        ...buildSupabaseAuthHeaders(anonKey, token),
+        'Tus-Resumable': '1.0.0',
+        'Upload-Length': String(totalBytes),
+        'Upload-Metadata': metadataHeader,
+        'x-upsert': 'true'
+      }
+    });
+    if (createRes.status === 401) {
+      token = await ensureFreshWebAccessToken(cfg, fetchImpl, true);
+      createRes = await fetchImpl(`${baseUrl}/storage/v1/upload/resumable`, {
+        method: 'POST',
+        headers: {
+          ...buildSupabaseAuthHeaders(anonKey, token),
+          'Tus-Resumable': '1.0.0',
+          'Upload-Length': String(totalBytes),
+          'Upload-Metadata': metadataHeader,
+          'x-upsert': 'true'
+        }
+      });
+    }
+    if (!createRes.ok) return null;
+    const rawLocation = createRes.headers?.get?.('Location') || createRes.headers?.get?.('location') || '';
+    if (!rawLocation) return null;
+    const uploadUrl = rawLocation.startsWith('http')
+      ? rawLocation
+      : `${baseUrl}${rawLocation.startsWith('/') ? '' : '/'}${rawLocation}`;
+
+    let offset = 0;
+    while (offset < totalBytes) {
+      const end = Math.min(offset + TUS_CHUNK_SIZE_BYTES, totalBytes);
+      const chunk = typeof blobOrFile.slice === 'function' ? blobOrFile.slice(offset, end) : blobOrFile;
+      token = await ensureFreshWebAccessToken(cfg, fetchImpl);
+      let patchRes = await fetchImpl(uploadUrl, {
+        method: 'PATCH',
+        headers: {
+          ...buildSupabaseAuthHeaders(anonKey, token),
+          'Tus-Resumable': '1.0.0',
+          'Upload-Offset': String(offset),
+          'Content-Type': 'application/offset+octet-stream'
+        },
+        body: chunk
+      });
+      if (patchRes.status === 401) {
+        token = await ensureFreshWebAccessToken(cfg, fetchImpl, true);
+        patchRes = await fetchImpl(uploadUrl, {
+          method: 'PATCH',
+          headers: {
+            ...buildSupabaseAuthHeaders(anonKey, token),
+            'Tus-Resumable': '1.0.0',
+            'Upload-Offset': String(offset),
+            'Content-Type': 'application/offset+octet-stream'
+          },
+          body: chunk
+        });
+      }
+      if (!patchRes.ok) return null;
+      const nextOffset = Number(patchRes.headers?.get?.('Upload-Offset'));
+      offset = Number.isFinite(nextOffset) && nextOffset > offset ? nextOffset : end;
+    }
+    return `${baseUrl}/storage/v1/object/public/${bucket}/${safePath}`;
+  } catch {
+    return null;
+  }
+}
+
 export async function uploadWebFileToStorage(
   cfg = SUPABASE_WEB_CONFIG,
   bucket = 'momi-media',
@@ -688,6 +845,12 @@ export async function uploadWebFileToStorage(
   const baseUrl = normalizeSupabaseUrl(cfg?.url);
   if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) return null;
   if (!SUPABASE_STORAGE_BUCKETS.includes(bucket) || !objectPath || !blobOrFile) return null;
+
+  const fileSize = Number(blobOrFile.size || blobOrFile.byteLength || 0);
+  if (fileSize > DIRECT_UPLOAD_LIMIT_BYTES) {
+    return uploadWebFileResumableTus(cfg, bucket, objectPath, blobOrFile, contentType, fetchImpl);
+  }
+
   const anonKey = String(cfg.anonKey).trim();
   const safePath = String(objectPath)
     .split('/')
@@ -715,6 +878,9 @@ export async function uploadWebFileToStorage(
         },
         body: blobOrFile
       });
+    }
+    if (res.status === 413 || res.status === 504 || res.status === 408) {
+      return uploadWebFileResumableTus(cfg, bucket, objectPath, blobOrFile, contentType, fetchImpl);
     }
     if (!res.ok) return null;
     return `${baseUrl}/storage/v1/object/public/${bucket}/${safePath}`;
@@ -1044,7 +1210,8 @@ export function mapSupabaseShowcaseAccountToWeb(row = {}) {
 export function mapSupabaseProfileToWeb(row = {}) {
   return {
     userId: String(row.user_id || ''),
-    email: String(row.email || '').trim().toLowerCase(),
+    email: normalizeEmail(row.email || ''),
+    phone: normalizePhoneE164(row.phone || ''),
     username: String(row.username || 'momi.creator'),
     displayName: String(row.display_name || row.username || 'Creator'),
     category: String(row.category || 'Creator'),
@@ -1193,15 +1360,19 @@ export function mapSupabaseOrderToWeb(row = {}) {
 // Supabase Auth (Google OAuth + Email/Password + Session Refresh)
 // ---------------------------------------------------------------------------
 
-export function mapSupabaseAuthUserToWeb(user = {}) {
+export function mapSupabaseAuthUserToWeb(user = {}, hints = {}) {
   const meta = user.user_metadata || {};
+  const email = normalizeEmail(user.email || meta.email || hints.email || '');
+  const phone = normalizePhoneE164(user.phone || meta.phone || hints.phone || '');
+  const fallbackName = email ? email.split('@')[0] : (phone ? `momi_${phone.slice(-4)}` : 'Momi Creator');
   return {
     uid: String(user.id || ''),
     id: String(user.id || ''),
-    email: String(user.email || ''),
-    displayName: String(meta.full_name || meta.name || user.email?.split('@')[0] || 'Momi Creator'),
+    email,
+    phone,
+    displayName: String(meta.full_name || meta.name || hints.displayName || fallbackName),
     photoURL: meta.avatar_url || meta.picture || null,
-    emailVerified: Boolean(user.email_confirmed_at || user.confirmed_at)
+    emailVerified: Boolean(user.email_confirmed_at || user.confirmed_at || user.phone_confirmed_at)
   };
 }
 
@@ -1282,11 +1453,43 @@ export async function supabaseSignInWithPassword(cfg = SUPABASE_WEB_CONFIG, emai
   return session;
 }
 
+export async function supabaseFetchProfileByEmail(cfg = SUPABASE_WEB_CONFIG, email = '', fetchImpl = globalThis.fetch) {
+  const cleanEmail = normalizeEmail(email);
+  if (!isValidEmailAddress(cleanEmail)) return null;
+  const rows = await selectSupabaseTable(
+    cfg,
+    'profiles',
+    `select=*&email=ilike.${encodeURIComponent(cleanEmail)}&limit=1`,
+    fetchImpl
+  );
+  return rows[0] ? mapSupabaseProfileToWeb(rows[0]) : null;
+}
+
+export async function supabaseFetchProfileByPhone(cfg = SUPABASE_WEB_CONFIG, phone = '', fetchImpl = globalThis.fetch) {
+  const cleanPhone = normalizePhoneE164(phone);
+  if (!cleanPhone) return null;
+  const rows = await selectSupabaseTable(
+    cfg,
+    'profiles',
+    `select=*&phone=eq.${encodeURIComponent(cleanPhone)}&limit=1`,
+    fetchImpl
+  );
+  return rows[0] ? mapSupabaseProfileToWeb(rows[0]) : null;
+}
+
 export async function supabaseSignUpWithEmail(cfg = SUPABASE_WEB_CONFIG, email, password, displayName = '', fetchImpl = globalThis.fetch) {
   const baseUrl = normalizeSupabaseUrl(cfg?.url);
   if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) throw new Error('Supabase configuration missing.');
+  const cleanEmail = normalizeEmail(email);
+  if (!isValidEmailAddress(cleanEmail)) {
+    throw new Error('Enter a valid email address.');
+  }
+  const existingProfile = await supabaseFetchProfileByEmail(cfg, cleanEmail, fetchImpl).catch(() => null);
+  if (existingProfile) {
+    throw new Error(`An account already exists for ${cleanEmail}. One email can only have one Momi account — please sign in instead.`);
+  }
   const anonKey = String(cfg.anonKey).trim();
-  const body = { email: String(email || '').trim(), password: String(password || '') };
+  const body = { email: cleanEmail, password: String(password || '') };
   if (displayName && displayName.trim()) {
     body.data = { full_name: displayName.trim() };
   }
@@ -1299,17 +1502,123 @@ export async function supabaseSignUpWithEmail(cfg = SUPABASE_WEB_CONFIG, email, 
     throw new Error(await parseSupabaseAuthError(res, `Sign up failed (HTTP ${res.status})`));
   }
   const data = await res.json();
+  if (Array.isArray(data?.user?.identities) && data.user.identities.length === 0) {
+    throw new Error(`An account already exists for ${cleanEmail}. One email can only have one Momi account — please sign in instead.`);
+  }
   if (data?.access_token && data?.user?.id) {
     const session = {
       accessToken: data.access_token,
       refreshToken: data.refresh_token || '',
       expiresAt: Date.now() + Number(data.expires_in || 3600) * 1000,
-      user: mapSupabaseAuthUserToWeb(data.user)
+      user: mapSupabaseAuthUserToWeb(data.user, { email: cleanEmail, displayName })
     };
     saveSupabaseAuthSession(session);
     return { session, confirmationRequired: false };
   }
   return { session: null, confirmationRequired: true };
+}
+
+export async function supabaseSendWhatsAppOtp(
+  cfg = SUPABASE_WEB_CONFIG,
+  phone = '',
+  { displayName = '', email = '' } = {},
+  fetchImpl = globalThis.fetch
+) {
+  const baseUrl = normalizeSupabaseUrl(cfg?.url);
+  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) throw new Error('Supabase configuration missing.');
+  const cleanPhone = normalizePhoneE164(phone);
+  if (!cleanPhone) {
+    throw new Error('Enter a valid WhatsApp number in international E.164 format (e.g. +923001234567).');
+  }
+  const cleanEmail = normalizeEmail(email);
+  if (cleanEmail) {
+    if (!isValidEmailAddress(cleanEmail)) {
+      throw new Error('Enter a valid email address or leave it blank.');
+    }
+    const existingByEmail = await supabaseFetchProfileByEmail(cfg, cleanEmail, fetchImpl).catch(() => null);
+    const existingPhone = normalizePhoneE164(existingByEmail?.phone || '');
+    if (existingByEmail && existingPhone !== cleanPhone) {
+      throw new Error(`An account already exists for ${cleanEmail}. One email can only have one Momi account — please sign in with Email or Google.`);
+    }
+  }
+  const anonKey = String(cfg.anonKey).trim();
+  const dataMeta = { phone: cleanPhone };
+  if (displayName && displayName.trim()) dataMeta.full_name = displayName.trim();
+  if (cleanEmail) dataMeta.email = cleanEmail;
+
+  const res = await fetchImpl(`${baseUrl}/auth/v1/otp`, {
+    method: 'POST',
+    headers: { apikey: anonKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      phone: cleanPhone,
+      channel: 'whatsapp',
+      create_user: true,
+      data: dataMeta
+    })
+  });
+  if (!res.ok) {
+    const detail = await parseSupabaseAuthError(res, `Failed to send WhatsApp OTP (HTTP ${res.status})`);
+    if (/provider|whatsapp|sms|not enabled|twilio/i.test(detail)) {
+      throw new Error(`WhatsApp OTP requires Phone/WhatsApp (Twilio/Meta) enabled in Supabase Authentication -> Providers -> Phone. [${detail}]`);
+    }
+    throw new Error(detail);
+  }
+  return { phone: cleanPhone };
+}
+
+export async function supabaseVerifyWhatsAppOtp(
+  cfg = SUPABASE_WEB_CONFIG,
+  phone = '',
+  token = '',
+  { displayName = '', email = '' } = {},
+  fetchImpl = globalThis.fetch
+) {
+  const baseUrl = normalizeSupabaseUrl(cfg?.url);
+  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) throw new Error('Supabase configuration missing.');
+  const cleanPhone = normalizePhoneE164(phone);
+  if (!cleanPhone) {
+    throw new Error('Enter a valid WhatsApp number in international format (e.g. +923001234567).');
+  }
+  const cleanCode = String(token || '').replace(/\D+/g, '');
+  if (cleanCode.length < 4 || cleanCode.length > 8) {
+    throw new Error(`Enter the 6-digit WhatsApp OTP code sent to ${cleanPhone}.`);
+  }
+  const cleanEmail = normalizeEmail(email);
+  if (cleanEmail) {
+    if (!isValidEmailAddress(cleanEmail)) {
+      throw new Error('Enter a valid email address or leave it blank.');
+    }
+    const existingByEmail = await supabaseFetchProfileByEmail(cfg, cleanEmail, fetchImpl).catch(() => null);
+    const existingPhone = normalizePhoneE164(existingByEmail?.phone || '');
+    if (existingByEmail && existingPhone !== cleanPhone) {
+      throw new Error(`An account already exists for ${cleanEmail}. One email can only have one Momi account — please sign in with Email or Google.`);
+    }
+  }
+  const anonKey = String(cfg.anonKey).trim();
+  const res = await fetchImpl(`${baseUrl}/auth/v1/verify`, {
+    method: 'POST',
+    headers: { apikey: anonKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'sms', phone: cleanPhone, token: cleanCode })
+  });
+  if (!res.ok) {
+    throw new Error(await parseSupabaseAuthError(res, `Invalid or expired WhatsApp OTP (HTTP ${res.status})`));
+  }
+  const data = await res.json();
+  if (!data?.access_token || !data?.user?.id) {
+    throw new Error('WhatsApp verification completed without a session. Please try signing in again.');
+  }
+  const session = {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token || '',
+    expiresAt: Date.now() + Number(data.expires_in || 3600) * 1000,
+    user: mapSupabaseAuthUserToWeb(data.user, {
+      email: cleanEmail,
+      phone: cleanPhone,
+      displayName: displayName.trim()
+    })
+  };
+  saveSupabaseAuthSession(session);
+  return { session };
 }
 
 export async function supabaseVerifyEmailOtp(
@@ -1322,7 +1631,7 @@ export async function supabaseVerifyEmailOtp(
   const baseUrl = normalizeSupabaseUrl(cfg?.url);
   if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) throw new Error('Supabase configuration missing.');
   const anonKey = String(cfg.anonKey).trim();
-  const cleanEmail = String(email || '').trim().toLowerCase();
+  const cleanEmail = normalizeEmail(email);
   const cleanCode = String(token || '').trim().replace(/\s+/g, '');
   if (!cleanEmail || cleanCode.length < 4) {
     throw new Error('Enter the verification code sent to your email.');
@@ -1343,7 +1652,7 @@ export async function supabaseVerifyEmailOtp(
     accessToken: data.access_token,
     refreshToken: data.refresh_token || '',
     expiresAt: Date.now() + Number(data.expires_in || 3600) * 1000,
-    user: mapSupabaseAuthUserToWeb(data.user)
+    user: mapSupabaseAuthUserToWeb(data.user, { email: cleanEmail })
   };
   saveSupabaseAuthSession(session);
   return { session };

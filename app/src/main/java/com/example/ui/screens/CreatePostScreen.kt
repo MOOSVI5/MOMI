@@ -5,6 +5,17 @@ import android.graphics.BitmapFactory
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -185,6 +196,8 @@ fun CreatePostScreen(
     var mediaType by remember { mutableStateOf("IMAGE") }
     var localVideoPath by remember { mutableStateOf<String?>(null) }
     var videoDurationMs by remember { mutableLongStateOf(0L) }
+    var autoExtractedThumbnailPath by remember { mutableStateOf<String?>(null) }
+    var mediaValidationMessage by remember { mutableStateOf<String?>(null) }
     var selectedStoryBgKey by remember { mutableStateOf("") }
     var storyTextOverlay by remember { mutableStateOf("") }
     var storyOverlayStyle by remember { mutableStateOf(StoryTextOverlayStyle.PILL_DARK.code) }
@@ -247,6 +260,8 @@ fun CreatePostScreen(
                     localExtraImagePaths = savedPaths.drop(1)
                     localVideoPath = null
                     videoDurationMs = 0L
+                    autoExtractedThumbnailPath = null
+                    mediaValidationMessage = null
                     mediaType = "IMAGE"
                 }
                 isProcessingMedia = false
@@ -269,7 +284,27 @@ fun CreatePostScreen(
                     localExtraImagePaths = emptyList()
                     localVideoPath = null
                     videoDurationMs = 0L
+                    autoExtractedThumbnailPath = null
+                    mediaValidationMessage = null
                     mediaType = "IMAGE"
+                }
+                isProcessingMedia = false
+            }
+        }
+    }
+
+    val videoThumbnailPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            isProcessingMedia = true
+            coroutineScope.launch {
+                val savedPath = withContext(Dispatchers.IO) {
+                    MediaAssets.copyPickedImageToInternalStorage(context, uri)
+                }
+                if (savedPath != null) {
+                    localImagePath = savedPath
+                    mediaValidationMessage = null
                 }
                 isProcessingMedia = false
             }
@@ -286,13 +321,20 @@ fun CreatePostScreen(
                     MediaAssets.copyPickedVideoToInternalStorage(context, uri)
                 }
                 if (extracted != null) {
-                    selectedStoryBgKey = ""
-                    localVideoPath = extracted.localVideoPath
-                    localImagePath = extracted.thumbnailPath
-                    localExtraImagePaths = emptyList()
-                    videoDurationMs = extracted.durationMs
-                    mediaType = "VIDEO"
-                    shareAsClip = true
+                    if (extracted.durationMs > MediaAssets.MAX_POST_VIDEO_DURATION_MS) {
+                        mediaValidationMessage =
+                            "Video is ${MediaAssets.formatDuration(extracted.durationMs)} — Momi supports videos up to 80:00 (80 minutes). Please select a shorter video."
+                    } else {
+                        mediaValidationMessage = null
+                        selectedStoryBgKey = ""
+                        localVideoPath = extracted.localVideoPath
+                        localImagePath = extracted.thumbnailPath
+                        autoExtractedThumbnailPath = extracted.thumbnailPath
+                        localExtraImagePaths = emptyList()
+                        videoDurationMs = extracted.durationMs
+                        mediaType = "VIDEO"
+                        shareAsClip = true
+                    }
                 }
                 isProcessingMedia = false
             }
@@ -349,6 +391,21 @@ fun CreatePostScreen(
                 color = MaterialTheme.colorScheme.onBackground,
                 maxLines = 1,
                 softWrap = false
+            )
+
+            val publishContainerColor by animateColorAsState(
+                targetValue = if (isPublishing) {
+                    MaterialTheme.colorScheme.secondary
+                } else {
+                    MaterialTheme.colorScheme.primary
+                },
+                animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+                label = "publish_btn_color"
+            )
+            val publishButtonScale by animateFloatAsState(
+                targetValue = if (isPublishing) 0.96f else 1f,
+                animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+                label = "publish_btn_scale"
             )
 
             Button(
@@ -469,22 +526,51 @@ fun CreatePostScreen(
                 },
                 shape = RoundedCornerShape(20.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary
+                    containerColor = publishContainerColor,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    disabledContainerColor = publishContainerColor.copy(alpha = 0.9f),
+                    disabledContentColor = MaterialTheme.colorScheme.onPrimary
                 ),
-                modifier = Modifier.testTag("publish_post_button")
+                modifier = Modifier
+                    .graphicsLayer {
+                        scaleX = publishButtonScale
+                        scaleY = publishButtonScale
+                    }
+                    .animateContentSize(animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing))
+                    .testTag("publish_post_button")
             ) {
-                if (isPublishing) {
-                    CircularProgressIndicator(
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        strokeWidth = 2.dp,
-                        modifier = Modifier.size(16.dp)
-                    )
-                } else {
-                    Text(
-                        text = "Share",
-                        fontWeight = FontWeight.Bold
-                    )
+                AnimatedContent(
+                    targetState = isPublishing to isStoryMode,
+                    transitionSpec = {
+                        fadeIn(tween(220)) togetherWith fadeOut(tween(180))
+                    },
+                    label = "publish_btn_content"
+                ) { (publishingNow, storyModeNow) ->
+                    if (publishingNow) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Text(
+                                text = if (storyModeNow) "Saving..." else "Uploading...",
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    } else {
+                        Text(
+                            text = if (storyModeNow) "Publish Story" else "Share",
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
                 }
             }
         }
@@ -616,7 +702,7 @@ fun CreatePostScreen(
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize()
                     )
-                    if (videoDurationMs > 30_000L) {
+                    if (isStoryMode && videoDurationMs > 30_000L) {
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopCenter)
@@ -664,6 +750,22 @@ fun CreatePostScreen(
                                     Text("Auto-Trim to 30s", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
+                        }
+                    } else if (!isStoryMode) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(10.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color.Black.copy(alpha = 0.72f))
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                        ) {
+                            Text(
+                                text = "Video ${MediaAssets.formatDuration(videoDurationMs)} • Max 80:00",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
                         }
                     }
                 } else if (!isStoryMode && allSelectedPhotoPaths.size > 1) {
@@ -831,18 +933,33 @@ fun CreatePostScreen(
                     }
                 }
 
-                if (isProcessingMedia || isPublishing) {
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = isProcessingMedia || isPublishing,
+                    enter = fadeIn(tween(260)) + scaleIn(initialScale = 0.96f, animationSpec = tween(260)),
+                    exit = fadeOut(tween(220)),
+                    modifier = Modifier.matchParentSize()
+                ) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.45f)),
+                            .background(Color.Black.copy(alpha = 0.52f)),
                         contentAlignment = Alignment.Center
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            CircularProgressIndicator(color = Color.White)
-                            Spacer(modifier = Modifier.height(8.dp))
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(Color.Black.copy(alpha = 0.72f))
+                                .padding(horizontal = 20.dp, vertical = 14.dp)
+                        ) {
+                            CircularProgressIndicator(color = Color.White, strokeWidth = 2.5.dp)
+                            Spacer(modifier = Modifier.height(10.dp))
                             Text(
-                                text = if (isPublishing) "Publishing..." else "Loading media...",
+                                text = when {
+                                    isPublishing && isStoryMode -> "Uploading & saving story..."
+                                    isPublishing -> "Publishing to Supabase..."
+                                    else -> "Loading media..."
+                                },
                                 color = Color.White,
                                 style = MaterialTheme.typography.labelLarge,
                                 fontWeight = FontWeight.SemiBold
@@ -1191,11 +1308,100 @@ fun CreatePostScreen(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Video",
+                            text = "Video (max 80m)",
                             maxLines = 1,
                             softWrap = false,
                             fontWeight = FontWeight.SemiBold
                         )
+                    }
+                }
+                if (mediaValidationMessage != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.errorContainer)
+                            .clickable { mediaValidationMessage = null }
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            text = mediaValidationMessage ?: "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+                if (mediaType == "VIDEO" && localVideoPath != null) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(56.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(MaterialTheme.colorScheme.surface)
+                            ) {
+                                PostMediaImage(
+                                    imageKey = selectedImageKey,
+                                    localImagePath = localImagePath ?: autoExtractedThumbnailPath,
+                                    filterTag = selectedFilter,
+                                    contentDescription = "Video cover thumbnail",
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Video Cover Thumbnail",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = if (localImagePath != null && localImagePath != autoExtractedThumbnailPath) {
+                                        "Custom thumbnail selected"
+                                    } else {
+                                        "Auto frame (${MediaAssets.formatDuration(videoDurationMs)} / 80:00)"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            OutlinedButton(
+                                enabled = !isProcessingMedia && !isPublishing,
+                                onClick = {
+                                    videoThumbnailPickerLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier
+                                    .heightIn(min = 40.dp)
+                                    .testTag("video_thumbnail_picker_button")
+                            ) {
+                                Text("Thumbnail", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                            }
+                            if (localImagePath != autoExtractedThumbnailPath && autoExtractedThumbnailPath != null) {
+                                TextButton(
+                                    onClick = { localImagePath = autoExtractedThumbnailPath },
+                                    modifier = Modifier
+                                        .heightIn(min = 40.dp)
+                                        .testTag("reset_video_thumbnail_button")
+                                ) {
+                                    Text("Reset", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
                     }
                 }
                 if (!isStoryMode && localExtraImagePaths.isNotEmpty()) {
@@ -1254,6 +1460,8 @@ fun CreatePostScreen(
                             localImagePath = null
                             localExtraImagePaths = emptyList()
                             localVideoPath = null
+                            autoExtractedThumbnailPath = null
+                            mediaValidationMessage = null
                             videoDurationMs = 0L
                             mediaType = "IMAGE"
                             selectedImageKey = key

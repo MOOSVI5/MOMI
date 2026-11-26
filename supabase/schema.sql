@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS public.profiles (
   user_id text PRIMARY KEY CHECK (length(user_id) BETWEEN 1 AND 128),
   username text NOT NULL UNIQUE CHECK (length(username) BETWEEN 1 AND 50),
   email text NOT NULL DEFAULT '' CHECK (length(email) <= 160),
+  phone text NOT NULL DEFAULT '' CHECK (length(phone) <= 32),
   display_name text NOT NULL CHECK (length(display_name) BETWEEN 1 AND 80),
   category text NOT NULL DEFAULT '' CHECK (length(category) <= 80),
   bio text NOT NULL DEFAULT '' CHECK (length(bio) <= 300),
@@ -74,6 +75,9 @@ CREATE TABLE IF NOT EXISTS public.profiles (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_email_lower
   ON public.profiles(lower(email))
   WHERE email <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_phone_e164
+  ON public.profiles(phone)
+  WHERE phone <> '';
 
 CREATE OR REPLACE FUNCTION public.is_staff_with_scope(scope_name text)
 RETURNS boolean
@@ -108,7 +112,7 @@ CREATE TABLE IF NOT EXISTS public.posts (
   media_type text NOT NULL DEFAULT 'IMAGE' CHECK (media_type IN ('IMAGE', 'VIDEO')),
   video_url text,
   video_data text,
-  video_duration_ms bigint NOT NULL DEFAULT 0 CHECK (video_duration_ms BETWEEN 0 AND 3600000),
+  video_duration_ms bigint NOT NULL DEFAULT 0 CHECK (video_duration_ms BETWEEN 0 AND 4800000),
   filter_tag text NOT NULL DEFAULT 'NONE' CHECK (
     filter_tag IN ('NONE', 'BLUE', 'MAROON', 'MONO', 'WARM', 'VINTAGE', 'VIVID', 'NOIR', 'CINEMA', 'PASTEL')
   ),
@@ -165,7 +169,7 @@ CREATE TABLE IF NOT EXISTS public.stories (
   media_type text NOT NULL DEFAULT 'IMAGE' CHECK (media_type IN ('IMAGE', 'VIDEO')),
   video_url text,
   video_data text,
-  video_duration_ms bigint NOT NULL DEFAULT 0 CHECK (video_duration_ms BETWEEN 0 AND 3600000),
+  video_duration_ms bigint NOT NULL DEFAULT 0 CHECK (video_duration_ms BETWEEN 0 AND 4800000),
   audio_title text NOT NULL DEFAULT '' CHECK (length(audio_title) <= 120),
   audio_data text,
   caption text NOT NULL DEFAULT '' CHECK (length(caption) <= 300),
@@ -338,7 +342,7 @@ CREATE TABLE IF NOT EXISTS public.market_products (
   extra_image_datas text[] NOT NULL DEFAULT ARRAY[]::text[],
   video_url text,
   video_data text,
-  video_duration_ms bigint NOT NULL DEFAULT 0 CHECK (video_duration_ms BETWEEN 0 AND 3600000),
+  video_duration_ms bigint NOT NULL DEFAULT 0 CHECK (video_duration_ms BETWEEN 0 AND 4800000),
   stock_count integer NOT NULL DEFAULT 1 CHECK (stock_count BETWEEN 0 AND 99999),
   is_featured boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -1044,12 +1048,14 @@ $$;
 -- ----------------------------------------------------------------------------
 -- 5. Supabase Storage Buckets & RLS Policies (Replaces Base64 Media Chunks)
 -- ----------------------------------------------------------------------------
-INSERT INTO storage.buckets (id, name, public)
+INSERT INTO storage.buckets (id, name, public, file_size_limit)
 VALUES
-  ('momi-media', 'momi-media', true),
-  ('momi-avatars', 'momi-avatars', true),
-  ('momi-videos', 'momi-videos', true)
-ON CONFLICT (id) DO NOTHING;
+  ('momi-media', 'momi-media', true, 52428800),
+  ('momi-avatars', 'momi-avatars', true, 20971520),
+  ('momi-videos', 'momi-videos', true, 524288000)
+ON CONFLICT (id) DO UPDATE
+SET public = EXCLUDED.public,
+    file_size_limit = EXCLUDED.file_size_limit;
 
 DROP POLICY IF EXISTS momi_storage_public_read ON storage.objects;
 CREATE POLICY momi_storage_public_read ON storage.objects

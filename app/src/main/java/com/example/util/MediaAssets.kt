@@ -61,6 +61,8 @@ data class PreparedVideoPayload(
 
 object MediaAssets {
     private const val TAG = "MediaAssets"
+    const val MAX_POST_VIDEO_DURATION_MS = 4_800_000L // 80 minutes
+    const val MAX_STORY_VIDEO_DURATION_MS = 30_000L
     private const val INLINE_MAX_RAW_BYTES = 340_000L
     private const val CHUNK_SLICE_RAW_BYTES = 340_000
     private const val MAX_VIDEO_CHUNKS = 24

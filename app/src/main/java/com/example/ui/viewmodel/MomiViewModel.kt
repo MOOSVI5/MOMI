@@ -93,6 +93,7 @@ class MomiViewModel(
     val currentUserId: String,
     private val initialDisplayName: String?,
     private val initialEmail: String?,
+    private val initialPhone: String? = null,
     private val aiAssistantRepository: MomiAiAssistantRepository = MomiAiAssistantRepository()
 ) : ViewModel() {
 
@@ -680,8 +681,10 @@ class MomiViewModel(
         cachedProfile
     ) { sProfiles, allFollows, localCached ->
         val cleanEmail = initialEmail?.trim()?.takeIf { it.isNotBlank() }
+        val cleanPhone = MomiSupabaseSchema.normalizePhoneE164(initialPhone).takeIf { it.isNotBlank() }
         val matchedRemote = sProfiles.firstOrNull { it.userId == currentUserId }
             ?: if (cleanEmail != null) sProfiles.firstOrNull { it.email.equals(cleanEmail, ignoreCase = true) } else null
+            ?: if (cleanPhone != null) sProfiles.firstOrNull { MomiSupabaseSchema.normalizePhoneE164(it.phone) == cleanPhone } else null
         val resolved = matchedRemote
             ?: localCached
             ?: fallbackProfileBase()
@@ -1819,10 +1822,20 @@ class MomiViewModel(
         communityName: String = "",
         onComplete: (Boolean) -> Unit
     ) {
+        if (mediaType == "VIDEO" && videoDurationMs > MediaAssets.MAX_POST_VIDEO_DURATION_MS) {
+            _errorMessage.value = "Videos can be up to 80 minutes (80:00). Please select or trim a shorter video."
+            onComplete(false)
+            return
+        }
         val currentProfile = fallbackProfile()
         val extraPaths = localExtraImagePaths.filter { it.isNotBlank() }.take(4)
         val mergedHashtags = MediaAssets.extractHashtags(caption, hashtags)
         val mergedTags = MediaAssets.extractMentions(caption, taggedUsernames)
+        val clampedDurationMs = if (mediaType == "VIDEO") {
+            videoDurationMs.coerceIn(0L, MediaAssets.MAX_POST_VIDEO_DURATION_MS)
+        } else {
+            0L
+        }
         viewModelScope.launch {
             val postId = "post_${UUID.randomUUID()}"
             val uploaded = supabaseBackend.prepareAndUploadPostMedia(
@@ -1859,7 +1872,7 @@ class MomiViewModel(
                 videoUrl = uploaded.videoUrl,
                 videoData = uploaded.videoDataFallback,
                 videoChunksCount = uploaded.videoChunksFallback.size.toLong(),
-                videoDurationMs = videoDurationMs,
+                videoDurationMs = clampedDurationMs,
                 filterTag = filterTag,
                 aspectRatio = aspectRatio,
                 taggedUsernames = mergedTags,
@@ -2106,6 +2119,7 @@ class MomiViewModel(
                     val confirmed = if (remoteConfirmed != null) {
                         remoteConfirmed.copy(
                             email = remoteConfirmed.email.ifBlank { finalProfile.email },
+                            phone = remoteConfirmed.phone.ifBlank { finalProfile.phone },
                             avatarUrl = if (removeAvatar) null else (remoteConfirmed.avatarUrl ?: finalProfile.avatarUrl),
                             avatarData = if (removeAvatar) null else (remoteConfirmed.avatarData ?: finalProfile.avatarData)
                         )
@@ -3885,7 +3899,8 @@ class MomiViewModel(
                     displayName = base.displayName,
                     avatarKey = base.avatarKey,
                     avatarUrl = base.avatarUrl,
-                    email = base.email
+                    email = base.email,
+                    phone = base.phone
                 )
             }
             supabaseClient.fetchFeedBundle(currentUserId).onSuccess { bundle ->
@@ -3912,11 +3927,14 @@ class MomiViewModel(
                     supaProfiles.value = mergedProfiles
                     cachedProfiles.value = mergedProfiles
                     val cleanEmail = initialEmail?.trim()?.takeIf { it.isNotBlank() }
+                    val cleanPhone = MomiSupabaseSchema.normalizePhoneE164(initialPhone).takeIf { it.isNotBlank() }
                     val ownRemote = mergedProfiles.firstOrNull { it.userId == currentUserId }
                         ?: if (cleanEmail != null) mergedProfiles.firstOrNull { it.email.equals(cleanEmail, ignoreCase = true) } else null
+                        ?: if (cleanPhone != null) mergedProfiles.firstOrNull { MomiSupabaseSchema.normalizePhoneE164(it.phone) == cleanPhone } else null
                     if (ownRemote != null) {
                         val hydratedOwn = ownRemote.copy(
-                            email = ownRemote.email.ifBlank { cleanEmail.orEmpty() }
+                            email = ownRemote.email.ifBlank { cleanEmail.orEmpty() },
+                            phone = ownRemote.phone.ifBlank { cleanPhone.orEmpty() }
                         )
                         cachedProfile.value = hydratedOwn
                         cachedAppContext?.let { ctx ->
@@ -4091,17 +4109,19 @@ class MomiViewModel(
 
     private fun fallbackProfileBase(): UserProfile {
         val cleanEmail = initialEmail?.trim()?.lowercase().orEmpty()
+        val cleanPhone = MomiSupabaseSchema.normalizePhoneE164(initialPhone)
         val fallbackName = initialDisplayName?.trim()?.takeIf { it.isNotBlank() } ?: "Momi Creator"
         val fallbackUsername = cleanEmail.substringBefore("@")
             .lowercase()
             .replace(Regex("[^a-z0-9._]"), "")
             .takeIf { it.isNotBlank() }
-            ?: "momi.creator"
+            ?: if (cleanPhone.isNotBlank()) "wa_${cleanPhone.takeLast(6)}" else "momi.creator"
         return UserProfile(
             id = currentUserId,
             userId = currentUserId,
             username = fallbackUsername.take(50),
             email = cleanEmail,
+            phone = cleanPhone,
             displayName = fallbackName.take(80),
             avatarKey = MediaAssets.avatarKeyForUid(currentUserId)
         )
@@ -4254,6 +4274,7 @@ internal object ProfileLocalCacheCodec {
             "userId" to p.userId,
             "username" to p.username,
             "email" to p.email,
+            "phone" to p.phone,
             "displayName" to p.displayName,
             "category" to p.category,
             "bio" to p.bio,
@@ -4290,6 +4311,7 @@ internal object ProfileLocalCacheCodec {
             userId = uid,
             username = o.optString("username", "momi.creator"),
             email = o.optString("email"),
+            phone = o.optString("phone"),
             displayName = o.optString("displayName", "Momi Creator"),
             category = o.optString("category"),
             bio = o.optString("bio"),

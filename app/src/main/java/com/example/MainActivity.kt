@@ -266,7 +266,8 @@ private fun AppNavigation(
                     userId = updated.userId,
                     email = updated.email,
                     displayName = updated.displayName,
-                    avatarUrl = updated.avatarUrl
+                    avatarUrl = updated.avatarUrl,
+                    phone = updated.phone
                 )
             }
         }
@@ -312,7 +313,8 @@ private fun AppNavigation(
                         MomiViewModel(
                             currentUserId = uid,
                             initialDisplayName = session.displayName,
-                            initialEmail = session.email
+                            initialEmail = session.email,
+                            initialPhone = session.phone
                         )
                     }
                 }

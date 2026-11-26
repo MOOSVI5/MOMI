@@ -1,9 +1,50 @@
 export const ADMIN_OWNER_EMAIL = 'syali6511@gmail.com';
 export const MAX_IMAGE_BASE64_CHARS = 650000;
 export const STORY_TTL_MS = 24 * 60 * 60 * 1000;
+export const MAX_VIDEO_DURATION_MS = 4_800_000; // 80 minutes
+export const MAX_STORY_VIDEO_DURATION_MS = 30_000;
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const E164_PHONE_REGEX = /^\+[1-9]\d{6,14}$/;
+
+export function normalizeEmail(email = '') {
+  return String(email || '').trim().toLowerCase();
+}
+
+export function isValidEmailAddress(email = '') {
+  const clean = normalizeEmail(email);
+  return clean.length >= 5 && clean.length <= 160 && EMAIL_REGEX.test(clean);
+}
+
+export function normalizePhoneE164(raw = '') {
+  const stripped = String(raw || '').trim().replace(/[\s\-().]/g, '');
+  if (!stripped) return '';
+  let withPlus = stripped;
+  if (stripped.startsWith('00')) {
+    withPlus = `+${stripped.slice(2)}`;
+  } else if (!stripped.startsWith('+')) {
+    withPlus = `+${stripped}`;
+  }
+  return E164_PHONE_REGEX.test(withPlus) ? withPlus : '';
+}
+
+export function isValidPhoneE164(raw = '') {
+  return Boolean(normalizePhoneE164(raw));
+}
+
+export function formatVideoDurationMs(durationMs = 0) {
+  const totalSec = Math.max(0, Math.round(Number(durationMs || 0) / 1000));
+  const hrs = Math.floor(totalSec / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const secs = totalSec % 60;
+  if (hrs > 0) {
+    return `${hrs}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }
+  return `${mins}:${String(secs).padStart(2, '0')}`;
+}
 
 export function isOwnerEmail(email = '') {
-  return String(email || '').trim().toLowerCase() === ADMIN_OWNER_EMAIL.toLowerCase();
+  return normalizeEmail(email) === normalizeEmail(ADMIN_OWNER_EMAIL);
 }
 
 // Populate url & anonKey after running supabase/schema.sql (NEVER place service_role / sb_secret_ keys here)

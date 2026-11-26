@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -63,7 +64,9 @@ import com.example.auth.attemptAutoSignIn
 import com.example.auth.onEmailPasswordAuthClicked
 import com.example.auth.onGoogleSignInClicked
 import com.example.auth.onResendEmailOtpClicked
+import com.example.auth.onSendWhatsAppOtpClicked
 import com.example.auth.onVerifyEmailOtpClicked
+import com.example.auth.onVerifyWhatsAppOtpClicked
 import com.example.ui.theme.LocalMomiBrandGradient
 import com.example.ui.theme.LumaScriptFamily
 
@@ -88,6 +91,13 @@ fun SignInScreen(
     var displayNameInput by remember { mutableStateOf("") }
     var pendingVerificationEmail by remember { mutableStateOf<String?>(null) }
     var otpCodeInput by remember { mutableStateOf("") }
+
+    var showWhatsAppForm by remember { mutableStateOf(false) }
+    var whatsappPhoneInput by remember { mutableStateOf("") }
+    var whatsappNameInput by remember { mutableStateOf("") }
+    var whatsappEmailInput by remember { mutableStateOf("") }
+    var pendingWhatsAppPhone by remember { mutableStateOf<String?>(null) }
+    var whatsappOtpInput by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
         attemptAutoSignIn(
@@ -268,7 +278,221 @@ fun SignInScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(10.dp))
+
+                OutlinedButton(
+                    onClick = {
+                        errorMessage = null
+                        infoMessage = null
+                        showWhatsAppForm = !showWhatsAppForm
+                        if (showWhatsAppForm) showEmailForm = false
+                    },
+                    enabled = !isSigningIn && !isAutoChecking,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .testTag("toggle_whatsapp_login_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Phone,
+                        contentDescription = null,
+                        tint = Color(0xFF16A34A),
+                        modifier = Modifier
+                            .padding(end = 8.dp)
+                            .size(18.dp)
+                    )
+                    Text(
+                        text = if (showWhatsAppForm) "Hide WhatsApp Login" else "Continue with WhatsApp",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                AnimatedVisibility(visible = showWhatsAppForm) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        val verifyPhone = pendingWhatsAppPhone
+                        if (verifyPhone != null) {
+                            Text(
+                                text = "Enter the 6-digit verification code sent via WhatsApp to $verifyPhone.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            OutlinedTextField(
+                                value = whatsappOtpInput,
+                                onValueChange = { whatsappOtpInput = it.filter { ch -> ch.isDigit() }.take(8) },
+                                label = { Text("WhatsApp OTP Code") },
+                                leadingIcon = { Icon(Icons.Filled.VerifiedUser, contentDescription = null) },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Number,
+                                    imeAction = ImeAction.Done
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("whatsapp_otp_input")
+                            )
+                            Button(
+                                onClick = {
+                                    errorMessage = null
+                                    infoMessage = null
+                                    isSigningIn = true
+                                    onVerifyWhatsAppOtpClicked(
+                                        context = context,
+                                        phone = verifyPhone,
+                                        otpCode = whatsappOtpInput,
+                                        displayName = whatsappNameInput,
+                                        email = whatsappEmailInput,
+                                        onAuthSuccess = {
+                                            isSigningIn = false
+                                            pendingWhatsAppPhone = null
+                                            onAuthSuccess()
+                                        },
+                                        onAuthError = { msg ->
+                                            isSigningIn = false
+                                            errorMessage = msg
+                                        },
+                                        scope = coroutineScope
+                                    )
+                                },
+                                enabled = !isSigningIn && whatsappOtpInput.length >= 4,
+                                shape = RoundedCornerShape(16.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF16A34A),
+                                    contentColor = Color.White
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("verify_whatsapp_otp_button")
+                            ) {
+                                Text("Verify WhatsApp & Continue", fontWeight = FontWeight.SemiBold)
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                TextButton(
+                                    onClick = {
+                                        errorMessage = null
+                                        infoMessage = null
+                                        isSigningIn = true
+                                        onSendWhatsAppOtpClicked(
+                                            phone = verifyPhone,
+                                            displayName = whatsappNameInput,
+                                            email = whatsappEmailInput,
+                                            onOtpSent = { sentPhone ->
+                                                isSigningIn = false
+                                                infoMessage = "New WhatsApp verification code sent to $sentPhone."
+                                            },
+                                            onAuthError = { msg ->
+                                                isSigningIn = false
+                                                errorMessage = msg
+                                            },
+                                            scope = coroutineScope
+                                        )
+                                    },
+                                    enabled = !isSigningIn,
+                                    modifier = Modifier.testTag("resend_whatsapp_otp_button")
+                                ) {
+                                    Text("Resend Code", style = MaterialTheme.typography.bodySmall)
+                                }
+                                TextButton(
+                                    onClick = {
+                                        pendingWhatsAppPhone = null
+                                        whatsappOtpInput = ""
+                                        errorMessage = null
+                                    }
+                                ) {
+                                    Text("Change Number", style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        } else {
+                            OutlinedTextField(
+                                value = whatsappNameInput,
+                                onValueChange = { whatsappNameInput = it },
+                                label = { Text("Display Name (optional)") },
+                                leadingIcon = { Icon(Icons.Filled.Person, contentDescription = null) },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("whatsapp_name_input")
+                            )
+                            OutlinedTextField(
+                                value = whatsappPhoneInput,
+                                onValueChange = { whatsappPhoneInput = it },
+                                label = { Text("WhatsApp Number (+country code)") },
+                                placeholder = { Text("+923001234567") },
+                                leadingIcon = { Icon(Icons.Filled.Phone, contentDescription = null) },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Phone,
+                                    imeAction = ImeAction.Next
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("whatsapp_phone_input")
+                            )
+                            OutlinedTextField(
+                                value = whatsappEmailInput,
+                                onValueChange = { whatsappEmailInput = it },
+                                label = { Text("Email (optional, 1 account per email)") },
+                                leadingIcon = { Icon(Icons.Filled.Email, contentDescription = null) },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Email,
+                                    imeAction = ImeAction.Done
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("whatsapp_email_input")
+                            )
+                            Button(
+                                onClick = {
+                                    errorMessage = null
+                                    infoMessage = null
+                                    isSigningIn = true
+                                    onSendWhatsAppOtpClicked(
+                                        phone = whatsappPhoneInput,
+                                        displayName = whatsappNameInput,
+                                        email = whatsappEmailInput,
+                                        onOtpSent = { sentPhone ->
+                                            isSigningIn = false
+                                            pendingWhatsAppPhone = sentPhone
+                                            whatsappOtpInput = ""
+                                            infoMessage = "WhatsApp verification code sent to $sentPhone."
+                                        },
+                                        onAuthError = { msg ->
+                                            isSigningIn = false
+                                            errorMessage = msg
+                                        },
+                                        scope = coroutineScope
+                                    )
+                                },
+                                enabled = !isSigningIn && !isAutoChecking && whatsappPhoneInput.isNotBlank(),
+                                shape = RoundedCornerShape(16.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF16A34A),
+                                    contentColor = Color.White
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("send_whatsapp_otp_button")
+                            ) {
+                                Text("Send WhatsApp OTP", fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -277,7 +501,10 @@ fun SignInScreen(
                 ) {
                     HorizontalDivider(modifier = Modifier.weight(1f))
                     TextButton(
-                        onClick = { showEmailForm = !showEmailForm },
+                        onClick = {
+                            showEmailForm = !showEmailForm
+                            if (showEmailForm) showWhatsAppForm = false
+                        },
                         modifier = Modifier.testTag("toggle_email_login_button")
                     ) {
                         Text(

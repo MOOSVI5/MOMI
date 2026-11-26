@@ -31,7 +31,8 @@ private fun persistSession(context: Context, sess: com.example.data.supabase.Sup
         userId = sess.userId,
         email = sess.email,
         displayName = sess.displayName,
-        avatarUrl = sess.avatarUrl
+        avatarUrl = sess.avatarUrl,
+        phone = sess.phone
     )
 }
 
@@ -262,6 +263,54 @@ fun onResendEmailOtpClicked(
             .onFailure { err ->
                 onAuthError(err.localizedMessage ?: "Could not resend verification code.")
             }
+    }
+}
+
+fun onSendWhatsAppOtpClicked(
+    phone: String,
+    displayName: String,
+    email: String,
+    onOtpSent: (String) -> Unit,
+    onAuthError: (String) -> Unit,
+    scope: CoroutineScope
+) {
+    val client = MomiSupabaseClient()
+    scope.launch {
+        client.sendWhatsAppOtp(
+            phone = phone,
+            displayName = displayName,
+            email = email
+        ).onSuccess { normalizedPhone ->
+            onOtpSent(normalizedPhone)
+        }.onFailure { err ->
+            onAuthError(err.localizedMessage ?: "Could not send WhatsApp verification code.")
+        }
+    }
+}
+
+fun onVerifyWhatsAppOtpClicked(
+    context: Context,
+    phone: String,
+    otpCode: String,
+    displayName: String,
+    email: String,
+    onAuthSuccess: () -> Unit,
+    onAuthError: (String) -> Unit,
+    scope: CoroutineScope
+) {
+    val client = MomiSupabaseClient()
+    scope.launch {
+        client.verifyWhatsAppOtp(
+            phone = phone,
+            otpCode = otpCode,
+            displayName = displayName,
+            email = email
+        ).onSuccess { sess ->
+            persistSession(context, sess)
+            onAuthSuccess()
+        }.onFailure { err ->
+            onAuthError(err.localizedMessage ?: "Invalid or expired WhatsApp verification code.")
+        }
     }
 }
 

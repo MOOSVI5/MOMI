@@ -332,13 +332,14 @@ class SupabaseMigrationTest {
     }
 
     @Test
-    fun profileUpsertOmitsEmailAndLocalCachePreservesFullPhotoAndBio() {
+    fun profileUpsertIncludesEmailAndPhoneAndLocalCachePreservesFullPhotoAndBio() {
         val longAvatarBase64 = "A".repeat(95_000)
         val profile = UserProfile(
             id = "uid_42",
             userId = "uid_42",
             username = "momi.test",
-            email = "test@momi.app",
+            email = "  Test@Momi.App ",
+            phone = "+92 300-1234567",
             displayName = "Ali Updated",
             category = "Photographer",
             bio = "Capturing streets and golden hour.",
@@ -353,13 +354,15 @@ class SupabaseMigrationTest {
         )
 
         val row = MomiSupabaseSchema.toProfileRow(profile)
-        assertFalse(row.containsKey("email"))
+        assertEquals("test@momi.app", row["email"])
+        assertEquals("+923001234567", row["phone"])
         assertEquals("Ali Updated", row["display_name"])
         assertEquals("Capturing streets and golden hour.", row["bio"])
         assertEquals(longAvatarBase64, row["avatar_data"])
 
         val encodedJson = com.example.ui.viewmodel.ProfileLocalCacheCodec.serializeProfileToJson(profile)
         assertTrue(encodedJson.contains("\"displayName\": \"Ali Updated\""))
+        assertTrue(encodedJson.contains("\"phone\": \"+92 300-1234567\"") || encodedJson.contains("\"+92 300-1234567\""))
         assertTrue(encodedJson.contains("\"bio\": \"Capturing streets and golden hour.\""))
         assertTrue(encodedJson.contains(longAvatarBase64))
         assertTrue(encodedJson.contains("\"avatarUrl\": \"https://example.supabase.co/storage/v1/object/public/momi-avatars/avatars/uid_42.jpg\""))
@@ -472,5 +475,44 @@ class SupabaseMigrationTest {
                 nowMs = now
             )
         )
+    }
+
+    @Test
+    fun whatsAppPhoneEmailNormalizationAndEightyMinuteVideoClampWork() {
+        assertEquals(4_800_000L, MomiSupabaseSchema.MAX_VIDEO_DURATION_MS)
+        assertEquals("+923001234567", MomiSupabaseSchema.normalizePhoneE164("+92 300-1234567"))
+        assertEquals("+923001234567", MomiSupabaseSchema.normalizePhoneE164("0092 (300) 1234567"))
+        assertEquals("+14155550123", MomiSupabaseSchema.normalizePhoneE164("14155550123"))
+        assertEquals("", MomiSupabaseSchema.normalizePhoneE164("123"))
+        assertTrue(MomiSupabaseSchema.isValidPhoneE164("+923001234567"))
+        assertFalse(MomiSupabaseSchema.isValidPhoneE164("+01234567"))
+
+        assertEquals("syali6511@gmail.com", MomiSupabaseSchema.normalizeEmail("  SyAli6511@Gmail.COM  "))
+        assertTrue(MomiSupabaseSchema.isValidEmailAddress("creator@momi.app"))
+        assertFalse(MomiSupabaseSchema.isValidEmailAddress("bad-email"))
+
+        val eightyMinPost = Post(
+            id = "post_80m",
+            userId = "uid_1",
+            authorUsername = "ali.momi",
+            authorDisplayName = "Ali",
+            mediaType = "VIDEO",
+            imageUrl = "https://example.supabase.co/storage/v1/object/public/momi-media/posts/uid_1/post_80m_cover.jpg",
+            videoUrl = "https://example.supabase.co/storage/v1/object/public/momi-videos/videos/uid_1/post_80m.mp4",
+            videoDurationMs = 4_800_000L
+        )
+        val row80m = MomiSupabaseSchema.toPostRow(eightyMinPost)
+        assertEquals(4_800_000L, row80m["video_duration_ms"])
+        assertEquals(
+            "https://example.supabase.co/storage/v1/object/public/momi-media/posts/uid_1/post_80m_cover.jpg",
+            row80m["image_url"]
+        )
+        assertEquals(
+            "https://example.supabase.co/storage/v1/object/public/momi-videos/videos/uid_1/post_80m.mp4",
+            row80m["video_url"]
+        )
+
+        val overLimitRow = MomiSupabaseSchema.toPostRow(eightyMinPost.copy(videoDurationMs = 9_999_999L))
+        assertEquals(4_800_000L, overLimitRow["video_duration_ms"])
     }
 }
