@@ -1,0 +1,12 @@
+{
+  "versionName": "2.3",
+  "versionCode": 14,
+  "buildNumber": 42,
+  "commitSha": "b401436",
+  "releasedAt": "2026-11-27T11:59:48Z",
+  "releaseTitle": "Momi v2.3",
+  "releaseNotes": "Latest pushed build #42 (b401436) is live.",
+  "apkUrl": "https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-latest.apk",
+  "releasesUrl": "https://github.com/MOOSVI5/MOMI/releases/latest",
+  "webUrl": "https://MOOSVI5.github.io/MOMI/"
+}

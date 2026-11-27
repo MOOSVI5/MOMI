@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#065f46" />
+  <title>Momi — Web &amp; Desktop Studio</title>
+  <link rel="icon" type="image/jpeg" href="./assets/momi-icon.jpg" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Grand+Hotel&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body data-scheme="EMERALD_MAROON" data-theme="dark">
+  <div id="appRoot" class="app-root">
+    <!-- Auth Gate -->
+    <section id="authGate" class="auth-gate hidden" aria-label="Sign in to Momi">
+      <div class="auth-card">
+        <div class="auth-brand-row">
+          <img src="./assets/momi-icon.jpg" alt="Momi App Icon" class="auth-logo-img" />
+          <div>
+            <h1 class="brand-script">Momi</h1>
+            <p class="muted">Web &amp; Desktop Studio</p>
+          </div>
+        </div>
+        <h2 class="auth-headline">Your Momi feed, stories, clips, live studio &amp; marketplace — synced in real time.</h2>
+        <p class="auth-subtext">
+          Sign in with Google, WhatsApp OTP, or Email (one email per account) to create photo posts &amp; up to 80-min video clips with custom thumbnails, go live, chat, and browse marketplace listings across Android and Web.
+        </p>
+
+        <div id="authFeaturePills" class="auth-pills">
+          <span class="pill">Supabase Auth &amp; Sync</span>
+          <span class="pill">WhatsApp OTP Login</span>
+          <span class="pill">80m Video &amp; Thumbnails</span>
+          <span class="pill">2-Pane Messages</span>
+        </div>
+
+        <button id="googleSignInBtn" type="button" class="btn-primary btn-lg full-width">
+          <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+            <path fill="currentColor" d="M21.35 11.1h-9.17v2.92h5.27c-.45 2.38-2.55 4.08-5.27 4.08a5.64 5.64 0 1 1 0-11.28c1.49 0 2.84.56 3.87 1.48l2.17-2.17A8.64 8.64 0 0 0 12.18 3.5a8.75 8.75 0 1 0 0 17.5c5.05 0 8.42-3.55 8.42-8.55 0-.58-.06-1.02-.25-1.35Z"/>
+          </svg>
+          Continue with Google
+        </button>
+
+        <button id="toggleWhatsAppAuthBtn" type="button" class="btn-whatsapp full-width">
+          <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+            <path fill="currentColor" d="M12.04 2a9.9 9.9 0 0 0-8.57 14.87L2 22l5.3-1.39A9.92 9.92 0 1 0 12.04 2Zm5.77 14.08c-.24.68-1.42 1.3-1.97 1.38-.5.08-1.15.11-1.85-.11-.43-.14-.98-.32-1.69-.63-2.97-1.28-4.91-4.3-5.06-4.5-.15-.2-1.21-1.61-1.21-3.07s.76-2.18 1.04-2.48c.27-.3.59-.37.79-.37h.57c.18 0 .43-.07.67.51.24.59.84 2.04.91 2.19.08.15.13.33.03.53-.1.2-.15.33-.3.5-.15.18-.31.4-.44.53-.15.15-.3.31-.13.61.18.3.78 1.29 1.67 2.08 1.15 1.03 2.12 1.35 2.42 1.5.3.15.48.13.65-.08.18-.2.75-.88.95-1.18.2-.3.4-.25.67-.15.28.1 1.74.82 2.04.97.3.15.5.22.57.35.08.13.08.73-.17 1.41Z"/>
+          </svg>
+          Continue with WhatsApp
+        </button>
+
+        <form id="whatsappAuthForm" class="auth-email-form hidden" novalidate>
+          <input id="waDisplayNameInput" type="text" class="input" placeholder="Display name (optional)" autocomplete="name" />
+          <input id="waPhoneInput" type="tel" class="input" placeholder="WhatsApp number (+923001234567)" autocomplete="tel" required />
+          <input id="waEmailInput" type="email" class="input" placeholder="Optional email (1 email = 1 Momi account)" autocomplete="email" />
+          <button id="sendWaOtpBtn" type="submit" class="btn-whatsapp full-width">
+            Send WhatsApp OTP Code
+          </button>
+        </form>
+
+        <div id="waOtpVerifyBox" class="otp-verify-box hidden">
+          <div>
+            <strong>Verify WhatsApp OTP Code</strong>
+            <div id="waOtpTargetLabel" class="muted small">Enter the 6-digit OTP sent to your WhatsApp.</div>
+          </div>
+          <input id="waOtpInput" type="text" inputmode="numeric" maxlength="8" class="input" placeholder="6-digit WhatsApp code" autocomplete="one-time-code" />
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button id="verifyWaOtpBtn" type="button" class="btn-whatsapp btn-sm" style="flex:1;">Verify &amp; Sign In</button>
+            <button id="resendWaOtpBtn" type="button" class="btn-outline btn-sm">Resend</button>
+            <button id="changeWaPhoneBtn" type="button" class="btn-ghost btn-sm">Change Number</button>
+          </div>
+        </div>
+
+        <div class="auth-divider"><span>or</span></div>
+
+        <button id="toggleEmailAuthBtn" type="button" class="btn-outline full-width">
+          Use Email &amp; Password
+        </button>
+
+        <form id="emailAuthForm" class="auth-email-form hidden" novalidate>
+          <div id="authDisplayNameWrap" class="hidden">
+            <input id="authDisplayNameInput" type="text" class="input" placeholder="Display name (e.g. Aria Studio)" autocomplete="name" />
+          </div>
+          <input id="authEmailInput" type="email" class="input" placeholder="Email address" autocomplete="email" required />
+          <input id="authPasswordInput" type="password" class="input" placeholder="Password (min 6 characters)" autocomplete="current-password" required />
+          <button id="emailSignInBtn" type="submit" class="btn-primary full-width">
+            Sign In with Email
+          </button>
+          <button id="toggleAuthModeBtn" type="button" class="btn-ghost btn-sm full-width">
+            Need an account? Create one
+          </button>
+        </form>
+
+        <div id="otpVerifyBox" class="otp-verify-box hidden">
+          <div>
+            <strong>Verify Your Email Code</strong>
+            <div id="otpTargetLabel" class="muted small">Enter the 6-digit verification code sent to your inbox.</div>
+          </div>
+          <input id="authOtpInput" type="text" inputmode="numeric" maxlength="8" class="input" placeholder="6-digit code" autocomplete="one-time-code" />
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button id="verifyOtpBtn" type="button" class="btn-primary btn-sm" style="flex:1;">Verify Code &amp; Continue</button>
+            <button id="resendOtpBtn" type="button" class="btn-outline btn-sm">Resend Code</button>
+          </div>
+        </div>
+
+        <p id="pendingLinkNotice" class="auth-link-notice hidden"></p>
+        <p id="authInfoBox" class="auth-info hidden" role="status"></p>
+        <p id="authErrorBox" class="auth-error hidden" role="alert"></p>
+
+        <div class="android-promo-card">
+          <div class="android-promo-copy">
+            <strong>Get Momi on Android</strong>
+            <span class="muted small">Native camera live streaming, sound chimes, and Play Billing wallet perks.</span>
+          </div>
+          <div class="android-promo-actions">
+            <a id="authAndroidDownloadLink" class="btn-outline btn-sm" href="https://github.com/MOOSVI5/MOMI/releases/latest/download/Momi-latest.apk" target="_blank" rel="noopener noreferrer">Download Android APK</a>
+            <a class="btn-ghost btn-sm" href="https://github.com/MOOSVI5/MOMI/releases/latest" target="_blank" rel="noopener noreferrer">Releases</a>
+          </div>
+        </div>
+
+        <div class="auth-help-card">
+          <strong>Custom domain / GitHub Pages</strong>
+          <p class="muted small">
+            Running on <code id="currentHostnameLabel"></code> — synced directly with Momi Supabase cloud.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Main Desktop + Mobile Shell -->
+    <div id="mainShell" class="main-shell hidden">
+      <!-- Left Desktop Navigation Sidebar -->
+      <aside class="sidebar" aria-label="Primary navigation">
+        <div class="sidebar-top">
+          <button type="button" class="brand-button" data-nav="home" title="Momi Home">
+            <img src="./assets/momi-icon.jpg" alt="Momi" class="brand-icon" />
+            <span class="brand-script sidebar-label">Momi</span>
+          </button>
+          <span class="desktop-badge sidebar-label">STUDIO</span>
+        </div>
+
+        <nav class="nav-list">
+          <button type="button" class="nav-item active" data-nav="home">
+            <span class="nav-icon" aria-hidden="true">&#8962;</span>
+            <span class="sidebar-label">Home</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="explore">
+            <span class="nav-icon" aria-hidden="true">&#9740;</span>
+            <span class="sidebar-label">Explore</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="clips">
+            <span class="nav-icon" aria-hidden="true">&#9654;</span>
+            <span class="sidebar-label">Clips</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="create">
+            <span class="nav-icon" aria-hidden="true">&#43;</span>
+            <span class="sidebar-label">Create Studio</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="live">
+            <span class="nav-icon" aria-hidden="true">&#9673;</span>
+            <span class="sidebar-label">Live Rooms</span>
+            <span id="navLiveBadge" class="badge-pill live hidden">0</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="marketplace">
+            <span class="nav-icon" aria-hidden="true">&#128717;</span>
+            <span class="sidebar-label">Marketplace</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="messages">
+            <span class="nav-icon" aria-hidden="true">&#9993;</span>
+            <span class="sidebar-label">Messages</span>
+            <span id="navMsgBadge" class="badge-pill hidden">0</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="notifications">
+            <span class="nav-icon" aria-hidden="true">&#9825;</span>
+            <span class="sidebar-label">Alerts</span>
+            <span id="navNotifBadge" class="badge-pill hidden">0</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="communities">
+            <span class="nav-icon" aria-hidden="true">&#9670;</span>
+            <span class="sidebar-label">Pages &amp; Groups</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="wallet">
+            <span class="nav-icon" aria-hidden="true">&#9733;</span>
+            <span class="sidebar-label">Wallet &amp; Perks</span>
+          </button>
+          <button type="button" class="nav-item" data-nav="profile">
+            <span class="nav-icon" aria-hidden="true">&#9786;</span>
+            <span class="sidebar-label">Profile</span>
+          </button>
+          <button type="button" class="nav-item hidden owner-nav-item" id="navAdminBtn" data-nav="admin">
+            <span class="nav-icon" aria-hidden="true">&#9881;</span>
+            <span class="sidebar-label">Owner Console</span>
+          </button>
+          <button type="button" class="nav-item" id="navAiBtn">
+            <span class="nav-icon" aria-hidden="true">&#10022;</span>
+            <span class="sidebar-label">Momi AI</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <button id="installPwaBtn" type="button" class="btn-outline btn-sm hidden">
+            Install App
+          </button>
+          <div class="sidebar-controls-row">
+            <button id="themeToggleBtn" type="button" class="icon-chip" title="Toggle Dark/Light Mode">
+              &#9788; <span class="sidebar-label" id="themeModeLabel">Dark</span>
+            </button>
+            <button id="soundToggleBtn" type="button" class="icon-chip" title="Toggle Alert Chimes">
+              &#128276; <span class="sidebar-label" id="soundModeLabel">On</span>
+            </button>
+          </div>
+          <select id="schemeSelect" class="scheme-select sidebar-label" aria-label="Color palette">
+            <option value="EMERALD_MAROON">Emerald Green &amp; Maroon</option>
+            <option value="GOLD_EMERALD">Gold &amp; Emerald Green</option>
+            <option value="WHITE_GREY">White &amp; Grey</option>
+          </select>
+          <button id="signOutBtn" type="button" class="btn-ghost btn-sm full-width">
+            <span class="sidebar-label">Sign out</span>
+            <span class="compact-only" aria-hidden="true">&#9099;</span>
+          </button>
+        </div>
+      </aside>
+
+      <!-- Mobile Top Bar -->
+      <header class="mobile-header">
+        <div class="mobile-brand">
+          <button type="button" class="icon-btn" id="mobileMenuBtn" aria-label="Open menu">&#9776;</button>
+          <img src="./assets/momi-icon.jpg" alt="Momi" class="brand-icon-sm" />
+          <span class="brand-script">Momi</span>
+        </div>
+        <div class="mobile-header-actions">
+          <button type="button" class="owner-pill-btn hidden" id="mobileAdminBtn" data-nav="admin" aria-label="Owner Console">&#9881; Owner</button>
+          <button type="button" class="icon-btn" data-nav="communities" aria-label="Pages and Groups" title="Pages & Groups">&#9670;</button>
+          <button type="button" class="icon-btn" data-nav="live" aria-label="Live Rooms" title="Live">&#9673;</button>
+          <button type="button" class="icon-btn" data-nav="notifications" aria-label="Notifications" title="Alerts">
+            &#9825;<span id="mobileNotifDot" class="dot hidden"></span>
+          </button>
+          <button type="button" class="icon-btn" data-nav="messages" aria-label="Messages" title="Messages">
+            &#9993;<span id="mobileMsgDot" class="dot hidden"></span>
+          </button>
+        </div>
+      </header>
+
+      <!-- Mobile Slide-Over Menu Drawer -->
+      <div id="mobileDrawerBackdrop" class="mobile-drawer-backdrop hidden" aria-hidden="true">
+        <aside class="mobile-drawer" aria-label="Mobile menu">
+          <div class="mobile-drawer-head">
+            <div class="mobile-brand">
+              <img src="./assets/momi-icon.jpg" alt="Momi" class="brand-icon-sm" />
+              <span class="brand-script" style="font-size:1.85rem;">Momi</span>
+            </div>
+            <button type="button" class="btn-ghost btn-sm" id="closeMobileDrawerBtn">Close</button>
+          </div>
+          <nav class="mobile-drawer-nav">
+            <button type="button" class="nav-item" data-nav="home">&#8962; <span>Home Feed</span></button>
+            <button type="button" class="nav-item" data-nav="explore">&#9740; <span>Explore &amp; Notes</span></button>
+            <button type="button" class="nav-item" data-nav="clips">&#9654; <span>Video Clips</span></button>
+            <button type="button" class="nav-item" data-nav="create">&#43; <span>Create Studio</span></button>
+            <button type="button" class="nav-item" data-nav="live">&#9673; <span>Live Rooms</span></button>
+            <button type="button" class="nav-item" data-nav="marketplace">&#128717; <span>Marketplace</span></button>
+            <button type="button" class="nav-item" data-nav="messages">&#9993; <span>Direct Messages</span></button>
+            <button type="button" class="nav-item" data-nav="notifications">&#9825; <span>Activity Alerts</span></button>
+            <button type="button" class="nav-item" data-nav="communities">&#9670; <span>Pages &amp; Groups</span></button>
+            <button type="button" class="nav-item" data-nav="wallet">&#9733; <span>Wallet &amp; Perks</span></button>
+            <button type="button" class="nav-item" data-nav="profile">&#9786; <span>My Profile</span></button>
+            <button type="button" class="nav-item hidden owner-nav-item" id="drawerAdminBtn" data-nav="admin">&#9881; <span>Owner Console</span></button>
+            <button type="button" class="nav-item" id="drawerAiBtn">&#10022; <span>Momi AI Studio</span></button>
+          </nav>
+          <div class="mobile-drawer-footer">
+            <div class="sidebar-controls-row">
+              <button type="button" class="icon-chip" id="drawerThemeBtn">&#9788; Toggle Theme</button>
+              <button type="button" class="icon-chip" id="drawerSoundBtn">&#128276; Toggle Sound</button>
+            </div>
+            <select id="drawerSchemeSelect" class="scheme-select" aria-label="Color palette mobile">
+              <option value="EMERALD_MAROON">Emerald Green &amp; Maroon</option>
+              <option value="GOLD_EMERALD">Gold &amp; Emerald Green</option>
+              <option value="WHITE_GREY">White &amp; Grey</option>
+            </select>
+            <button type="button" class="btn-danger btn-sm full-width" id="drawerSignOutBtn">Sign Out</button>
+          </div>
+        </aside>
+      </div>
+
+      <!-- Main Center Workspace -->
+      <main id="mainStage" class="main-stage" tabindex="-1"></main>
+
+      <!-- Desktop Right Discovery Rail -->
+      <aside class="right-rail" aria-label="Account and discovery">
+        <div id="rightUserCard" class="rail-card"></div>
+        <div id="rightAndroidCard" class="rail-card"></div>
+        <div id="rightLiveCard" class="rail-card"></div>
+        <div id="rightCreatorsCard" class="rail-card"></div>
+      </aside>
+
+      <!-- Mobile Bottom Bar -->
+      <nav class="mobile-bottom-nav" aria-label="Mobile navigation">
+        <button type="button" class="mnav-item active" data-nav="home">&#8962;<span>Home</span></button>
+        <button type="button" class="mnav-item" data-nav="explore">&#9740;<span>Explore</span></button>
+        <button type="button" class="mnav-item" data-nav="create">&#43;<span>Create</span></button>
+        <button type="button" class="mnav-item" data-nav="clips">&#9654;<span>Clips</span></button>
+        <button type="button" class="mnav-item" data-nav="marketplace">&#128717;<span>Market</span></button>
+        <button type="button" class="mnav-item" data-nav="profile">&#9786;<span>Profile</span></button>
+      </nav>
+    </div>
+
+    <!-- Modal Overlay (Post Detail, Story Viewer, Live Room, Edit Profile, Report) -->
+    <div id="modalBackdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+      <div id="modalContent" class="modal-content"></div>
+    </div>
+
+    <!-- Toast Bar -->
+    <div id="toastBar" class="toast-bar hidden" role="status" aria-live="polite"></div>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
