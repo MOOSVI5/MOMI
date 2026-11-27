@@ -184,6 +184,7 @@ fun CreatePostScreen(
         onFinished: (Boolean) -> Unit
     ) -> Unit,
     onGoLiveClick: () -> Unit = {},
+    publishingStatusLabel: String? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -335,6 +336,8 @@ fun CreatePostScreen(
                         mediaType = "VIDEO"
                         shareAsClip = true
                     }
+                } else {
+                    mediaValidationMessage = "Could not load selected video file. Check storage access or choose another video."
                 }
                 isProcessingMedia = false
             }
@@ -557,7 +560,8 @@ fun CreatePostScreen(
                                 modifier = Modifier.size(15.dp)
                             )
                             Text(
-                                text = if (storyModeNow) "Saving..." else "Uploading...",
+                                text = publishingStatusLabel?.takeIf { it.isNotBlank() }
+                                    ?: if (storyModeNow) "Saving..." else "Uploading...",
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,
                                 softWrap = false

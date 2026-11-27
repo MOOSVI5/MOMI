@@ -52,6 +52,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -226,10 +227,11 @@ fun HomeScreen(
     val ownStory = remember(stories) { stories.firstOrNull { it.isOwnStory } }
     val friendStories = remember(stories) { stories.filter { !it.isOwnStory } }
 
-    LaunchedEffect(resolvedActivePlayablePostId, displayedPosts) {
+    val latestDisplayedPosts by rememberUpdatedState(displayedPosts)
+    LaunchedEffect(resolvedActivePlayablePostId) {
         val targetId = resolvedActivePlayablePostId ?: return@LaunchedEffect
         delay(900L)
-        displayedPosts.firstOrNull { it.id == targetId }?.let(onPostViewed)
+        latestDisplayedPosts.firstOrNull { it.id == targetId }?.let(onPostViewed)
     }
 
     Column(
@@ -723,10 +725,15 @@ fun HomeScreen(
                     }
                 }
             } else {
-                itemsIndexed(displayedPosts, key = { _, post -> post.id }) { index, post ->
+                itemsIndexed(
+                    items = displayedPosts,
+                    key = { _, post -> post.id },
+                    contentType = { _, post -> if (post.isVideoPost) "video_post" else "photo_post" }
+                ) { index, post ->
+                    val isShowcasePost = post.id.startsWith("showcase_") || post.userId.startsWith("showcase_")
                     PostCard(
                         post = post,
-                        isOwnPost = post.userId == profile?.userId && !post.id.startsWith("showcase_"),
+                        isOwnPost = post.userId == profile?.userId && !isShowcasePost,
                         isAdminViewActive = isAdminViewActive,
                         isPlaybackActive = post.id == resolvedActivePlayablePostId,
                         isPrebufferActive = post.id == prebufferPlayablePostId && post.id != resolvedActivePlayablePostId,
@@ -753,7 +760,7 @@ fun HomeScreen(
                             onAuthorClick(
                                 post.userId,
                                 post.authorUsername,
-                                post.id.startsWith("showcase_")
+                                isShowcasePost
                             )
                         }
                     )

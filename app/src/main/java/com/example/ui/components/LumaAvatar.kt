@@ -16,6 +16,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -48,9 +49,21 @@ fun LumaAvatar(
     val (startColor, endColor) = MediaAssets.avatarPalette(avatarKey)
     val initials = MediaAssets.initialsForUsername(username)
     val brandGradient = LocalMomiBrandGradient.current
-    val decodedBytes = remember(avatarData) { MediaAssets.decodeBase64ToBytes(avatarData) }
     val cleanAvatarUrl = remember(avatarUrl) {
         avatarUrl?.trim()?.takeIf { it.startsWith("https://", true) || it.startsWith("http://", true) }
+    }
+    var urlLoadFailed by remember(cleanAvatarUrl) { mutableStateOf(false) }
+    val shouldDecodeBase64 = (cleanAvatarUrl == null || urlLoadFailed) && !avatarData.isNullOrBlank()
+    val decodedBytes by produceState<ByteArray?>(
+        initialValue = null,
+        avatarData,
+        shouldDecodeBase64
+    ) {
+        value = if (shouldDecodeBase64) {
+            MediaAssets.decodeBase64ToBytesAsync(avatarData)
+        } else {
+            null
+        }
     }
 
     val ringModifier = when {
@@ -87,7 +100,6 @@ fun LumaAvatar(
                 .background(Brush.linearGradient(listOf(startColor, endColor))),
             contentAlignment = Alignment.Center
         ) {
-            var urlLoadFailed by remember(cleanAvatarUrl) { mutableStateOf(false) }
             if (cleanAvatarUrl != null && !urlLoadFailed) {
                 AsyncImage(
                     model = cleanAvatarUrl,

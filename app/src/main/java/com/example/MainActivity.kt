@@ -393,6 +393,7 @@ private fun LumaApp(
     val selectedCategory by viewModel.selectedExploreCategory.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val statusNotice by viewModel.statusNotice.collectAsStateWithLifecycle()
+    val mediaUploadStatus by viewModel.mediaUploadStatus.collectAsStateWithLifecycle()
     val isSendingChatMedia by viewModel.isSendingChatMedia.collectAsStateWithLifecycle()
     val merchants by viewModel.merchants.collectAsStateWithLifecycle()
     val marketProducts by viewModel.marketProducts.collectAsStateWithLifecycle()
@@ -1014,7 +1015,8 @@ private fun LumaApp(
                                 onGoLiveClick = {
                                     navController.popBackStack()
                                     navController.navigate(LumaRoutes.GO_LIVE)
-                                }
+                                },
+                                publishingStatusLabel = mediaUploadStatus
                             )
                         }
 
@@ -1066,6 +1068,7 @@ private fun LumaApp(
                                 follows = follows,
                                 followingUids = followingUids,
                                 allPosts = allPosts,
+                                allStories = stories,
                                 wallet = wallet,
                                 themePreference = themePreference,
                                 appColorScheme = appColorScheme,
@@ -1159,8 +1162,34 @@ private fun LumaApp(
                                 onEngageWithShowcase = viewModel::engageRecentPostsWithShowcase,
                                 onRemoveAllShowcase = viewModel::removeAllShowcaseContent,
                                 onAuthorizeShowcaseAccount = viewModel::authorizeShowcaseAccount,
-                                onUpdateShowcasePersonaProfile = viewModel::updateShowcasePersonaProfile,
-                                onPublishCustomShowcasePost = { account, caption, mediaType, imageKey, localImagePath, localVideoPath, isReel, onDone ->
+                                onCreateShowcaseAccount = { username, displayName, bio, category, location, isVerified, pickedAvatarPath, onDone ->
+                                    viewModel.createShowcaseAccount(
+                                        context = context,
+                                        username = username,
+                                        displayName = displayName,
+                                        bio = bio,
+                                        category = category,
+                                        location = location,
+                                        isVerified = isVerified,
+                                        pickedAvatarPath = pickedAvatarPath,
+                                        onComplete = onDone
+                                    )
+                                },
+                                onUpdateShowcasePersonaProfile = { account, displayName, bio, category, location, isVerified, pickedAvatarPath, onDone ->
+                                    viewModel.updateShowcasePersonaProfile(
+                                        context = context,
+                                        account = account,
+                                        displayName = displayName,
+                                        bio = bio,
+                                        category = category,
+                                        location = location,
+                                        isVerified = isVerified,
+                                        pickedAvatarPath = pickedAvatarPath,
+                                        onComplete = onDone
+                                    )
+                                },
+                                onDeleteShowcaseAccount = viewModel::deleteShowcaseAccount,
+                                onPublishCustomShowcasePost = { account, caption, mediaType, imageKey, localImagePath, localVideoPath, videoDurationMs, isReel, onDone ->
                                     viewModel.publishCustomShowcasePost(
                                         context = context,
                                         account = account,
@@ -1169,10 +1198,29 @@ private fun LumaApp(
                                         imageKey = imageKey,
                                         localImagePath = localImagePath,
                                         localVideoPath = localVideoPath,
+                                        videoDurationMs = videoDurationMs,
                                         isReel = isReel,
                                         onComplete = onDone
                                     )
                                 },
+                                onPublishCustomShowcaseStory = { account, caption, mediaType, imageKey, localImagePath, localVideoPath, videoDurationMs, bgColorKey, textOverlay, onDone ->
+                                    viewModel.publishCustomShowcaseStory(
+                                        context = context,
+                                        account = account,
+                                        caption = caption,
+                                        mediaType = mediaType,
+                                        imageKey = imageKey,
+                                        localImagePath = localImagePath,
+                                        localVideoPath = localVideoPath,
+                                        videoDurationMs = videoDurationMs,
+                                        backgroundColorKey = bgColorKey,
+                                        textOverlay = textOverlay,
+                                        onComplete = onDone
+                                    )
+                                },
+                                onUpdateShowcasePostCaption = viewModel::updateShowcasePostCaption,
+                                onDeleteShowcasePost = { postId -> viewModel.deletePost(postId) },
+                                onDeleteShowcaseStory = viewModel::deleteShowcaseStory,
                                 onBoostPostWithShowcase = viewModel::boostPostMetricsWithShowcase,
                                 onPublishInAppAnnouncement = viewModel::publishInAppAnnouncement,
                                 onMergeLegacyProfile = viewModel::mergeLegacyProfileIntoMine,
@@ -1197,6 +1245,7 @@ private fun LumaApp(
                                 onTestSupabaseConnection = viewModel::testSupabaseConnection,
                                 onSyncSupabaseSnapshot = viewModel::syncLiveSnapshotToSupabase,
                                 onBuildSupabaseExportJson = viewModel::buildSupabaseMigrationSnapshotJson,
+                                onPurgeNonWhitelistAccounts = { viewModel.purgeNonWhitelistAccounts() },
                                 onSignOut = onSignOut
                             )
                         }
@@ -1385,6 +1434,7 @@ private fun LumaApp(
                                 allProfiles = allCreators,
                                 allPosts = allPosts,
                                 follows = follows,
+                                showcaseAccounts = showcaseAccounts,
                                 currentUserId = viewModel.currentUserId,
                                 followingUids = followingUids,
                                 wallet = wallet,

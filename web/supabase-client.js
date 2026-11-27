@@ -36,6 +36,13 @@ export const SUPABASE_SCHEMA_TABLES = [
 
 export const SUPABASE_STORAGE_BUCKETS = ['momi-media', 'momi-avatars', 'momi-videos'];
 
+export const KEEP_WHITELIST_EMAILS = ['syali6511@gmail.com', 'hassan.ali62313@gmail.com'];
+
+export function isWhitelistedAccountEmail(email = '') {
+  const clean = normalizeEmail(email);
+  return Boolean(clean && KEEP_WHITELIST_EMAILS.includes(clean));
+}
+
 function isPrivateHost(host = '') {
   if (!host || host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal')) {
     return true;
@@ -108,16 +115,37 @@ export function loadSupabaseAuthSession() {
   }
 }
 
+const webTokenRefreshListeners = new Set();
+
+export function subscribeWebTokenRefresh(listener) {
+  if (typeof listener !== 'function') return () => undefined;
+  webTokenRefreshListeners.add(listener);
+  return () => {
+    webTokenRefreshListeners.delete(listener);
+  };
+}
+
 export function saveSupabaseAuthSession(session) {
   try {
-    if (typeof globalThis.localStorage === 'undefined') return;
-    if (!session) {
-      globalThis.localStorage.removeItem(SUPABASE_AUTH_STORAGE_KEY);
-      return;
+    if (typeof globalThis.localStorage !== 'undefined') {
+      if (!session) {
+        globalThis.localStorage.removeItem(SUPABASE_AUTH_STORAGE_KEY);
+      } else {
+        globalThis.localStorage.setItem(SUPABASE_AUTH_STORAGE_KEY, JSON.stringify(session));
+      }
     }
-    globalThis.localStorage.setItem(SUPABASE_AUTH_STORAGE_KEY, JSON.stringify(session));
   } catch {
     // Ignore storage quota / private mode errors
+  }
+  const nextToken = String(session?.accessToken || '').trim();
+  if (nextToken) {
+    for (const listener of webTokenRefreshListeners) {
+      try {
+        listener(nextToken, session);
+      } catch {
+        // Ignore subscriber error
+      }
+    }
   }
 }
 
@@ -434,15 +462,15 @@ export async function checkSupabaseHealth(cfg = SUPABASE_WEB_CONFIG, fetchImpl =
   }
 }
 
-export async function selectSupabaseTable(
+export async function selectSupabaseTableWithStatus(
   cfg = SUPABASE_WEB_CONFIG,
   table,
   queryString = 'select=*&limit=50',
   fetchImpl = globalThis.fetch
 ) {
   const baseUrl = normalizeSupabaseUrl(cfg?.url);
-  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) return [];
-  if (!SUPABASE_SCHEMA_TABLES.includes(table)) return [];
+  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) return { ok: false, rows: [], status: 0 };
+  if (!SUPABASE_SCHEMA_TABLES.includes(table)) return { ok: false, rows: [], status: 0 };
   const anonKey = String(cfg.anonKey).trim();
   const cleanQuery = String(queryString || 'select=*').replace(/^\?/, '');
   try {
@@ -464,12 +492,22 @@ export async function selectSupabaseTable(
         }
       });
     }
-    if (!res.ok) return [];
+    if (!res.ok) return { ok: false, rows: [], status: res.status };
     const data = await res.json();
-    return Array.isArray(data) ? data : [];
+    return { ok: true, rows: Array.isArray(data) ? data : [], status: res.status };
   } catch {
-    return [];
+    return { ok: false, rows: [], status: 0 };
   }
+}
+
+export async function selectSupabaseTable(
+  cfg = SUPABASE_WEB_CONFIG,
+  table,
+  queryString = 'select=*&limit=50',
+  fetchImpl = globalThis.fetch
+) {
+  const result = await selectSupabaseTableWithStatus(cfg, table, queryString, fetchImpl);
+  return result.rows;
 }
 
 function extractMissingColumnName(detail = '') {
@@ -735,7 +773,22 @@ function encodeUtf8Base64(value = '') {
 }
 
 const TUS_CHUNK_SIZE_BYTES = 5 * 1024 * 1024;
-const DIRECT_UPLOAD_LIMIT_BYTES = 45 * 1024 * 1024;
+const DIRECT_UPLOAD_LIMIT_BYTES = 6 * 1024 * 1024;
+
+let lastStorageUploadError = '';
+
+export function getLastStorageUploadError() {
+  return lastStorageUploadError;
+}
+
+async function readErrorBodySnippet(res) {
+  if (!res || typeof res.text !== 'function') return '';
+  try {
+    return String(await res.text() || '').trim().slice(0, 180);
+  } catch {
+    return '';
+  }
+}
 
 export async function uploadWebFileResumableTus(
   cfg = SUPABASE_WEB_CONFIG,
@@ -745,11 +798,21 @@ export async function uploadWebFileResumableTus(
   contentType = 'video/mp4',
   fetchImpl = globalThis.fetch
 ) {
+  lastStorageUploadError = '';
   const baseUrl = normalizeSupabaseUrl(cfg?.url);
-  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) return null;
-  if (!SUPABASE_STORAGE_BUCKETS.includes(bucket) || !objectPath || !blobOrFile) return null;
+  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) {
+    lastStorageUploadError = 'Supabase URL or anon key is not configured.';
+    return null;
+  }
+  if (!SUPABASE_STORAGE_BUCKETS.includes(bucket) || !objectPath || !blobOrFile) {
+    lastStorageUploadError = 'Invalid Storage bucket, path, or file payload.';
+    return null;
+  }
   const totalBytes = Number(blobOrFile.size || blobOrFile.byteLength || 0);
-  if (totalBytes <= 0) return null;
+  if (totalBytes <= 0) {
+    lastStorageUploadError = 'Selected file is empty (0 bytes).';
+    return null;
+  }
 
   const anonKey = String(cfg.anonKey).trim();
   const safePath = String(objectPath)
@@ -765,33 +828,47 @@ export async function uploadWebFileResumableTus(
   ].join(',');
 
   try {
-    let token = await ensureFreshWebAccessToken(cfg, fetchImpl);
-    let createRes = await fetchImpl(`${baseUrl}/storage/v1/upload/resumable`, {
-      method: 'POST',
-      headers: {
-        ...buildSupabaseAuthHeaders(anonKey, token),
-        'Tus-Resumable': '1.0.0',
-        'Upload-Length': String(totalBytes),
-        'Upload-Metadata': metadataHeader,
-        'x-upsert': 'true'
-      }
-    });
-    if (createRes.status === 401) {
-      token = await ensureFreshWebAccessToken(cfg, fetchImpl, true);
-      createRes = await fetchImpl(`${baseUrl}/storage/v1/upload/resumable`, {
-        method: 'POST',
-        headers: {
-          ...buildSupabaseAuthHeaders(anonKey, token),
-          'Tus-Resumable': '1.0.0',
-          'Upload-Length': String(totalBytes),
-          'Upload-Metadata': metadataHeader,
-          'x-upsert': 'true'
+    let createRes = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const forceRefresh = attempt > 0 && createRes?.status === 401;
+        const token = await ensureFreshWebAccessToken(cfg, fetchImpl, forceRefresh);
+        createRes = await fetchImpl(`${baseUrl}/storage/v1/upload/resumable`, {
+          method: 'POST',
+          headers: {
+            ...buildSupabaseAuthHeaders(anonKey, token),
+            'Tus-Resumable': '1.0.0',
+            'Upload-Length': String(totalBytes),
+            'Upload-Metadata': metadataHeader,
+            'x-upsert': 'true'
+          }
+        });
+        if (createRes.ok) break;
+        if (createRes.status === 401 || createRes.status === 408 || createRes.status === 429 || createRes.status >= 500) {
+          if (attempt < 2) {
+            await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+            continue;
+          }
         }
-      });
+        break;
+      } catch (err) {
+        if (attempt >= 2) {
+          lastStorageUploadError = `TUS create network error: ${err?.message || 'request failed'}`;
+          return null;
+        }
+        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+      }
     }
-    if (!createRes.ok) return null;
+    if (!createRes || !createRes.ok) {
+      const detail = await readErrorBodySnippet(createRes);
+      lastStorageUploadError = `TUS upload create failed (HTTP ${createRes?.status || 0})${detail ? `: ${detail}` : ''}`;
+      return null;
+    }
     const rawLocation = createRes.headers?.get?.('Location') || createRes.headers?.get?.('location') || '';
-    if (!rawLocation) return null;
+    if (!rawLocation) {
+      lastStorageUploadError = 'TUS server did not return an upload Location header.';
+      return null;
+    }
     const uploadUrl = rawLocation.startsWith('http')
       ? rawLocation
       : `${baseUrl}${rawLocation.startsWith('/') ? '' : '/'}${rawLocation}`;
@@ -800,36 +877,65 @@ export async function uploadWebFileResumableTus(
     while (offset < totalBytes) {
       const end = Math.min(offset + TUS_CHUNK_SIZE_BYTES, totalBytes);
       const chunk = typeof blobOrFile.slice === 'function' ? blobOrFile.slice(offset, end) : blobOrFile;
-      token = await ensureFreshWebAccessToken(cfg, fetchImpl);
-      let patchRes = await fetchImpl(uploadUrl, {
-        method: 'PATCH',
-        headers: {
-          ...buildSupabaseAuthHeaders(anonKey, token),
-          'Tus-Resumable': '1.0.0',
-          'Upload-Offset': String(offset),
-          'Content-Type': 'application/offset+octet-stream'
-        },
-        body: chunk
-      });
-      if (patchRes.status === 401) {
-        token = await ensureFreshWebAccessToken(cfg, fetchImpl, true);
-        patchRes = await fetchImpl(uploadUrl, {
-          method: 'PATCH',
-          headers: {
-            ...buildSupabaseAuthHeaders(anonKey, token),
-            'Tus-Resumable': '1.0.0',
-            'Upload-Offset': String(offset),
-            'Content-Type': 'application/offset+octet-stream'
-          },
-          body: chunk
-        });
+      let patchRes = null;
+      let recoveredViaHead = false;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const forceRefresh = attempt > 0 && patchRes?.status === 401;
+          const token = await ensureFreshWebAccessToken(cfg, fetchImpl, forceRefresh);
+          patchRes = await fetchImpl(uploadUrl, {
+            method: 'PATCH',
+            headers: {
+              ...buildSupabaseAuthHeaders(anonKey, token),
+              'Tus-Resumable': '1.0.0',
+              'Upload-Offset': String(offset),
+              'Content-Type': 'application/offset+octet-stream'
+            },
+            body: chunk
+          });
+          if (patchRes.ok) break;
+          if (patchRes.status === 409) {
+            const headRes = await fetchImpl(uploadUrl, {
+              method: 'HEAD',
+              headers: {
+                ...buildSupabaseAuthHeaders(anonKey, token),
+                'Tus-Resumable': '1.0.0'
+              }
+            }).catch(() => null);
+            const serverOffset = Number(headRes?.headers?.get?.('Upload-Offset'));
+            if (headRes?.ok && Number.isFinite(serverOffset) && serverOffset >= 0 && serverOffset <= totalBytes && serverOffset !== offset) {
+              offset = serverOffset;
+              recoveredViaHead = true;
+              break;
+            }
+          }
+          if (patchRes.status === 401 || patchRes.status === 408 || patchRes.status === 429 || patchRes.status >= 500) {
+            if (attempt < 2) {
+              await new Promise((r) => setTimeout(r, 450 * (attempt + 1)));
+              continue;
+            }
+          }
+          break;
+        } catch (err) {
+          if (attempt >= 2) {
+            lastStorageUploadError = `TUS chunk upload network error at ${offset} bytes: ${err?.message || 'request failed'}`;
+            return null;
+          }
+          await new Promise((r) => setTimeout(r, 450 * (attempt + 1)));
+        }
       }
-      if (!patchRes.ok) return null;
+      if (recoveredViaHead) continue;
+      if (!patchRes || !patchRes.ok) {
+        const detail = await readErrorBodySnippet(patchRes);
+        lastStorageUploadError = `TUS chunk upload failed at ${offset} bytes (HTTP ${patchRes?.status || 0})${detail ? `: ${detail}` : ''}`;
+        return null;
+      }
       const nextOffset = Number(patchRes.headers?.get?.('Upload-Offset'));
       offset = Number.isFinite(nextOffset) && nextOffset > offset ? nextOffset : end;
     }
     return `${baseUrl}/storage/v1/object/public/${bucket}/${safePath}`;
-  } catch {
+  } catch (err) {
+    lastStorageUploadError = `TUS upload failed: ${err?.message || 'unknown error'}`;
     return null;
   }
 }
@@ -842,9 +948,16 @@ export async function uploadWebFileToStorage(
   contentType = 'application/octet-stream',
   fetchImpl = globalThis.fetch
 ) {
+  lastStorageUploadError = '';
   const baseUrl = normalizeSupabaseUrl(cfg?.url);
-  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) return null;
-  if (!SUPABASE_STORAGE_BUCKETS.includes(bucket) || !objectPath || !blobOrFile) return null;
+  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) {
+    lastStorageUploadError = 'Supabase URL or anon key is not configured.';
+    return null;
+  }
+  if (!SUPABASE_STORAGE_BUCKETS.includes(bucket) || !objectPath || !blobOrFile) {
+    lastStorageUploadError = 'Invalid Storage bucket, path, or file payload.';
+    return null;
+  }
 
   const fileSize = Number(blobOrFile.size || blobOrFile.byteLength || 0);
   if (fileSize > DIRECT_UPLOAD_LIMIT_BYTES) {
@@ -879,12 +992,21 @@ export async function uploadWebFileToStorage(
         body: blobOrFile
       });
     }
-    if (res.status === 413 || res.status === 504 || res.status === 408) {
+    if (res.status === 408 || res.status === 413 || res.status === 429 || res.status >= 500) {
       return uploadWebFileResumableTus(cfg, bucket, objectPath, blobOrFile, contentType, fetchImpl);
     }
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const detail = await readErrorBodySnippet(res);
+      lastStorageUploadError = `Storage upload failed (HTTP ${res.status})${detail ? `: ${detail}` : ''}`;
+      return null;
+    }
     return `${baseUrl}/storage/v1/object/public/${bucket}/${safePath}`;
-  } catch {
+  } catch (err) {
+    const tusFallback = await uploadWebFileResumableTus(cfg, bucket, objectPath, blobOrFile, contentType, fetchImpl);
+    if (tusFallback) return tusFallback;
+    if (!lastStorageUploadError) {
+      lastStorageUploadError = `Storage upload failed: ${err?.message || 'network error'}`;
+    }
     return null;
   }
 }
@@ -941,60 +1063,95 @@ export async function fetchSupabaseFeed(cfg = SUPABASE_WEB_CONFIG, fetchImpl = g
   const baseUrl = normalizeSupabaseUrl(cfg?.url);
   if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey)) return null;
   const anonKey = String(cfg.anonKey).trim();
-  const headers = {
-    ...buildSupabaseAuthHeaders(anonKey),
-    Accept: 'application/json'
+
+  const runBatch = async (token) => {
+    const headers = {
+      ...buildSupabaseAuthHeaders(anonKey, token),
+      Accept: 'application/json'
+    };
+    const queries = [
+      ['posts', `${baseUrl}/rest/v1/posts?select=*&order=created_at.desc&limit=120`],
+      ['stories', `${baseUrl}/rest/v1/stories?select=*&order=created_at.desc&limit=50`],
+      ['profiles', `${baseUrl}/rest/v1/profiles?select=*&limit=100`],
+      ['market_products', `${baseUrl}/rest/v1/market_products?select=*&order=created_at.desc&limit=80`],
+      ['merchants', `${baseUrl}/rest/v1/merchants?select=*&limit=60`],
+      ['live_streams', `${baseUrl}/rest/v1/live_streams?select=*&is_live=eq.true&order=updated_at.desc&limit=30`],
+      ['app_config', `${baseUrl}/rest/v1/app_config?select=*&id=eq.monetization&limit=1`],
+      ['pages', `${baseUrl}/rest/v1/pages?select=*&order=followers_count.desc&limit=60`],
+      ['groups', `${baseUrl}/rest/v1/groups?select=*&order=members_count.desc&limit=60`],
+      ['showcase_accounts', `${baseUrl}/rest/v1/showcase_accounts?select=*&order=username.asc&limit=40`],
+      ['user_interactions', `${baseUrl}/rest/v1/user_interactions?select=user_id,target_type,target_id&target_type=in.(LIKED_POST,VIEWED_POST)&limit=1000`]
+    ];
+    return Promise.all(
+      queries.map(async ([name, url]) => {
+        try {
+          const res = await fetchImpl(url, { headers });
+          return { name, res };
+        } catch {
+          return { name, res: { ok: false, status: 0 } };
+        }
+      })
+    );
   };
+
   try {
+    let token = await ensureFreshWebAccessToken(cfg, fetchImpl);
+    let results = await runBatch(token);
+    if (results.some((r) => r.res?.status === 401)) {
+      const refreshedToken = await ensureFreshWebAccessToken(cfg, fetchImpl, true);
+      if (refreshedToken && refreshedToken !== token) {
+        token = refreshedToken;
+        results = await runBatch(token);
+      }
+    }
+
+    const byName = Object.fromEntries(results.map((r) => [r.name, r.res]));
+    const postsRes = byName.posts;
+    const profilesRes = byName.profiles;
+    if (!postsRes?.ok && !profilesRes?.ok) return null;
+
+    const failedTables = results.filter((r) => !r.res?.ok).map((r) => r.name);
+    const readJson = async (res) => (res?.ok && typeof res.json === 'function' ? await res.json().catch(() => []) : []);
+
     const [
-      postsRes,
-      storiesRes,
-      profilesRes,
-      productsRes,
-      merchantsRes,
-      liveRes,
-      configRes,
-      pagesRes,
-      groupsRes,
-      showcaseRes,
-      engagersRes
-    ] = await Promise.all([
-      fetchImpl(`${baseUrl}/rest/v1/posts?select=*&order=created_at.desc&limit=120`, { headers }),
-      fetchImpl(`${baseUrl}/rest/v1/stories?select=*&order=created_at.desc&limit=50`, { headers }),
-      fetchImpl(`${baseUrl}/rest/v1/profiles?select=*&limit=100`, { headers }),
-      fetchImpl(`${baseUrl}/rest/v1/market_products?select=*&order=created_at.desc&limit=80`, { headers }),
-      fetchImpl(`${baseUrl}/rest/v1/merchants?select=*&limit=60`, { headers }),
-      fetchImpl(`${baseUrl}/rest/v1/live_streams?select=*&is_live=eq.true&order=updated_at.desc&limit=30`, { headers }),
-      fetchImpl(`${baseUrl}/rest/v1/app_config?select=*&id=eq.monetization&limit=1`, { headers }),
-      fetchImpl(`${baseUrl}/rest/v1/pages?select=*&order=followers_count.desc&limit=60`, { headers }).catch(() => ({ ok: false })),
-      fetchImpl(`${baseUrl}/rest/v1/groups?select=*&order=members_count.desc&limit=60`, { headers }).catch(() => ({ ok: false })),
-      fetchImpl(`${baseUrl}/rest/v1/showcase_accounts?select=*&order=username.asc&limit=40`, { headers }).catch(() => ({ ok: false })),
-      fetchImpl(`${baseUrl}/rest/v1/user_interactions?select=user_id,target_type,target_id&target_type=in.(LIKED_POST,VIEWED_POST)&limit=1000`, { headers }).catch(() => ({ ok: false }))
-    ]);
-    if (!postsRes.ok && !profilesRes.ok) return null;
-    const posts = postsRes.ok ? await postsRes.json() : [];
-    const stories = storiesRes.ok ? await storiesRes.json() : [];
-    const profiles = profilesRes.ok ? await profilesRes.json() : [];
-    const products = productsRes.ok ? await productsRes.json() : [];
-    const merchants = merchantsRes.ok ? await merchantsRes.json() : [];
-    const liveStreams = liveRes.ok ? await liveRes.json() : [];
-    const configs = configRes.ok ? await configRes.json() : [];
-    const pages = pagesRes.ok ? await pagesRes.json() : [];
-    const groups = groupsRes.ok ? await groupsRes.json() : [];
-    const showcaseAccounts = showcaseRes.ok ? await showcaseRes.json() : [];
-    const postInteractions = engagersRes.ok ? await engagersRes.json() : [];
-    return {
       posts,
       stories,
       profiles,
       products,
       merchants,
       liveStreams,
-      appConfig: configs[0] || null,
+      configs,
       pages,
       groups,
       showcaseAccounts,
       postInteractions
+    ] = await Promise.all([
+      readJson(byName.posts),
+      readJson(byName.stories),
+      readJson(byName.profiles),
+      readJson(byName.market_products),
+      readJson(byName.merchants),
+      readJson(byName.live_streams),
+      readJson(byName.app_config),
+      readJson(byName.pages),
+      readJson(byName.groups),
+      readJson(byName.showcase_accounts),
+      readJson(byName.user_interactions)
+    ]);
+
+    return {
+      posts: Array.isArray(posts) ? posts : [],
+      stories: Array.isArray(stories) ? stories : [],
+      profiles: Array.isArray(profiles) ? profiles : [],
+      products: Array.isArray(products) ? products : [],
+      merchants: Array.isArray(merchants) ? merchants : [],
+      liveStreams: Array.isArray(liveStreams) ? liveStreams : [],
+      appConfig: Array.isArray(configs) ? (configs[0] || null) : null,
+      pages: Array.isArray(pages) ? pages : [],
+      groups: Array.isArray(groups) ? groups : [],
+      showcaseAccounts: Array.isArray(showcaseAccounts) ? showcaseAccounts : [],
+      postInteractions: Array.isArray(postInteractions) ? postInteractions : [],
+      failedTables
     };
   } catch {
     return null;
@@ -1005,36 +1162,51 @@ export async function fetchUserSupabaseWorkspace(cfg = SUPABASE_WEB_CONFIG, uid 
   if (!uid || !isSupabaseClientReady(cfg)) return null;
   const eUid = encodeURIComponent(uid);
   const [
-    follows,
-    interactions,
-    notifications,
-    threads,
-    wallets,
-    transactions,
-    orders,
-    pageFollows,
-    groupMembers
+    followsRes,
+    interactionsRes,
+    notificationsRes,
+    threadsRes,
+    walletsRes,
+    transactionsRes,
+    ordersRes,
+    pageFollowsRes,
+    groupMembersRes
   ] = await Promise.all([
-    selectSupabaseTable(cfg, 'follows', `select=*&follower_uid=eq.${eUid}`, fetchImpl),
-    selectSupabaseTable(cfg, 'user_interactions', `select=*&user_id=eq.${eUid}`, fetchImpl),
-    selectSupabaseTable(cfg, 'notifications', `select=*&user_id=eq.${eUid}&order=created_at.desc&limit=50`, fetchImpl),
-    selectSupabaseTable(cfg, 'threads', `select=*&participant_uids=cs.{${eUid}}&order=updated_at.desc&limit=40`, fetchImpl),
-    selectSupabaseTable(cfg, 'wallets', `select=*&user_id=eq.${eUid}&limit=1`, fetchImpl),
-    selectSupabaseTable(cfg, 'credit_transactions', `select=*&or=(sender_uid.eq.${eUid},recipient_uid.eq.${eUid})&order=created_at.desc&limit=40`, fetchImpl),
-    selectSupabaseTable(cfg, 'market_orders', `select=*&or=(buyer_uid.eq.${eUid},seller_uid.eq.${eUid})&order=created_at.desc&limit=30`, fetchImpl),
-    selectSupabaseTable(cfg, 'page_follows', `select=*&user_id=eq.${eUid}`, fetchImpl),
-    selectSupabaseTable(cfg, 'group_members', `select=*&user_id=eq.${eUid}`, fetchImpl)
+    selectSupabaseTableWithStatus(cfg, 'follows', `select=*&follower_uid=eq.${eUid}`, fetchImpl),
+    selectSupabaseTableWithStatus(cfg, 'user_interactions', `select=*&user_id=eq.${eUid}`, fetchImpl),
+    selectSupabaseTableWithStatus(cfg, 'notifications', `select=*&user_id=eq.${eUid}&order=created_at.desc&limit=50`, fetchImpl),
+    selectSupabaseTableWithStatus(cfg, 'threads', `select=*&participant_uids=cs.{${eUid}}&order=updated_at.desc&limit=40`, fetchImpl),
+    selectSupabaseTableWithStatus(cfg, 'wallets', `select=*&user_id=eq.${eUid}&limit=1`, fetchImpl),
+    selectSupabaseTableWithStatus(cfg, 'credit_transactions', `select=*&or=(sender_uid.eq.${eUid},recipient_uid.eq.${eUid})&order=created_at.desc&limit=40`, fetchImpl),
+    selectSupabaseTableWithStatus(cfg, 'market_orders', `select=*&or=(buyer_uid.eq.${eUid},seller_uid.eq.${eUid})&order=created_at.desc&limit=30`, fetchImpl),
+    selectSupabaseTableWithStatus(cfg, 'page_follows', `select=*&user_id=eq.${eUid}`, fetchImpl),
+    selectSupabaseTableWithStatus(cfg, 'group_members', `select=*&user_id=eq.${eUid}`, fetchImpl)
   ]);
+
+  const tableChecks = [
+    ['follows', followsRes],
+    ['user_interactions', interactionsRes],
+    ['notifications', notificationsRes],
+    ['threads', threadsRes],
+    ['wallets', walletsRes],
+    ['credit_transactions', transactionsRes],
+    ['market_orders', ordersRes],
+    ['page_follows', pageFollowsRes],
+    ['group_members', groupMembersRes]
+  ];
+  const failedTables = tableChecks.filter(([, res]) => !res.ok).map(([name]) => name);
+
   return {
-    follows,
-    interactions,
-    notifications,
-    threads,
-    wallet: wallets[0] || null,
-    transactions,
-    orders,
-    pageFollows,
-    groupMembers
+    follows: followsRes.rows,
+    interactions: interactionsRes.rows,
+    notifications: notificationsRes.rows,
+    threads: threadsRes.rows,
+    wallet: walletsRes.rows[0] || null,
+    transactions: transactionsRes.rows,
+    orders: ordersRes.rows,
+    pageFollows: pageFollowsRes.rows,
+    groupMembers: groupMembersRes.rows,
+    failedTables
   };
 }
 
@@ -1200,6 +1372,8 @@ export function mapSupabaseShowcaseAccountToWeb(row = {}) {
     username: String(row.username || ''),
     displayName: String(row.display_name || row.username || 'Starter'),
     avatarKey: String(row.avatar_key || 'avatar_elena'),
+    avatarUrl: row.avatar_url || null,
+    isVerified: row.is_verified !== false,
     bio: String(row.bio || ''),
     category: String(row.category || 'Creator'),
     location: String(row.location || ''),
@@ -1837,6 +2011,7 @@ export function createSupabaseRealtimeClient(
   let heartbeatTimer = null;
   let reconnectTimer = null;
   let usedWildcardFallback = false;
+  let unsubTokenRefresh = null;
   const tableListeners = new Map();
 
   const nextRef = () => {
@@ -1926,6 +2101,9 @@ export function createSupabaseRealtimeClient(
       usedWildcardFallback = false;
       const token = String(getAccessToken?.() || '').trim();
       sendFrame(buildSupabaseRealtimeJoinMessage(nextRef(), token, tables));
+      if (token && isSupabaseJwtExpiringSoon(token) && typeof globalThis.fetch === 'function') {
+        ensureFreshWebAccessToken(cfg, globalThis.fetch).catch(() => undefined);
+      }
       heartbeatTimer = setInterval(() => {
         sendFrame({
           topic: 'phoenix',
@@ -1980,14 +2158,34 @@ export function createSupabaseRealtimeClient(
     };
   };
 
+  const pushAccessToken = (token = '') => {
+    const clean = String(token || '').trim();
+    if (!clean || stopped) return;
+    sendFrame({
+      topic: 'realtime:public',
+      event: 'access_token',
+      payload: { access_token: clean },
+      ref: nextRef()
+    });
+  };
+
   return {
     start() {
       if (!stopped) return;
       stopped = false;
+      if (!unsubTokenRefresh) {
+        unsubTokenRefresh = subscribeWebTokenRefresh((nextToken) => {
+          pushAccessToken(nextToken);
+        });
+      }
       connectSocket();
     },
     stop() {
       stopped = true;
+      if (unsubTokenRefresh) {
+        unsubTokenRefresh();
+        unsubTokenRefresh = null;
+      }
       clearTimers();
       tableListeners.clear();
       try {
@@ -2005,16 +2203,97 @@ export function createSupabaseRealtimeClient(
         unsubs.forEach((unsub) => unsub());
       };
     },
-    updateAccessToken(token = '') {
-      const clean = String(token || '').trim();
-      if (!clean || stopped) return;
-      sendFrame({
-        topic: 'realtime:public',
-        event: 'access_token',
-        payload: { access_token: clean },
-        ref: nextRef()
-      });
-    }
+    updateAccessToken: pushAccessToken
   };
 }
+
+export async function updatePostCaptionInSupabase(
+  cfg = SUPABASE_WEB_CONFIG,
+  postId = '',
+  caption = '',
+  hashtags = [],
+  taggedUsernames = [],
+  fetchImpl = globalThis.fetch
+) {
+  const cleanId = String(postId || '').trim();
+  if (!cleanId) return false;
+  return patchSupabaseRows(
+    cfg,
+    'posts',
+    `id=eq.${encodeURIComponent(cleanId)}`,
+    {
+      caption: String(caption || '').slice(0, 1000),
+      hashtags: Array.isArray(hashtags) ? hashtags : [],
+      tagged_usernames: Array.isArray(taggedUsernames) ? taggedUsernames : []
+    },
+    fetchImpl
+  );
+}
+
+export async function deleteStoryFromSupabase(
+  cfg = SUPABASE_WEB_CONFIG,
+  storyId = '',
+  fetchImpl = globalThis.fetch
+) {
+  const cleanId = String(storyId || '').trim();
+  if (!cleanId) return false;
+  return deleteSupabaseRows(cfg, 'stories', `id=eq.${encodeURIComponent(cleanId)}`, fetchImpl);
+}
+
+export async function deleteShowcaseAccountFromSupabase(
+  cfg = SUPABASE_WEB_CONFIG,
+  username = '',
+  fetchImpl = globalThis.fetch
+) {
+  const cleanUser = String(username || '').trim().toLowerCase();
+  if (!cleanUser) return false;
+  return deleteSupabaseRows(cfg, 'showcase_accounts', `username=eq.${encodeURIComponent(cleanUser)}`, fetchImpl);
+}
+
+export async function purgeNonWhitelistSupabaseAccounts(
+  cfg = SUPABASE_WEB_CONFIG,
+  adminUid = '',
+  fetchImpl = globalThis.fetch
+) {
+  const baseUrl = normalizeSupabaseUrl(cfg?.url);
+  const cleanAdminUid = String(adminUid || '').trim();
+  if (!baseUrl || !isSafeSupabaseAnonKey(cfg?.anonKey) || !cleanAdminUid) {
+    throw new Error('Admin session and valid Supabase configuration required.');
+  }
+  const profiles = await selectSupabaseTable(cfg, 'profiles', 'select=user_id,email,username&limit=500', fetchImpl);
+  const nonWhitelist = profiles.filter((p) => {
+    const uid = String(p?.user_id || '').trim();
+    return uid && uid !== cleanAdminUid && !isWhitelistedAccountEmail(p?.email || '');
+  });
+
+  // Reassign showcase_* content to adminUid so starter accounts stay intact under admin authority
+  await patchSupabaseRows(cfg, 'posts', 'id=like.showcase_%25', { user_id: cleanAdminUid }, fetchImpl).catch(() => false);
+  await patchSupabaseRows(cfg, 'stories', 'id=like.showcase_%25', { user_id: cleanAdminUid }, fetchImpl).catch(() => false);
+  await patchSupabaseRows(cfg, 'comments', 'id=like.showcase_%25', { user_id: cleanAdminUid }, fetchImpl).catch(() => false);
+
+  // Clean out legacy seeded sample posts/stories/products
+  await deleteSupabaseRows(cfg, 'posts', 'id=like.seed_post_%25', fetchImpl).catch(() => false);
+  await deleteSupabaseRows(cfg, 'stories', 'id=like.seed_story_%25', fetchImpl).catch(() => false);
+  await deleteSupabaseRows(cfg, 'market_products', 'id=like.seed_prod_%25', fetchImpl).catch(() => false);
+
+  for (const row of nonWhitelist) {
+    const eUid = encodeURIComponent(String(row.user_id));
+    await deleteSupabaseRows(cfg, 'chat_messages', `sender_uid=eq.${eUid}`, fetchImpl).catch(() => false);
+    await deleteSupabaseRows(cfg, 'threads', `or=(user_a_id.eq.${eUid},user_b_id.eq.${eUid})`, fetchImpl).catch(() => false);
+    await deleteSupabaseRows(cfg, 'pages', `owner_uid=eq.${eUid}`, fetchImpl).catch(() => false);
+    await deleteSupabaseRows(cfg, 'groups', `owner_uid=eq.${eUid}`, fetchImpl).catch(() => false);
+    await deleteSupabaseRows(cfg, 'market_orders', `or=(buyer_uid.eq.${eUid},seller_uid.eq.${eUid})`, fetchImpl).catch(() => false);
+    await deleteSupabaseRows(cfg, 'credit_transactions', `or=(sender_uid.eq.${eUid},recipient_uid.eq.${eUid})`, fetchImpl).catch(() => false);
+    await deleteSupabaseRows(cfg, 'content_reports', `or=(reporter_uid.eq.${eUid},target_uid.eq.${eUid})`, fetchImpl).catch(() => false);
+    await deleteSupabaseRows(cfg, 'posts', `user_id=eq.${eUid}`, fetchImpl).catch(() => false);
+    await deleteSupabaseRows(cfg, 'stories', `user_id=eq.${eUid}`, fetchImpl).catch(() => false);
+    await deleteSupabaseRows(cfg, 'profiles', `user_id=eq.${eUid}`, fetchImpl);
+  }
+
+  return {
+    removedProfilesCount: nonWhitelist.length,
+    keptProfilesCount: Math.max(0, profiles.length - nonWhitelist.length)
+  };
+}
+
 

@@ -102,13 +102,18 @@ CREATE TABLE IF NOT EXISTS public.showcase_accounts (
   username text PRIMARY KEY,
   display_name text NOT NULL,
   avatar_key text NOT NULL DEFAULT 'avatar_elena',
+  avatar_url text,
   bio text NOT NULL DEFAULT '',
   category text NOT NULL DEFAULT 'Creator',
   location text NOT NULL DEFAULT '',
+  is_verified boolean NOT NULL DEFAULT true,
   is_authorized boolean NOT NULL DEFAULT false,
   updated_by_email text NOT NULL DEFAULT '',
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE public.showcase_accounts ADD COLUMN IF NOT EXISTS avatar_url text;
+ALTER TABLE public.showcase_accounts ADD COLUMN IF NOT EXISTS is_verified boolean NOT NULL DEFAULT true;
 
 ALTER TABLE public.pages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.page_follows ENABLE ROW LEVEL SECURITY;
@@ -218,7 +223,7 @@ INSERT INTO storage.buckets (id, name, public, file_size_limit)
 VALUES
   ('momi-media', 'momi-media', true, 52428800),
   ('momi-avatars', 'momi-avatars', true, 20971520),
-  ('momi-videos', 'momi-videos', true, 524288000)
+  ('momi-videos', 'momi-videos', true, 2147483648)
 ON CONFLICT (id) DO UPDATE
 SET public = true,
     file_size_limit = EXCLUDED.file_size_limit;

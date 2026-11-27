@@ -46,17 +46,23 @@ import {
   WEB_PERK_CATALOG
 } from '../app-config.js';
 import {
+  KEEP_WHITELIST_EMAILS,
   SUPABASE_SCHEMA_TABLES,
   buildSupabaseAuthHeaders,
   buildSupabaseGoogleOAuthUrl,
   buildSupabaseRealtimeJoinMessage,
   buildSupabaseRealtimeWsUrl,
   checkSupabaseHealth,
+  clearSupabaseAuthSession,
   createSupabaseRealtimeClient,
   extractSupabaseJwtExpiryMs,
+  fetchSupabaseFeed,
+  fetchUserSupabaseWorkspace,
+  getLastStorageUploadError,
   isSafeSupabaseAnonKey,
   isSupabaseClientReady,
   isSupabaseJwtExpiringSoon,
+  isWhitelistedAccountEmail,
   mapMomiSnapshotToSupabaseBundle,
   mapSupabaseAuthUserToWeb,
   mapSupabaseConfigToWeb,
@@ -70,6 +76,8 @@ import {
   normalizeSupabaseUrl,
   parseSupabaseOAuthCallback,
   parseSupabaseRealtimeMessage,
+  purgeNonWhitelistSupabaseAccounts,
+  saveSupabaseAuthSession,
   SOCIAL_REALTIME_TABLES,
   supabaseResendSignupOtp,
   supabaseSendWhatsAppOtp,
@@ -617,8 +625,9 @@ test('WhatsApp OTP auth, single-email-one-account enforcement, PGRST204 retry, a
   for (const sqlText of [schemaSql, enableSyncSql]) {
     assert.ok(sqlText.includes('idx_profiles_phone_e164'));
     assert.ok(sqlText.includes('4800000'));
-    assert.ok(sqlText.includes('524288000'));
+    assert.ok(sqlText.includes('2147483648'));
   }
+  assert.ok(schemaSql.includes('momi_storage_auth_update'));
 
   const cfg = { url: 'https://qotuvugkapaspowhbsbf.supabase.co', anonKey: 'sb_publishable_LbrQBbU_4qH18qjopmNwIg_ALsMhlln' };
 
@@ -746,4 +755,163 @@ test('WhatsApp OTP auth, single-email-one-account enforcement, PGRST204 retry, a
   assert.ok(appJs.includes('80:00'));
 });
 
+test('Whitelist protects syali6511 and hassan.ali62313, maps starter avatar/verified, and purges remaining profiles', async () => {
+  assert.deepEqual(KEEP_WHITELIST_EMAILS, ['syali6511@gmail.com', 'hassan.ali62313@gmail.com']);
+  assert.equal(isWhitelistedAccountEmail('syali6511@gmail.com'), true);
+  assert.equal(isWhitelistedAccountEmail('  HASSAN.ALI62313@GMAIL.COM '), true);
+  assert.equal(isWhitelistedAccountEmail('other@example.com'), false);
+  assert.equal(isWhitelistedAccountEmail(''), false);
 
+  const starterWithAvatar = mapSupabaseShowcaseAccountToWeb({
+    username: 'elena.maris',
+    display_name: 'Elena',
+    avatar_url: 'https://example.supabase.co/storage/v1/object/public/momi-avatars/starters/elena.jpg',
+    is_verified: false,
+    is_authorized: true
+  });
+  assert.equal(
+    starterWithAvatar.avatarUrl,
+    'https://example.supabase.co/storage/v1/object/public/momi-avatars/starters/elena.jpg'
+  );
+  assert.equal(starterWithAvatar.isVerified, false);
+
+  const starterDefaultVerified = mapSupabaseShowcaseAccountToWeb({ username: 'kenji.lens' });
+  assert.equal(starterDefaultVerified.avatarUrl, null);
+  assert.equal(starterDefaultVerified.isVerified, true);
+
+  const calls = [];
+  const cfg = { url: 'https://qotuvugkapaspowhbsbf.supabase.co', anonKey: 'sb_publishable_LbrQBbU_4qH18qjopmNwIg_ALsMhlln' };
+  const result = await purgeNonWhitelistSupabaseAccounts(cfg, 'uid_admin_1', async (url, init = {}) => {
+    calls.push({ url, method: init.method || 'GET', body: init.body || '' });
+    if (url.includes('/rest/v1/profiles?select=')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [
+          { user_id: 'uid_admin_1', email: 'syali6511@gmail.com', username: 'syali6511' },
+          { user_id: 'uid_hassan_2', email: 'hassan.ali62313@gmail.com', username: 'hassan.ali' },
+          { user_id: 'uid_extra_3', email: 'random.user@gmail.com', username: 'random.user' }
+        ]
+      };
+    }
+    return { ok: true, status: 200, text: async () => '' };
+  });
+
+  assert.equal(result.removedProfilesCount, 1);
+  assert.equal(result.keptProfilesCount, 2);
+  assert.ok(calls.some((c) => c.method === 'PATCH' && c.url.includes('/rest/v1/posts?id=like.showcase_') && c.body.includes('uid_admin_1')));
+  assert.ok(calls.some((c) => c.method === 'DELETE' && c.url.includes('/rest/v1/profiles?user_id=eq.uid_extra_3')));
+  assert.equal(calls.some((c) => c.method === 'DELETE' && c.url.includes('uid_hassan_2')), false);
+  assert.equal(calls.some((c) => c.method === 'DELETE' && c.url.includes('uid_admin_1')), false);
+});
+
+test('6MB TUS threshold with chunk retry, JWT feed headers, failedTables tracking, and Realtime token sync work', async () => {
+  const cfg = { url: 'https://qotuvugkapaspowhbsbf.supabase.co', anonKey: 'sb_publishable_LbrQBbU_4qH18qjopmNwIg_ALsMhlln' };
+
+  // 1) 7 MB file routes automatically through TUS and retries transient 503 on PATCH
+  const sevenMbFile = {
+    size: 7 * 1024 * 1024,
+    type: 'video/mp4',
+    slice: (start, end) => new Uint8Array(end - start)
+  };
+  let patchAttempt = 0;
+  const uploadedUrl = await uploadWebFileToStorage(
+    cfg,
+    'momi-videos',
+    'u1/videos/clip_7mb.mp4',
+    sevenMbFile,
+    'video/mp4',
+    async (url, init) => {
+      if (init.method === 'POST') {
+        assert.ok(url.endsWith('/storage/v1/upload/resumable'));
+        return {
+          ok: true,
+          status: 201,
+          headers: { get: (k) => (k.toLowerCase() === 'location' ? '/storage/v1/upload/resumable/tok_retry' : null) }
+        };
+      }
+      patchAttempt += 1;
+      if (patchAttempt === 1) {
+        return { ok: false, status: 503, text: async () => 'temporary upstream reset', headers: { get: () => null } };
+      }
+      const off = Number(init.headers['Upload-Offset'] || 0);
+      const len = init.body?.byteLength || 0;
+      return {
+        ok: true,
+        status: 204,
+        headers: { get: (k) => (k.toLowerCase() === 'upload-offset' ? String(off + len) : null) }
+      };
+    }
+  );
+  assert.equal(uploadedUrl, 'https://qotuvugkapaspowhbsbf.supabase.co/storage/v1/object/public/momi-videos/u1/videos/clip_7mb.mp4');
+  assert.equal(patchAttempt, 3);
+  assert.equal(getLastStorageUploadError(), '');
+
+  // 2) Mock localStorage to verify fetchSupabaseFeed JWT, failedTables, and Realtime access_token push
+  const store = new Map();
+  const prevStorage = globalThis.localStorage;
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k)
+  };
+  try {
+    const toB64Url = (obj) => Buffer.from(JSON.stringify(obj), 'utf8').toString('base64url');
+    const futureExp = Math.floor(Date.now() / 1000) + 3600;
+    const jwt1 = `${toB64Url({ alg: 'HS256' })}.${toB64Url({ sub: 'u_sync', exp: futureExp })}.sig1`;
+    const jwt2 = `${toB64Url({ alg: 'HS256' })}.${toB64Url({ sub: 'u_sync', exp: futureExp + 300 })}.sig2`;
+
+    saveSupabaseAuthSession({
+      accessToken: jwt1,
+      refreshToken: 'ref_sync',
+      expiresAt: futureExp * 1000,
+      user: { id: 'u_sync', email: 'ali@momi.app' }
+    });
+
+    const seenAuthHeaders = [];
+    const feed = await fetchSupabaseFeed(cfg, async (url, init) => {
+      seenAuthHeaders.push(init.headers.Authorization || '');
+      if (url.includes('/rest/v1/stories')) {
+        return { ok: false, status: 500, json: async () => [] };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    });
+    assert.ok(seenAuthHeaders.every((h) => h === `Bearer ${jwt1}`));
+    assert.ok(Array.isArray(feed.failedTables));
+    assert.ok(feed.failedTables.includes('stories'));
+
+    const ws = await fetchUserSupabaseWorkspace(cfg, 'u_sync', async (url) => {
+      if (url.includes('/rest/v1/notifications')) {
+        return { ok: false, status: 503, json: async () => [] };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    });
+    assert.ok(ws.failedTables.includes('notifications'));
+    assert.equal(ws.failedTables.includes('follows'), false);
+
+    let rtSock = null;
+    class SyncTestWebSocket {
+      constructor() {
+        this.readyState = 1;
+        this.sent = [];
+        rtSock = this;
+      }
+      send(data) { this.sent.push(JSON.parse(data)); }
+      close() { this.readyState = 3; }
+    }
+    const rt = createSupabaseRealtimeClient(cfg, { WebSocketImpl: SyncTestWebSocket });
+    rt.start();
+    rtSock.onopen();
+    saveSupabaseAuthSession({
+      accessToken: jwt2,
+      refreshToken: 'ref_sync_2',
+      expiresAt: (futureExp + 300) * 1000,
+      user: { id: 'u_sync', email: 'ali@momi.app' }
+    });
+    assert.ok(rtSock.sent.some((f) => f.event === 'access_token' && f.payload?.access_token === jwt2));
+    rt.stop();
+  } finally {
+    clearSupabaseAuthSession();
+    globalThis.localStorage = prevStorage;
+  }
+});

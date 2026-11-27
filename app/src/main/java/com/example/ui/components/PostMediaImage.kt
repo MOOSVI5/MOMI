@@ -2,6 +2,8 @@ package com.example.ui.components
 
 import androidx.compose.foundation.Image
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ColorFilter
@@ -9,6 +11,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import coil.compose.AsyncImage
 import com.example.util.MediaAssets
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
 @Composable
@@ -24,50 +28,46 @@ fun PostMediaImage(
     customColorFilter: ColorFilter? = null
 ) {
     val colorFilter = customColorFilter ?: MediaAssets.colorFilterForTag(filterTag)
-    val decodedBytes = remember(imageData) { MediaAssets.decodeBase64ToBytes(imageData) }
     val cleanUrl = remember(imageUrl) {
         imageUrl?.trim()?.takeIf { it.startsWith("https://", true) || it.startsWith("http://", true) }
     }
     val fallbackPainter = painterResource(id = MediaAssets.drawableForKey(imageKey))
 
-    when {
-        !localImagePath.isNullOrBlank() && File(localImagePath).exists() -> {
-            AsyncImage(
-                model = File(localImagePath),
-                contentDescription = contentDescription,
-                modifier = modifier,
-                contentScale = contentScale,
-                colorFilter = colorFilter
-            )
+    val mediaModel by produceState<Any?>(
+        initialValue = cleanUrl,
+        localImagePath,
+        cleanUrl,
+        imageData
+    ) {
+        val resolved: Any? = withContext(Dispatchers.IO) {
+            val localFile = localImagePath?.trim()?.takeIf { it.isNotBlank() }?.let(::File)?.takeIf { it.exists() }
+            when {
+                localFile != null -> localFile
+                cleanUrl != null -> cleanUrl
+                !imageData.isNullOrBlank() -> MediaAssets.decodeBase64ToBytesAsync(imageData)
+                else -> null
+            }
         }
-        cleanUrl != null -> {
-            AsyncImage(
-                model = cleanUrl,
-                placeholder = fallbackPainter,
-                error = fallbackPainter,
-                contentDescription = contentDescription,
-                modifier = modifier,
-                contentScale = contentScale,
-                colorFilter = colorFilter
-            )
-        }
-        decodedBytes != null -> {
-            AsyncImage(
-                model = decodedBytes,
-                contentDescription = contentDescription,
-                modifier = modifier,
-                contentScale = contentScale,
-                colorFilter = colorFilter
-            )
-        }
-        else -> {
-            Image(
-                painter = fallbackPainter,
-                contentDescription = contentDescription,
-                modifier = modifier,
-                contentScale = contentScale,
-                colorFilter = colorFilter
-            )
-        }
+        value = resolved
+    }
+
+    if (mediaModel != null) {
+        AsyncImage(
+            model = mediaModel,
+            placeholder = fallbackPainter,
+            error = fallbackPainter,
+            contentDescription = contentDescription,
+            modifier = modifier,
+            contentScale = contentScale,
+            colorFilter = colorFilter
+        )
+    } else {
+        Image(
+            painter = fallbackPainter,
+            contentDescription = contentDescription,
+            modifier = modifier,
+            contentScale = contentScale,
+            colorFilter = colorFilter
+        )
     }
 }

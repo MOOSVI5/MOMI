@@ -220,6 +220,9 @@ class MomiViewModel(
     private val _isSupabaseBusy = MutableStateFlow(false)
     val isSupabaseBusy: StateFlow<Boolean> = _isSupabaseBusy.asStateFlow()
 
+    private val _mediaUploadStatus = MutableStateFlow<String?>(null)
+    val mediaUploadStatus: StateFlow<String?> = _mediaUploadStatus.asStateFlow()
+
     val isSupabaseConfigured: Boolean
         get() = supabaseClient.isConfigured()
 
@@ -248,11 +251,15 @@ class MomiViewModel(
     private val pendingCreatedStories = ConcurrentHashMap<String, Pair<Story, Long>>()
     private val pendingDeletedPostIds = ConcurrentHashMap<String, Long>()
     @Volatile private var pendingProfileOverride: Pair<UserProfile, Long>? = null
+    @Volatile private var lastSavedProfileJson: String? = null
+    @Volatile private var lastSavedFeedPostsSig: String? = null
     private val recordedPostViewIds = mutableSetOf<String>()
 
     init {
         viewModelScope.launch {
             if (supabaseClient.isConfigured()) {
+                // Ensure session JWT is fresh before opening Realtime WebSocket on cold start
+                supabaseClient.ensureFreshAccessToken()
                 // Register Realtime DB listeners immediately on login without waiting for HTTP seed/fetch
                 registerDatabaseListenersOnLogin(MomiSupabaseClient.activeSession)
 
@@ -346,6 +353,8 @@ class MomiViewModel(
         when (table) {
             "posts" -> applyRealtimePostEvent(event)
             "comments" -> applyRealtimeCommentEvent(event)
+            "stories" -> applyRealtimeStoryEvent(event)
+            "profiles" -> applyRealtimeProfileEvent(event)
             "user_interactions", "likes" -> applyRealtimeInteractionOrLikeEvent(event)
             "chat_messages" -> {
                 val threadId = activeChatThreadId
@@ -368,6 +377,53 @@ class MomiViewModel(
         }
         if (table != "live_frames") {
             triggerDebouncedSupabaseRefresh()
+        }
+    }
+
+    private fun applyRealtimeStoryEvent(event: SupabaseRealtimeEvent) {
+        val type = event.eventType.uppercase()
+        if (type == "DELETE") {
+            val deletedId = event.oldRecordJson?.optString("id")?.takeIf { it.isNotBlank() }
+                ?: event.recordJson?.optString("id")?.takeIf { it.isNotBlank() }
+                ?: event.oldRecordFields["id"]?.takeIf { it.isNotBlank() }
+                ?: event.recordFields["id"]?.takeIf { it.isNotBlank() }
+                ?: return
+            supaStories.update { list -> list.filterNot { it.id == deletedId } }
+            cachedStories.value = supaStories.value
+            return
+        }
+        val parsed = event.recordJson?.let { supabaseClient.parseStoryRecord(it) } ?: return
+        supaStories.update { current ->
+            val idx = current.indexOfFirst { it.id == parsed.id }
+            if (idx >= 0) {
+                current.toMutableList().apply { set(idx, parsed) }
+            } else {
+                listOf(parsed) + current
+            }
+        }
+        cachedStories.value = supaStories.value
+    }
+
+    private fun applyRealtimeProfileEvent(event: SupabaseRealtimeEvent) {
+        val type = event.eventType.uppercase()
+        if (type == "DELETE") return
+        val parsed = event.recordJson?.let { supabaseClient.parseProfileRecord(it) } ?: return
+        val overrideProf = pendingProfileOverride?.first
+        if (overrideProf != null && overrideProf.userId == parsed.userId) return
+        supaProfiles.update { current ->
+            val idx = current.indexOfFirst { it.userId == parsed.userId }
+            if (idx >= 0) {
+                current.toMutableList().apply { set(idx, parsed) }
+            } else {
+                listOf(parsed) + current
+            }
+        }
+        cachedProfiles.value = supaProfiles.value
+        if (parsed.userId == currentUserId) {
+            cachedProfile.value = parsed.copy(
+                email = parsed.email.ifBlank { initialEmail.orEmpty() },
+                phone = parsed.phone.ifBlank { initialPhone.orEmpty() }
+            )
         }
     }
 
@@ -593,7 +649,7 @@ class MomiViewModel(
     private fun triggerDebouncedSupabaseRefresh() {
         realtimeRefreshJob?.cancel()
         realtimeRefreshJob = viewModelScope.launch {
-            delay(250L)
+            delay(1200L)
             refreshFromSupabase(forceEnsureProfile = false)
         }
     }
@@ -661,10 +717,12 @@ class MomiViewModel(
         supaProfiles,
         follows
     ) { profiles, allFollows ->
+        val followersByTarget = allFollows.groupingBy { it.targetUid }.eachCount()
+        val followingByFollower = allFollows.groupingBy { it.followerUid }.eachCount()
         profiles.map { p ->
             p.copy(
-                followersCount = allFollows.count { it.targetUid == p.userId }.toLong(),
-                followingCount = allFollows.count { it.followerUid == p.userId }.toLong()
+                followersCount = (followersByTarget[p.userId] ?: 0).toLong(),
+                followingCount = (followingByFollower[p.userId] ?: 0).toLong()
             )
         }
     }
@@ -688,9 +746,11 @@ class MomiViewModel(
         val resolved = matchedRemote
             ?: localCached
             ?: fallbackProfileBase()
+        val followersCount = allFollows.count { it.targetUid == resolved.userId }.toLong()
+        val followingCount = allFollows.count { it.followerUid == resolved.userId }.toLong()
         val hydrated = resolved.copy(
-            followersCount = allFollows.count { it.targetUid == resolved.userId }.toLong(),
-            followingCount = allFollows.count { it.followerUid == resolved.userId }.toLong()
+            followersCount = followersCount,
+            followingCount = followingCount
         )
         StreamUiState.Success(hydrated) as StreamUiState<UserProfile?>
     }
@@ -782,6 +842,45 @@ class MomiViewModel(
     private val seenStoryIds: StateFlow<Set<String>> = supaSeenStoryIds
     private val likedCommentIds: StateFlow<Set<String>> = supaLikedCommentIds
 
+    val showcaseAccounts: StateFlow<List<ShowcaseAccount>> = supaShowcaseAccounts
+        .map { remote ->
+            val remoteByUsername = remote.associateBy { it.username.lowercase() }
+            val presetUsernames = ShowcaseCatalog.PERSONAS.map { it.username.lowercase() }.toSet()
+            val mergedPresets = ShowcaseCatalog.PERSONAS.map { persona ->
+                val saved = remoteByUsername[persona.username.lowercase()]
+                ShowcaseAccount(
+                    username = persona.username,
+                    displayName = saved?.displayName?.takeIf { it.isNotBlank() } ?: persona.displayName,
+                    avatarKey = saved?.avatarKey?.takeIf { it.isNotBlank() } ?: persona.avatarKey,
+                    avatarUrl = saved?.avatarUrl,
+                    bio = saved?.bio?.takeIf { it.isNotBlank() } ?: "Featured Momi creator in ${persona.location}",
+                    category = saved?.category?.takeIf { it.isNotBlank() } ?: persona.category,
+                    location = saved?.location?.takeIf { it.isNotBlank() } ?: persona.location,
+                    isVerified = saved?.isVerified ?: true,
+                    isAuthorized = saved?.isAuthorized ?: false,
+                    updatedByEmail = saved?.updatedByEmail.orEmpty()
+                )
+            }
+            val customAccounts = remote.filter { it.username.lowercase() !in presetUsernames }
+            mergedPresets + customAccounts
+        }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+            ShowcaseCatalog.PERSONAS.map {
+                ShowcaseAccount(
+                    username = it.username,
+                    displayName = it.displayName,
+                    avatarKey = it.avatarKey,
+                    bio = "Featured Momi creator in ${it.location}",
+                    category = it.category,
+                    location = it.location,
+                    isVerified = true,
+                    isAuthorized = false
+                )
+            }
+        )
+
     private val postBaseStreams = combine(
         supaPosts,
         allProfiles,
@@ -795,24 +894,28 @@ class MomiViewModel(
     private val optimisticPostInputs = combine(
         optimisticPostLikes,
         optimisticBookmarks,
-        optimisticCommentsByPost
-    ) { likeOverrides, bookmarkOverrides, pendingComments ->
-        Triple(likeOverrides, bookmarkOverrides, pendingComments)
+        optimisticCommentsByPost,
+        showcaseAccounts
+    ) { likeOverrides, bookmarkOverrides, pendingComments, starters ->
+        OptimisticPostInputs(likeOverrides, bookmarkOverrides, pendingComments, starters)
     }
 
     val allPostsState: StateFlow<StreamUiState<List<Post>>> = combine(
         postBaseStreams,
         optimisticPostInputs,
         supaHasLoadedFeed
-    ) { base, (likeOverrides, bookmarkOverrides, pendingComments), hasLoaded ->
+    ) { base, opt, hasLoaded ->
+        val (likeOverrides, bookmarkOverrides, pendingComments, starters) = opt
         val sourcePosts = base.posts.ifEmpty { cachedRawPosts.value }
         if (!hasLoaded && sourcePosts.isEmpty()) {
             return@combine StreamUiState.Loading
         }
         val profilesByUid = base.profiles.associateBy { it.userId }
+        val startersByUsername = starters.associateBy { it.username.lowercase() }
         val enriched = sourcePosts.map { post ->
             val authorProfile = profilesByUid[post.userId]
-            val isShowcase = post.id.startsWith("showcase_")
+            val isShowcase = post.id.startsWith("showcase_") || post.userId.startsWith("showcase_")
+            val starter = if (isShowcase) startersByUsername[post.authorUsername.lowercase()] else null
             val serverLiked = base.liked.contains(post.id)
             val desiredLiked = likeOverrides[post.id] ?: serverLiked
             val likeDelta = when {
@@ -825,17 +928,17 @@ class MomiViewModel(
             val pendingCount = pendingComments[post.id]?.size?.toLong() ?: 0L
 
             post.copy(
-                authorUsername = if (isShowcase) post.authorUsername else (authorProfile?.username?.ifBlank { post.authorUsername } ?: post.authorUsername),
-                authorDisplayName = if (isShowcase) post.authorDisplayName else (authorProfile?.displayName?.ifBlank { post.authorDisplayName } ?: post.authorDisplayName),
-                authorAvatarKey = if (isShowcase) post.authorAvatarKey else (authorProfile?.avatarKey?.ifBlank { post.authorAvatarKey } ?: post.authorAvatarKey),
-                authorAvatarUrl = if (isShowcase) null else if (authorProfile != null) authorProfile.avatarUrl else post.authorAvatarUrl,
+                authorUsername = if (isShowcase) (starter?.username ?: post.authorUsername) else (authorProfile?.username?.ifBlank { post.authorUsername } ?: post.authorUsername),
+                authorDisplayName = if (isShowcase) (starter?.displayName?.ifBlank { post.authorDisplayName } ?: post.authorDisplayName) else (authorProfile?.displayName?.ifBlank { post.authorDisplayName } ?: post.authorDisplayName),
+                authorAvatarKey = if (isShowcase) (starter?.avatarKey?.ifBlank { post.authorAvatarKey } ?: post.authorAvatarKey) else (authorProfile?.avatarKey?.ifBlank { post.authorAvatarKey } ?: post.authorAvatarKey),
+                authorAvatarUrl = if (isShowcase) (starter?.avatarUrl ?: post.authorAvatarUrl) else if (authorProfile != null) authorProfile.avatarUrl else post.authorAvatarUrl,
                 authorAvatarData = if (isShowcase) null else authorProfile?.avatarData,
-                authorVerified = if (isShowcase) post.authorVerified else (authorProfile?.isVerified ?: post.authorVerified),
+                authorVerified = if (isShowcase) (starter?.isVerified ?: post.authorVerified) else (authorProfile?.isVerified ?: post.authorVerified),
                 isLiked = desiredLiked,
                 likesCount = (post.likesCount + likeDelta).coerceAtLeast(0L),
                 commentsCount = (post.commentsCount + pendingCount).coerceAtLeast(0L),
                 isBookmarked = desiredBookmarked,
-                isFollowingAuthor = post.userId == currentUserId || base.following.contains(post.userId)
+                isFollowingAuthor = !isShowcase && (post.userId == currentUserId || base.following.contains(post.userId))
             )
         }
         val prioritized = sortFeedWithBoostPriority(enriched)
@@ -874,9 +977,11 @@ class MomiViewModel(
     val stories: StateFlow<List<Story>> = combine(
         supaStories,
         allProfiles,
-        seenStoryIds
-    ) { rawStories, profiles, seen ->
+        seenStoryIds,
+        showcaseAccounts
+    ) { rawStories, profiles, seen, starters ->
         val profilesByUid = profiles.associateBy { it.userId }
+        val startersByUsername = starters.associateBy { it.username.lowercase() }
         val cutoffMs = System.currentTimeMillis() - MomiSupabaseSchema.STORY_TTL_MS
         rawStories
             .filter { story ->
@@ -884,11 +989,14 @@ class MomiViewModel(
                 createdMs == null || createdMs >= cutoffMs
             }
             .map { story ->
-                val p = profilesByUid[story.userId]
+                val isShowcase = story.id.startsWith("showcase_") || story.userId.startsWith("showcase_")
+                val starter = if (isShowcase) startersByUsername[story.username.lowercase()] else null
+                val p = if (isShowcase) null else profilesByUid[story.userId]
                 story.copy(
-                    avatarUrl = if (p != null) p.avatarUrl else story.avatarUrl,
-                    avatarData = p?.avatarData,
-                    isOwnStory = story.userId == currentUserId,
+                    avatarKey = starter?.avatarKey?.ifBlank { story.avatarKey } ?: story.avatarKey,
+                    avatarUrl = if (isShowcase) (starter?.avatarUrl ?: story.avatarUrl) else if (p != null) p.avatarUrl else story.avatarUrl,
+                    avatarData = if (isShowcase) null else p?.avatarData,
+                    isOwnStory = story.userId == currentUserId && !isShowcase,
                     isSeen = seen.contains(story.id)
                 )
             }
@@ -1000,39 +1108,6 @@ class MomiViewModel(
     ) { groupList, joined ->
         groupList.map { it.copy(isMember = it.id in joined) }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
-
-    val showcaseAccounts: StateFlow<List<ShowcaseAccount>> = supaShowcaseAccounts
-        .map { remote ->
-            val remoteByUsername = remote.associateBy { it.username.lowercase() }
-            ShowcaseCatalog.PERSONAS.map { persona ->
-                val saved = remoteByUsername[persona.username.lowercase()]
-                ShowcaseAccount(
-                    username = persona.username,
-                    displayName = saved?.displayName?.takeIf { it.isNotBlank() } ?: persona.displayName,
-                    avatarKey = saved?.avatarKey?.takeIf { it.isNotBlank() } ?: persona.avatarKey,
-                    bio = saved?.bio?.takeIf { it.isNotBlank() } ?: "Featured Momi creator in ${persona.location}",
-                    category = saved?.category?.takeIf { it.isNotBlank() } ?: persona.category,
-                    location = saved?.location?.takeIf { it.isNotBlank() } ?: persona.location,
-                    isAuthorized = saved?.isAuthorized ?: false,
-                    updatedByEmail = saved?.updatedByEmail.orEmpty()
-                )
-            }
-        }
-        .stateIn(
-            viewModelScope,
-            SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
-            ShowcaseCatalog.PERSONAS.map {
-                ShowcaseAccount(
-                    username = it.username,
-                    displayName = it.displayName,
-                    avatarKey = it.avatarKey,
-                    bio = "Featured Momi creator in ${it.location}",
-                    category = it.category,
-                    location = it.location,
-                    isAuthorized = false
-                )
-            }
-        )
 
     val messageThreads: StateFlow<List<MessageThread>> = supaThreads
 
@@ -1149,7 +1224,8 @@ class MomiViewModel(
                     allProfiles,
                     likedCommentIds,
                     optimisticCommentLikes,
-                    optimisticCommentsByPost
+                    optimisticCommentsByPost,
+                    showcaseAccounts
                 ) { values ->
                     @Suppress("UNCHECKED_CAST")
                     val comments = (values[1] as List<Comment>).ifEmpty { values[0] as List<Comment> }
@@ -1161,7 +1237,10 @@ class MomiViewModel(
                     val likeOverrides = values[4] as Map<String, Boolean>
                     @Suppress("UNCHECKED_CAST")
                     val pendingMap = values[5] as Map<String, List<Comment>>
+                    @Suppress("UNCHECKED_CAST")
+                    val starters = values[6] as List<ShowcaseAccount>
                     val profilesByUid = profiles.associateBy { it.userId }
+                    val startersByUsername = starters.associateBy { it.username.lowercase() }
                     val pending = pendingMap[postId].orEmpty()
                     val filteredPending = pending.filter { opt ->
                         comments.none { remote ->
@@ -1176,10 +1255,12 @@ class MomiViewModel(
                             !desiredLiked && serverLiked -> -1L
                             else -> 0L
                         }
-                        val prof = profilesByUid[comment.userId]
+                        val isShowcaseCmt = comment.id.startsWith("showcase_") || comment.userId.startsWith("showcase_")
+                        val starter = if (isShowcaseCmt) startersByUsername[comment.authorUsername.lowercase()] else null
+                        val prof = if (isShowcaseCmt) null else profilesByUid[comment.userId]
                         comment.copy(
-                            authorAvatarUrl = prof?.avatarUrl ?: comment.authorAvatarUrl,
-                            authorAvatarData = prof?.avatarData,
+                            authorAvatarUrl = starter?.avatarUrl ?: prof?.avatarUrl ?: comment.authorAvatarUrl,
+                            authorAvatarData = if (isShowcaseCmt) null else prof?.avatarData,
                             isLiked = desiredLiked,
                             likesCount = (comment.likesCount + likeDelta).coerceAtLeast(0L)
                         )
@@ -1837,72 +1918,85 @@ class MomiViewModel(
             0L
         }
         viewModelScope.launch {
-            val postId = "post_${UUID.randomUUID()}"
-            val uploaded = supabaseBackend.prepareAndUploadPostMedia(
-                context = context.applicationContext,
-                mediaId = postId,
-                localImagePath = localImagePath,
-                localExtraImagePaths = extraPaths,
-                mediaType = mediaType,
-                localVideoPath = localVideoPath,
-                localAudioPath = localAudioPath
-            )
-            if (uploaded.failureReason != null ||
-                (mediaType == "VIDEO" && uploaded.videoUrl == null && uploaded.videoDataFallback == null && uploaded.videoChunksFallback.isEmpty())
-            ) {
-                _errorMessage.value = uploaded.failureReason ?: "Could not upload video clip. Please try a shorter clip."
-                onComplete(false)
-                return@launch
-            }
-            val newPost = Post(
-                id = postId,
-                userId = currentUserId,
-                authorUsername = currentProfile.username,
-                authorDisplayName = currentProfile.displayName,
-                authorAvatarKey = currentProfile.avatarKey,
-                authorAvatarUrl = currentProfile.avatarUrl,
-                authorVerified = currentProfile.isVerified,
-                location = location.trim().take(80),
-                imageKey = imageKey,
-                imageUrl = uploaded.imageUrl,
-                imageData = uploaded.imageDataFallback,
-                extraImageUrls = uploaded.extraImageUrls,
-                extraImageDatas = uploaded.extraImageDatasFallback,
-                mediaType = mediaType,
-                videoUrl = uploaded.videoUrl,
-                videoData = uploaded.videoDataFallback,
-                videoChunksCount = uploaded.videoChunksFallback.size.toLong(),
-                videoDurationMs = clampedDurationMs,
-                filterTag = filterTag,
-                aspectRatio = aspectRatio,
-                taggedUsernames = mergedTags,
-                hashtags = mergedHashtags,
-                caption = caption.trim().take(2000),
-                likesCount = 0L,
-                viewsCount = 0L,
-                commentsCount = 0L,
-                category = category,
-                isReel = isReel,
-                audioTitle = audioTitle.trim().take(80),
-                audioUrl = uploaded.audioUrl,
-                audioData = uploaded.audioDataFallback,
-                pageId = pageId,
-                groupId = groupId,
-                communityName = communityName.trim().take(80),
-                createdAt = Timestamp.now()
-            )
-            pendingCreatedPosts[postId] = newPost to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
-            supaPosts.update { current -> listOf(newPost) + current.filterNot { it.id == newPost.id } }
-            supabaseBackend.createPost(currentProfile, newPost)
-                .onSuccess {
-                    onComplete(true)
-                }
-                .onFailure { err ->
-                    pendingCreatedPosts.remove(postId)
-                    supaPosts.update { current -> current.filterNot { it.id == newPost.id } }
-                    _errorMessage.value = unwrapErrorMessage(err, "Could not publish post")
+            try {
+                _mediaUploadStatus.value = if (mediaType == "VIDEO") "Normalizing video..." else "Uploading..."
+                val postId = "post_${UUID.randomUUID()}"
+                val uploaded = supabaseBackend.prepareAndUploadPostMedia(
+                    context = context.applicationContext,
+                    mediaId = postId,
+                    localImagePath = localImagePath,
+                    localExtraImagePaths = extraPaths,
+                    mediaType = mediaType,
+                    localVideoPath = localVideoPath,
+                    localAudioPath = localAudioPath,
+                    ownerUid = currentUserId,
+                    onProgressStatus = { status -> _mediaUploadStatus.value = status }
+                )
+                if (uploaded.failureReason != null ||
+                    (mediaType == "VIDEO" && uploaded.videoUrl == null && uploaded.videoDataFallback == null && uploaded.videoChunksFallback.isEmpty())
+                ) {
+                    _errorMessage.value = uploaded.failureReason ?: "Could not upload video clip. Please try a shorter clip."
                     onComplete(false)
+                    return@launch
                 }
+                _mediaUploadStatus.value = "Publishing..."
+                val resolvedDurationMs = if (mediaType == "VIDEO") {
+                    (uploaded.normalizedDurationMs ?: clampedDurationMs).coerceIn(0L, MediaAssets.MAX_POST_VIDEO_DURATION_MS)
+                } else {
+                    0L
+                }
+                val newPost = Post(
+                    id = postId,
+                    userId = currentUserId,
+                    authorUsername = currentProfile.username,
+                    authorDisplayName = currentProfile.displayName,
+                    authorAvatarKey = currentProfile.avatarKey,
+                    authorAvatarUrl = currentProfile.avatarUrl,
+                    authorVerified = currentProfile.isVerified,
+                    location = location.trim().take(80),
+                    imageKey = imageKey,
+                    imageUrl = uploaded.imageUrl,
+                    imageData = uploaded.imageDataFallback,
+                    extraImageUrls = uploaded.extraImageUrls,
+                    extraImageDatas = uploaded.extraImageDatasFallback,
+                    mediaType = mediaType,
+                    videoUrl = uploaded.videoUrl,
+                    videoData = uploaded.videoDataFallback,
+                    videoChunksCount = uploaded.videoChunksFallback.size.toLong(),
+                    videoDurationMs = resolvedDurationMs,
+                    filterTag = filterTag,
+                    aspectRatio = aspectRatio,
+                    taggedUsernames = mergedTags,
+                    hashtags = mergedHashtags,
+                    caption = caption.trim().take(2000),
+                    likesCount = 0L,
+                    viewsCount = 0L,
+                    commentsCount = 0L,
+                    category = category,
+                    isReel = isReel,
+                    audioTitle = audioTitle.trim().take(80),
+                    audioUrl = uploaded.audioUrl,
+                    audioData = uploaded.audioDataFallback,
+                    pageId = pageId,
+                    groupId = groupId,
+                    communityName = communityName.trim().take(80),
+                    createdAt = Timestamp.now()
+                )
+                pendingCreatedPosts[postId] = newPost to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
+                supaPosts.update { current -> listOf(newPost) + current.filterNot { it.id == newPost.id } }
+                supabaseBackend.createPost(currentProfile, newPost)
+                    .onSuccess {
+                        onComplete(true)
+                    }
+                    .onFailure { err ->
+                        pendingCreatedPosts.remove(postId)
+                        supaPosts.update { current -> current.filterNot { it.id == newPost.id } }
+                        _errorMessage.value = unwrapErrorMessage(err, "Could not publish post")
+                        onComplete(false)
+                    }
+            } finally {
+                _mediaUploadStatus.value = null
+            }
         }
     }
 
@@ -1930,68 +2024,85 @@ class MomiViewModel(
         val effectiveLocalVideoPath = if (isColorCanvas) null else localVideoPath
         val effectiveVideoDurationMs = if (isColorCanvas) 0L else videoDurationMs
         viewModelScope.launch {
-            val storyId = "story_${UUID.randomUUID()}"
-            val needsMediaUpload = !effectiveLocalImagePath.isNullOrBlank() ||
-                (effectiveMediaType == "VIDEO" && !effectiveLocalVideoPath.isNullOrBlank()) ||
-                !localAudioPath.isNullOrBlank()
-            val uploaded = if (needsMediaUpload) {
-                supabaseBackend.prepareAndUploadPostMedia(
-                    context = context.applicationContext,
-                    mediaId = storyId,
-                    localImagePath = effectiveLocalImagePath,
-                    localExtraImagePaths = emptyList(),
-                    mediaType = effectiveMediaType,
-                    localVideoPath = effectiveLocalVideoPath,
-                    localAudioPath = localAudioPath
-                )
-            } else {
-                com.example.data.supabase.UploadedMediaUrls()
-            }
-            if (uploaded.failureReason != null ||
-                (effectiveMediaType == "VIDEO" && uploaded.videoUrl == null && uploaded.videoDataFallback == null)
-            ) {
-                _errorMessage.value = uploaded.failureReason ?: "Could not upload story clip."
-                onComplete(false)
-                return@launch
-            }
-            val newStory = Story(
-                id = storyId,
-                userId = currentUserId,
-                username = currentProfile.username,
-                avatarKey = currentProfile.avatarKey,
-                avatarUrl = currentProfile.avatarUrl,
-                imageKey = com.example.util.StoryOverlayCodec.encodeImageKey(imageKey, cleanBgKey),
-                imageUrl = uploaded.imageUrl,
-                imageData = uploaded.imageDataFallback,
-                mediaType = effectiveMediaType,
-                videoUrl = uploaded.videoUrl,
-                videoData = uploaded.videoDataFallback,
-                videoDurationMs = effectiveVideoDurationMs,
-                audioTitle = audioTitle.trim().take(80),
-                audioUrl = uploaded.audioUrl,
-                audioData = uploaded.audioDataFallback,
-                caption = caption.trim().take(240),
-                backgroundColorKey = cleanBgKey,
-                textOverlay = textOverlay.trim().take(160),
-                textOverlayStyle = textOverlayStyle,
-                textOverlayPositionY = textOverlayPositionY.coerceIn(0.18f, 0.82f),
-                createdAt = Timestamp.now(),
-                isOwnStory = true,
-                isSeen = false
-            )
-            pendingCreatedStories[newStory.id] = newStory to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
-            supaStories.update { current -> listOf(newStory) + current.filterNot { it.id == newStory.id } }
-            supabaseBackend.createStory(currentProfile, newStory)
-                .onSuccess {
-                    _statusNotice.value = "24-hour story published!"
-                    onComplete(true)
+            try {
+                _mediaUploadStatus.value = if (effectiveMediaType == "VIDEO" && !effectiveLocalVideoPath.isNullOrBlank()) {
+                    "Normalizing video..."
+                } else {
+                    "Saving..."
                 }
-                .onFailure { err ->
-                    pendingCreatedStories.remove(newStory.id)
-                    supaStories.update { current -> current.filterNot { it.id == newStory.id } }
-                    _errorMessage.value = unwrapErrorMessage(err, "Could not share story")
+                val storyId = "story_${UUID.randomUUID()}"
+                val needsMediaUpload = !effectiveLocalImagePath.isNullOrBlank() ||
+                    (effectiveMediaType == "VIDEO" && !effectiveLocalVideoPath.isNullOrBlank()) ||
+                    !localAudioPath.isNullOrBlank()
+                val uploaded = if (needsMediaUpload) {
+                    supabaseBackend.prepareAndUploadPostMedia(
+                        context = context.applicationContext,
+                        mediaId = storyId,
+                        localImagePath = effectiveLocalImagePath,
+                        localExtraImagePaths = emptyList(),
+                        mediaType = effectiveMediaType,
+                        localVideoPath = effectiveLocalVideoPath,
+                        localAudioPath = localAudioPath,
+                        ownerUid = currentUserId,
+                        onProgressStatus = { status -> _mediaUploadStatus.value = status }
+                    )
+                } else {
+                    com.example.data.supabase.UploadedMediaUrls()
+                }
+                if (uploaded.failureReason != null ||
+                    (effectiveMediaType == "VIDEO" && uploaded.videoUrl == null && uploaded.videoDataFallback == null)
+                ) {
+                    _errorMessage.value = uploaded.failureReason ?: "Could not upload story clip."
                     onComplete(false)
+                    return@launch
                 }
+                _mediaUploadStatus.value = "Saving..."
+                val resolvedStoryDurationMs = if (effectiveMediaType == "VIDEO") {
+                    (uploaded.normalizedDurationMs ?: effectiveVideoDurationMs).coerceIn(0L, MediaAssets.MAX_POST_VIDEO_DURATION_MS)
+                } else {
+                    0L
+                }
+                val newStory = Story(
+                    id = storyId,
+                    userId = currentUserId,
+                    username = currentProfile.username,
+                    avatarKey = currentProfile.avatarKey,
+                    avatarUrl = currentProfile.avatarUrl,
+                    imageKey = com.example.util.StoryOverlayCodec.encodeImageKey(imageKey, cleanBgKey),
+                    imageUrl = uploaded.imageUrl,
+                    imageData = uploaded.imageDataFallback,
+                    mediaType = effectiveMediaType,
+                    videoUrl = uploaded.videoUrl,
+                    videoData = uploaded.videoDataFallback,
+                    videoDurationMs = resolvedStoryDurationMs,
+                    audioTitle = audioTitle.trim().take(80),
+                    audioUrl = uploaded.audioUrl,
+                    audioData = uploaded.audioDataFallback,
+                    caption = caption.trim().take(240),
+                    backgroundColorKey = cleanBgKey,
+                    textOverlay = textOverlay.trim().take(160),
+                    textOverlayStyle = textOverlayStyle,
+                    textOverlayPositionY = textOverlayPositionY.coerceIn(0.18f, 0.82f),
+                    createdAt = Timestamp.now(),
+                    isOwnStory = true,
+                    isSeen = false
+                )
+                pendingCreatedStories[newStory.id] = newStory to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
+                supaStories.update { current -> listOf(newStory) + current.filterNot { it.id == newStory.id } }
+                supabaseBackend.createStory(currentProfile, newStory)
+                    .onSuccess {
+                        _statusNotice.value = "24-hour story published!"
+                        onComplete(true)
+                    }
+                    .onFailure { err ->
+                        pendingCreatedStories.remove(newStory.id)
+                        supaStories.update { current -> current.filterNot { it.id == newStory.id } }
+                        _errorMessage.value = unwrapErrorMessage(err, "Could not share story")
+                        onComplete(false)
+                    }
+            } finally {
+                _mediaUploadStatus.value = null
+            }
         }
     }
 
@@ -2089,7 +2200,7 @@ class MomiViewModel(
             val uploadedAvatar = if (hasPickedAvatar) {
                 supabaseBackend.uploadImageToStorage(
                     bucket = "momi-avatars",
-                    objectPath = "avatars/${currentUserId}_${System.currentTimeMillis()}.jpg",
+                    objectPath = "${currentUserId}/avatars/${currentUserId}_${System.currentTimeMillis()}.jpg",
                     localImagePath = pickedAvatarLocalPath
                 )
             } else {
@@ -2605,57 +2716,63 @@ class MomiViewModel(
         val currentProfile = fallbackProfile()
         val cleanPaths = imagePaths.filter { it.isNotBlank() }.take(5)
         viewModelScope.launch {
-            val productId = "prod_${UUID.randomUUID()}"
-            val uploaded = supabaseBackend.prepareAndUploadPostMedia(
-                context = context.applicationContext,
-                mediaId = productId,
-                localImagePath = cleanPaths.firstOrNull(),
-                localExtraImagePaths = cleanPaths.drop(1),
-                mediaType = if (!localVideoPath.isNullOrBlank()) "VIDEO" else "IMAGE",
-                localVideoPath = localVideoPath,
-                localAudioPath = null
-            )
-            if (uploaded.failureReason != null ||
-                (!localVideoPath.isNullOrBlank() && uploaded.videoUrl == null && uploaded.videoDataFallback == null)
-            ) {
-                _errorMessage.value = uploaded.failureReason ?: "Could not prepare product video."
-                onComplete(false)
-                return@launch
-            }
-            val product = MarketProduct(
-                id = productId,
-                sellerUid = currentUserId,
-                sellerUsername = currentProfile.username,
-                storeName = merchant.storeName,
-                sellerVerified = merchant.isVerified,
-                title = title.trim().take(100),
-                description = description.trim().take(1000),
-                category = category,
-                priceUsd = priceUsd,
-                originalPriceUsd = originalPriceUsd,
-                freeShipping = freeShipping,
-                imageUrl = uploaded.imageUrl,
-                imageData = uploaded.imageDataFallback,
-                extraImageUrls = uploaded.extraImageUrls,
-                extraImageDatas = uploaded.extraImageDatasFallback,
-                videoUrl = uploaded.videoUrl,
-                videoData = uploaded.videoDataFallback,
-                videoChunksCount = uploaded.videoChunksFallback.size.toLong(),
-                videoDurationMs = videoDurationMs,
-                stockCount = stockCount.coerceAtLeast(1L),
-                isFeatured = false,
-                createdAt = Timestamp.now()
-            )
-            supabaseBackend.upsertProduct(product)
-                .onSuccess {
-                    supaProducts.update { list -> listOf(product) + list.filterNot { it.id == product.id } }
-                    _statusNotice.value = "Listing published to Momi Marketplace!"
-                    onComplete(true)
-                }
-                .onFailure {
-                    _errorMessage.value = unwrapErrorMessage(it, "Could not publish product listing")
+            try {
+                val productId = "prod_${UUID.randomUUID()}"
+                val uploaded = supabaseBackend.prepareAndUploadPostMedia(
+                    context = context.applicationContext,
+                    mediaId = productId,
+                    localImagePath = cleanPaths.firstOrNull(),
+                    localExtraImagePaths = cleanPaths.drop(1),
+                    mediaType = if (!localVideoPath.isNullOrBlank()) "VIDEO" else "IMAGE",
+                    localVideoPath = localVideoPath,
+                    localAudioPath = null,
+                    ownerUid = currentUserId,
+                    onProgressStatus = { status -> _mediaUploadStatus.value = status }
+                )
+                if (uploaded.failureReason != null ||
+                    (!localVideoPath.isNullOrBlank() && uploaded.videoUrl == null && uploaded.videoDataFallback == null)
+                ) {
+                    _errorMessage.value = uploaded.failureReason ?: "Could not prepare product video."
                     onComplete(false)
+                    return@launch
                 }
+                val product = MarketProduct(
+                    id = productId,
+                    sellerUid = currentUserId,
+                    sellerUsername = currentProfile.username,
+                    storeName = merchant.storeName,
+                    sellerVerified = merchant.isVerified,
+                    title = title.trim().take(100),
+                    description = description.trim().take(1000),
+                    category = category,
+                    priceUsd = priceUsd,
+                    originalPriceUsd = originalPriceUsd,
+                    freeShipping = freeShipping,
+                    imageUrl = uploaded.imageUrl,
+                    imageData = uploaded.imageDataFallback,
+                    extraImageUrls = uploaded.extraImageUrls,
+                    extraImageDatas = uploaded.extraImageDatasFallback,
+                    videoUrl = uploaded.videoUrl,
+                    videoData = uploaded.videoDataFallback,
+                    videoChunksCount = uploaded.videoChunksFallback.size.toLong(),
+                    videoDurationMs = uploaded.normalizedDurationMs ?: videoDurationMs,
+                    stockCount = stockCount.coerceAtLeast(1L),
+                    isFeatured = false,
+                    createdAt = Timestamp.now()
+                )
+                supabaseBackend.upsertProduct(product)
+                    .onSuccess {
+                        supaProducts.update { list -> listOf(product) + list.filterNot { it.id == product.id } }
+                        _statusNotice.value = "Listing published to Momi Marketplace!"
+                        onComplete(true)
+                    }
+                    .onFailure {
+                        _errorMessage.value = unwrapErrorMessage(it, "Could not publish product listing")
+                        onComplete(false)
+                    }
+            } finally {
+                _mediaUploadStatus.value = null
+            }
         }
     }
 
@@ -3301,7 +3418,10 @@ class MomiViewModel(
         if (_isShowcaseActionBusy.value) return
         viewModelScope.launch {
             _isShowcaseActionBusy.value = true
-            supabaseBackend.publishShowcaseBurst()
+            supabaseBackend.publishShowcaseBurst(
+                adminUid = currentUserId,
+                accounts = showcaseAccounts.value
+            )
                 .onSuccess { count ->
                     refreshFromSupabase(forceEnsureProfile = false)
                     _statusNotice.value = "Published $count starter showcase posts, comments & stories!"
@@ -3327,28 +3447,27 @@ class MomiViewModel(
                 _isShowcaseActionBusy.value = false
                 return@launch
             }
+            val starters = showcaseAccounts.value.filter { it.isAuthorized }
+                .ifEmpty { showcaseAccounts.value }
+            val adminProf = fallbackProfile()
             recentPosts.forEachIndexed { idx, p ->
                 val nextLikes = p.likesCount + 2L
                 supabaseBackend.updatePostCounts(p.id, likesCount = nextLikes)
+                val acct = starters.getOrNull(idx % starters.size.coerceAtLeast(1))
                 val persona = ShowcaseCatalog.PERSONAS[idx % ShowcaseCatalog.PERSONAS.size]
                 val comment = Comment(
                     id = "showcase_eng_${System.currentTimeMillis()}_$idx",
-                    userId = "showcase_${persona.username}",
-                    authorUsername = persona.username,
-                    authorAvatarKey = persona.avatarKey,
+                    userId = currentUserId,
+                    authorUsername = acct?.username ?: persona.username,
+                    authorAvatarKey = acct?.avatarKey ?: persona.avatarKey,
+                    authorAvatarUrl = acct?.avatarUrl,
                     text = ShowcaseCatalog.COMMENTS[idx % ShowcaseCatalog.COMMENTS.size],
                     likesCount = 1L,
                     createdAt = Timestamp.now()
                 )
                 supabaseBackend.addComment(
                     p.id,
-                    UserProfile(
-                        id = comment.userId,
-                        userId = comment.userId,
-                        username = persona.username,
-                        displayName = persona.displayName,
-                        avatarKey = persona.avatarKey
-                    ),
+                    adminProf,
                     comment,
                     p.commentsCount + 1L
                 )
@@ -3668,12 +3787,78 @@ class MomiViewModel(
         }
     }
 
+    fun createShowcaseAccount(
+        context: Context,
+        username: String,
+        displayName: String,
+        bio: String,
+        category: String,
+        location: String,
+        isVerified: Boolean = true,
+        pickedAvatarPath: String? = null,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to create starter accounts."
+            onComplete(false)
+            return
+        }
+        val cleanHandle = username.trim().lowercase().removePrefix("@").replace(Regex("[^a-z0-9._]"), "").take(40)
+        if (cleanHandle.length < 3) {
+            _errorMessage.value = "Enter a starter handle of at least 3 characters."
+            onComplete(false)
+            return
+        }
+        if (showcaseAccounts.value.any { it.username.equals(cleanHandle, ignoreCase = true) }) {
+            _errorMessage.value = "Starter @$cleanHandle already exists."
+            onComplete(false)
+            return
+        }
+        viewModelScope.launch {
+            _isShowcaseActionBusy.value = true
+            val avatarUrl = if (!pickedAvatarPath.isNullOrBlank()) {
+                supabaseBackend.uploadImageToStorage(
+                    bucket = "momi-avatars",
+                    objectPath = "showcase/${cleanHandle}_avatar_${System.currentTimeMillis()}.jpg",
+                    localImagePath = pickedAvatarPath
+                )
+            } else null
+            val account = ShowcaseAccount(
+                username = cleanHandle,
+                displayName = displayName.trim().ifBlank { cleanHandle }.take(80),
+                avatarKey = MediaAssets.avatarKeyForUid("showcase_$cleanHandle"),
+                avatarUrl = avatarUrl,
+                bio = bio.trim().take(240),
+                category = category.trim().ifBlank { "Creator" }.take(40),
+                location = location.trim().take(120),
+                isVerified = isVerified,
+                isAuthorized = true,
+                updatedByEmail = initialEmail ?: "syali6511@gmail.com"
+            )
+            supaShowcaseAccounts.update { list -> list.filterNot { it.username.equals(cleanHandle, true) } + account }
+            supabaseBackend.upsertShowcaseAccount(account)
+                .onSuccess {
+                    _statusNotice.value = "Created & authorized starter @${account.username}!"
+                    onComplete(true)
+                }
+                .onFailure { err ->
+                    supaShowcaseAccounts.update { list -> list.filterNot { it.username.equals(cleanHandle, true) } }
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not create starter account")
+                    onComplete(false)
+                }
+            _isShowcaseActionBusy.value = false
+        }
+    }
+
     fun updateShowcasePersonaProfile(
+        context: Context,
         account: ShowcaseAccount,
         displayName: String,
         bio: String,
         category: String,
         location: String,
+        isVerified: Boolean = account.isVerified,
+        pickedAvatarPath: String? = null,
         onComplete: (Boolean) -> Unit = {}
     ) {
         if (!isOwnerAccount || !isAdminModeActive.value) {
@@ -3681,43 +3866,29 @@ class MomiViewModel(
             onComplete(false)
             return
         }
-        val updated = account.copy(
-            displayName = displayName.trim().ifBlank { account.displayName }.take(80),
-            bio = bio.trim().take(240),
-            category = category.trim().ifBlank { account.category }.take(40),
-            location = location.trim().take(120),
-            updatedByEmail = initialEmail ?: "syali6511@gmail.com"
-        )
-        supaShowcaseAccounts.update { list ->
-            list.filterNot { it.username == updated.username } + updated
-        }
         viewModelScope.launch {
-            val uid = "showcase_${updated.username}"
+            _isShowcaseActionBusy.value = true
+            val uploadedAvatarUrl = if (!pickedAvatarPath.isNullOrBlank()) {
+                supabaseBackend.uploadImageToStorage(
+                    bucket = "momi-avatars",
+                    objectPath = "showcase/${account.username}_avatar_${System.currentTimeMillis()}.jpg",
+                    localImagePath = pickedAvatarPath
+                )
+            } else null
+            val updated = account.copy(
+                displayName = displayName.trim().ifBlank { account.displayName }.take(80),
+                bio = bio.trim().take(240),
+                category = category.trim().ifBlank { account.category }.take(40),
+                location = location.trim().take(120),
+                isVerified = isVerified,
+                avatarUrl = uploadedAvatarUrl ?: account.avatarUrl,
+                updatedByEmail = initialEmail ?: "syali6511@gmail.com"
+            )
+            supaShowcaseAccounts.update { list ->
+                list.filterNot { it.username.equals(updated.username, ignoreCase = true) } + updated
+            }
             supabaseBackend.upsertShowcaseAccount(updated)
-                .mapCatching {
-                    supabaseBackend.upsertProfile(
-                        UserProfile(
-                            id = uid,
-                            userId = uid,
-                            username = updated.username,
-                            displayName = updated.displayName,
-                            category = updated.category,
-                            bio = updated.bio,
-                            avatarKey = updated.avatarKey,
-                            isVerified = true
-                        )
-                    ).getOrThrow()
-                }
                 .onSuccess {
-                    supaProfiles.update { list ->
-                        list.map {
-                            if (it.userId == uid) it.copy(
-                                displayName = updated.displayName,
-                                bio = updated.bio,
-                                category = updated.category
-                            ) else it
-                        }
-                    }
                     _statusNotice.value = "Updated profile for @${updated.username}!"
                     onComplete(true)
                 }
@@ -3725,6 +3896,32 @@ class MomiViewModel(
                     _errorMessage.value = unwrapErrorMessage(err, "Could not update showcase profile")
                     onComplete(false)
                 }
+            _isShowcaseActionBusy.value = false
+        }
+    }
+
+    fun deleteShowcaseAccount(
+        username: String,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to delete showcase starters."
+            onComplete(false)
+            return
+        }
+        viewModelScope.launch {
+            _isShowcaseActionBusy.value = true
+            supabaseBackend.deleteShowcaseAccount(username)
+                .onSuccess {
+                    supaShowcaseAccounts.update { list -> list.filterNot { it.username.equals(username, ignoreCase = true) } }
+                    _statusNotice.value = "Removed starter @$username."
+                    onComplete(true)
+                }
+                .onFailure { err ->
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not delete starter account")
+                    onComplete(false)
+                }
+            _isShowcaseActionBusy.value = false
         }
     }
 
@@ -3736,6 +3933,7 @@ class MomiViewModel(
         imageKey: String,
         localImagePath: String?,
         localVideoPath: String?,
+        videoDurationMs: Long = 0L,
         isReel: Boolean,
         pageId: String? = null,
         groupId: String? = null,
@@ -3762,22 +3960,26 @@ class MomiViewModel(
                 localExtraImagePaths = emptyList(),
                 mediaType = mediaType,
                 localVideoPath = localVideoPath,
-                localAudioPath = null
+                localAudioPath = null,
+                ownerUid = currentUserId,
+                onProgressStatus = { status -> _mediaUploadStatus.value = status }
             )
+            _mediaUploadStatus.value = null
             if (uploaded.failureReason != null || (mediaType == "VIDEO" && uploaded.videoUrl == null && uploaded.videoDataFallback == null)) {
                 _isShowcaseActionBusy.value = false
                 _errorMessage.value = uploaded.failureReason ?: "Could not upload starter video."
                 onComplete(false)
                 return@launch
             }
-            val uid = "showcase_${account.username}"
+            val cleanCaption = caption.trim().ifBlank { "New moment from @${account.username} on Momi" }.take(1000)
             val newPost = Post(
                 id = postId,
-                userId = uid,
+                userId = currentUserId,
                 authorUsername = account.username,
                 authorDisplayName = account.displayName,
                 authorAvatarKey = account.avatarKey,
-                authorVerified = true,
+                authorAvatarUrl = account.avatarUrl,
+                authorVerified = account.isVerified,
                 location = account.location,
                 imageKey = imageKey.ifBlank { "img_post_coastal" },
                 imageUrl = uploaded.imageUrl,
@@ -3785,7 +3987,12 @@ class MomiViewModel(
                 mediaType = mediaType,
                 videoUrl = uploaded.videoUrl,
                 videoData = uploaded.videoDataFallback,
-                caption = caption.trim().ifBlank { "New moment from @${account.username} on Momi" }.take(1000),
+                videoDurationMs = if (mediaType == "VIDEO") {
+                    (uploaded.normalizedDurationMs ?: videoDurationMs).coerceIn(0L, MediaAssets.MAX_POST_VIDEO_DURATION_MS)
+                } else 0L,
+                hashtags = MediaAssets.extractHashtags(cleanCaption),
+                taggedUsernames = MediaAssets.extractMentions(cleanCaption),
+                caption = cleanCaption,
                 likesCount = 12L,
                 viewsCount = 85L,
                 commentsCount = 0L,
@@ -3810,6 +4017,196 @@ class MomiViewModel(
                     onComplete(false)
                 }
             _isShowcaseActionBusy.value = false
+        }
+    }
+
+    fun publishCustomShowcaseStory(
+        context: Context,
+        account: ShowcaseAccount,
+        caption: String,
+        mediaType: String = "IMAGE",
+        imageKey: String = "img_post_coastal",
+        localImagePath: String? = null,
+        localVideoPath: String? = null,
+        videoDurationMs: Long = 0L,
+        backgroundColorKey: String = "",
+        textOverlay: String = "",
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to publish starter stories."
+            onComplete(false)
+            return
+        }
+        if (!account.isAuthorized) {
+            _errorMessage.value = "Authorize @${account.username} first before posting."
+            onComplete(false)
+            return
+        }
+        val cleanBgKey = backgroundColorKey.trim().lowercase()
+        val isColorCanvas = cleanBgKey.isNotBlank() && localImagePath.isNullOrBlank() && localVideoPath.isNullOrBlank()
+        val effectiveMediaType = if (isColorCanvas) "IMAGE" else mediaType
+        viewModelScope.launch {
+            _isShowcaseActionBusy.value = true
+            val storyId = "showcase_story_${UUID.randomUUID()}"
+            val needsUpload = !localImagePath.isNullOrBlank() || (effectiveMediaType == "VIDEO" && !localVideoPath.isNullOrBlank())
+            val uploaded = if (needsUpload) {
+                supabaseBackend.prepareAndUploadPostMedia(
+                    context = context.applicationContext,
+                    mediaId = storyId,
+                    localImagePath = localImagePath,
+                    localExtraImagePaths = emptyList(),
+                    mediaType = effectiveMediaType,
+                    localVideoPath = localVideoPath,
+                    localAudioPath = null,
+                    ownerUid = currentUserId,
+                    onProgressStatus = { status -> _mediaUploadStatus.value = status }
+                )
+            } else {
+                com.example.data.supabase.UploadedMediaUrls()
+            }
+            _mediaUploadStatus.value = null
+            if (uploaded.failureReason != null || (effectiveMediaType == "VIDEO" && uploaded.videoUrl == null && uploaded.videoDataFallback == null)) {
+                _isShowcaseActionBusy.value = false
+                _errorMessage.value = uploaded.failureReason ?: "Could not upload starter story media."
+                onComplete(false)
+                return@launch
+            }
+            val newStory = Story(
+                id = storyId,
+                userId = currentUserId,
+                username = account.username,
+                avatarKey = account.avatarKey,
+                avatarUrl = account.avatarUrl,
+                imageKey = com.example.util.StoryOverlayCodec.encodeImageKey(imageKey.ifBlank { "img_post_coastal" }, cleanBgKey),
+                imageUrl = uploaded.imageUrl,
+                imageData = uploaded.imageDataFallback,
+                mediaType = effectiveMediaType,
+                videoUrl = uploaded.videoUrl,
+                videoData = uploaded.videoDataFallback,
+                videoDurationMs = if (effectiveMediaType == "VIDEO") (uploaded.normalizedDurationMs ?: videoDurationMs) else 0L,
+                caption = caption.trim().take(240),
+                backgroundColorKey = cleanBgKey,
+                textOverlay = textOverlay.trim().take(160),
+                textOverlayStyle = "D",
+                textOverlayPositionY = 0.5f,
+                createdAt = Timestamp.now(),
+                isOwnStory = false,
+                isSeen = false
+            )
+            pendingCreatedStories[storyId] = newStory to (System.currentTimeMillis() + MUTATION_PROTECTION_MS)
+            supaStories.update { listOf(newStory) + it }
+            supabaseBackend.publishCustomShowcaseStory(account, newStory)
+                .onSuccess {
+                    _statusNotice.value = "Published 24h story as @${account.username}!"
+                    onComplete(true)
+                }
+                .onFailure { err ->
+                    pendingCreatedStories.remove(storyId)
+                    supaStories.update { list -> list.filterNot { it.id == storyId } }
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not publish starter story")
+                    onComplete(false)
+                }
+            _isShowcaseActionBusy.value = false
+        }
+    }
+
+    fun updateShowcasePostCaption(
+        postId: String,
+        newCaption: String,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to edit starter posts."
+            onComplete(false)
+            return
+        }
+        val cleanCaption = newCaption.trim().take(1000)
+        val hashtags = MediaAssets.extractHashtags(cleanCaption)
+        val mentions = MediaAssets.extractMentions(cleanCaption)
+        viewModelScope.launch {
+            _isShowcaseActionBusy.value = true
+            supabaseBackend.updatePostCaption(postId, cleanCaption, hashtags, mentions)
+                .onSuccess {
+                    supaPosts.update { list ->
+                        list.map {
+                            if (it.id == postId) it.copy(caption = cleanCaption, hashtags = hashtags, taggedUsernames = mentions)
+                            else it
+                        }
+                    }
+                    _statusNotice.value = "Updated starter post caption!"
+                    onComplete(true)
+                }
+                .onFailure { err ->
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not update post caption")
+                    onComplete(false)
+                }
+            _isShowcaseActionBusy.value = false
+        }
+    }
+
+    fun deleteShowcaseStory(
+        storyId: String,
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            _errorMessage.value = "Switch to Admin View to delete starter stories."
+            onComplete(false)
+            return
+        }
+        viewModelScope.launch {
+            _isShowcaseActionBusy.value = true
+            supabaseBackend.deleteStory(storyId)
+                .onSuccess {
+                    pendingCreatedStories.remove(storyId)
+                    supaStories.update { list -> list.filterNot { it.id == storyId } }
+                    _statusNotice.value = "Removed starter story."
+                    onComplete(true)
+                }
+                .onFailure { err ->
+                    _errorMessage.value = unwrapErrorMessage(err, "Could not remove starter story")
+                    onComplete(false)
+                }
+            _isShowcaseActionBusy.value = false
+        }
+    }
+
+    fun purgeNonWhitelistAccounts(
+        onComplete: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        if (!isOwnerAccount || !isAdminModeActive.value) {
+            val msg = "Switch to Admin View to run account & post cleanup."
+            _errorMessage.value = msg
+            onComplete(false, msg)
+            return
+        }
+        if (_isSupabaseBusy.value) return
+        viewModelScope.launch {
+            _isSupabaseBusy.value = true
+            supabaseBackend.purgeNonWhitelistAccountsAndData(currentUserId)
+                .onSuccess { summary ->
+                    supaProfiles.update { list ->
+                        list.filter { MomiSupabaseClient.isWhitelistedAccountEmail(it.email) || it.userId == currentUserId }
+                    }
+                    cachedProfiles.value = supaProfiles.value
+                    val keptUids = supaProfiles.value.map { it.userId }.toSet()
+                    supaPosts.update { list ->
+                        list.filter { !it.id.startsWith("seed_post_") && (it.id.startsWith("showcase_") || it.userId in keptUids) }
+                    }
+                    supaStories.update { list ->
+                        list.filter { !it.id.startsWith("seed_story_") && (it.id.startsWith("showcase_") || it.userId in keptUids) }
+                    }
+                    refreshFromSupabase(forceEnsureProfile = false)
+                    val msg = "Cleanup complete: removed ${summary.removedProfilesCount} non-keep accounts (kept ${summary.keptProfilesCount} whitelisted accounts)."
+                    _statusNotice.value = msg
+                    onComplete(true, msg)
+                }
+                .onFailure { err ->
+                    val msg = unwrapErrorMessage(err, "Could not purge non-whitelist accounts")
+                    _errorMessage.value = msg
+                    onComplete(false, msg)
+                }
+            _isSupabaseBusy.value = false
         }
     }
 
@@ -3853,23 +4250,17 @@ class MomiViewModel(
             if (cleanComment.isNotBlank()) {
                 val cmt = Comment(
                     id = "showcase_cmt_${UUID.randomUUID()}",
-                    userId = "showcase_${account.username}",
+                    userId = currentUserId,
                     authorUsername = account.username,
                     authorAvatarKey = account.avatarKey,
+                    authorAvatarUrl = account.avatarUrl,
                     text = cleanComment,
                     likesCount = 1L,
                     createdAt = Timestamp.now()
                 )
                 supabaseBackend.addComment(
                     post.id,
-                    UserProfile(
-                        id = cmt.userId,
-                        userId = cmt.userId,
-                        username = account.username,
-                        displayName = account.displayName,
-                        avatarKey = account.avatarKey,
-                        isVerified = true
-                    ),
+                    fallbackProfile(),
                     cmt,
                     nextCommentsCount
                 )
@@ -3885,10 +4276,15 @@ class MomiViewModel(
         }
     }
 
-    private var isSupabaseSyncInFlight = false
+    @Volatile private var isSupabaseSyncInFlight = false
+    @Volatile private var pendingResyncRequested = false
 
     private suspend fun refreshFromSupabase(forceEnsureProfile: Boolean = false) {
-        if (!supabaseClient.isConfigured() || isSupabaseSyncInFlight) return
+        if (!supabaseClient.isConfigured()) return
+        if (isSupabaseSyncInFlight) {
+            pendingResyncRequested = true
+            return
+        }
         isSupabaseSyncInFlight = true
         try {
             if (forceEnsureProfile) {
@@ -3904,6 +4300,7 @@ class MomiViewModel(
                 )
             }
             supabaseClient.fetchFeedBundle(currentUserId).onSuccess { bundle ->
+                val failed = bundle.failedTables
                 val nowMs = System.currentTimeMillis()
                 pendingLikes.entries.removeIf { it.value.second <= nowMs }
                 pendingBookmarks.entries.removeIf { it.value.second <= nowMs }
@@ -3938,7 +4335,13 @@ class MomiViewModel(
                         )
                         cachedProfile.value = hydratedOwn
                         cachedAppContext?.let { ctx ->
-                            AppearancePrefs.saveCachedProfileJson(ctx, currentUserId, serializeProfileToJson(hydratedOwn))
+                            withContext(Dispatchers.IO) {
+                                val profJson = serializeProfileToJson(hydratedOwn)
+                                if (profJson != lastSavedProfileJson) {
+                                    AppearancePrefs.saveCachedProfileJson(ctx, currentUserId, profJson)
+                                    lastSavedProfileJson = profJson
+                                }
+                            }
                         }
                     }
                 }
@@ -3967,74 +4370,101 @@ class MomiViewModel(
                 cachedRawPosts.value = mergedPosts
                 cachedAppContext?.let { ctx ->
                     if (mergedPosts.isNotEmpty()) {
-                        AppearancePrefs.saveCachedFeedPostsJson(ctx, serializePostsToJson(mergedPosts.take(25)))
-                    }
-                }
-
-                val cutoffStoryMs = nowMs - MomiSupabaseSchema.STORY_TTL_MS
-                val validServerStories = bundle.stories.filter { story ->
-                    val createdMs = story.createdAt?.toDate()?.time
-                    createdMs == null || createdMs >= cutoffStoryMs
-                }
-                val serverStoryIds = validServerStories.map { it.id }.toSet()
-                val validStories = buildList {
-                    pendingCreatedStories.values.forEach { (pendingStory, _) ->
-                        if (pendingStory.id !in serverStoryIds) {
-                            add(pendingStory)
+                        val top25 = mergedPosts.take(25)
+                        val sig = top25.joinToString("|") {
+                            "${it.id}:${it.likesCount}:${it.commentsCount}:${it.viewsCount}:${it.caption.hashCode()}"
+                        }
+                        if (sig != lastSavedFeedPostsSig) {
+                            withContext(Dispatchers.IO) {
+                                AppearancePrefs.saveCachedFeedPostsJson(ctx, serializePostsToJson(top25))
+                            }
+                            lastSavedFeedPostsSig = sig
                         }
                     }
-                    addAll(validServerStories)
                 }
-                supaStories.value = validStories
-                cachedStories.value = validStories
-                supaProducts.value = bundle.products
-                cachedProducts.value = bundle.products
-                supaMerchants.value = bundle.merchants
-                cachedMerchants.value = bundle.merchants
-                supaLiveStreams.value = bundle.liveStreams
-                cachedLiveStreams.value = bundle.liveStreams
 
-                val mergedFollows = bundle.follows.filterNot { edge ->
-                    pendingFollowStates.containsKey(edge.id) && pendingFollowStates[edge.id]?.first == null
-                }.toMutableList()
-                pendingFollowStates.values.forEach { (edge, _) ->
-                    if (edge != null && mergedFollows.none { it.id == edge.id }) {
-                        mergedFollows.add(edge)
+                if ("stories" !in failed) {
+                    val cutoffStoryMs = nowMs - MomiSupabaseSchema.STORY_TTL_MS
+                    val validServerStories = bundle.stories.filter { story ->
+                        val createdMs = story.createdAt?.toDate()?.time
+                        createdMs == null || createdMs >= cutoffStoryMs
                     }
+                    val serverStoryIds = validServerStories.map { it.id }.toSet()
+                    val validStories = buildList {
+                        pendingCreatedStories.values.forEach { (pendingStory, _) ->
+                            if (pendingStory.id !in serverStoryIds) {
+                                add(pendingStory)
+                            }
+                        }
+                        addAll(validServerStories)
+                    }
+                    supaStories.value = validStories
+                    cachedStories.value = validStories
                 }
-                supaFollows.value = mergedFollows
-                cachedFollows.value = mergedFollows
+                if ("market_products" !in failed) {
+                    supaProducts.value = bundle.products
+                    cachedProducts.value = bundle.products
+                }
+                if ("merchants" !in failed) {
+                    supaMerchants.value = bundle.merchants
+                    cachedMerchants.value = bundle.merchants
+                }
+                if ("live_streams" !in failed) {
+                    supaLiveStreams.value = bundle.liveStreams
+                    cachedLiveStreams.value = bundle.liveStreams
+                }
 
-                val nextLikes = bundle.likedPostIds.toMutableSet()
-                pendingLikes.forEach { (postId, pair) ->
-                    if (pair.first) nextLikes.add(postId) else nextLikes.remove(postId)
+                if ("follows" !in failed) {
+                    val mergedFollows = bundle.follows.filterNot { edge ->
+                        pendingFollowStates.containsKey(edge.id) && pendingFollowStates[edge.id]?.first == null
+                    }.toMutableList()
+                    pendingFollowStates.values.forEach { (edge, _) ->
+                        if (edge != null && mergedFollows.none { it.id == edge.id }) {
+                            mergedFollows.add(edge)
+                        }
+                    }
+                    supaFollows.value = mergedFollows
+                    cachedFollows.value = mergedFollows
                 }
-                supaLikedPostIds.value = nextLikes
-                supaPostLikersByPostId.value = bundle.postLikersByPostId
-                supaPostViewersByPostId.value = bundle.postViewersByPostId
 
-                val nextBookmarks = bundle.bookmarkedPostIds.toMutableSet()
-                pendingBookmarks.forEach { (postId, pair) ->
-                    if (pair.first) nextBookmarks.add(postId) else nextBookmarks.remove(postId)
+                if ("public_engagements" !in failed && "user_interactions" !in failed) {
+                    val nextLikes = bundle.likedPostIds.toMutableSet()
+                    pendingLikes.forEach { (postId, pair) ->
+                        if (pair.first) nextLikes.add(postId) else nextLikes.remove(postId)
+                    }
+                    supaLikedPostIds.value = nextLikes
+                    supaPostLikersByPostId.value = bundle.postLikersByPostId
+                    supaPostViewersByPostId.value = bundle.postViewersByPostId
                 }
-                supaBookmarkedPostIds.value = nextBookmarks
 
-                supaSeenStoryIds.value = bundle.seenStoryIds
-                supaLikedCommentIds.value = bundle.likedCommentIds
-                supaNotifications.value = bundle.notifications
-                cachedNotifications.value = bundle.notifications
-                supaThreads.value = bundle.threads
-                cachedThreads.value = bundle.threads
-                supaOrders.value = bundle.orders
-                cachedOrders.value = bundle.orders
-                supaPages.value = bundle.pages
-                supaPageFollowedIds.value = bundle.pageFollowedIds
-                supaGroups.value = bundle.groups
-                supaGroupJoinedIds.value = bundle.groupJoinedIds
-                if (bundle.showcaseAccounts.isNotEmpty()) {
-                    supaShowcaseAccounts.value = bundle.showcaseAccounts
+                if ("user_interactions" !in failed) {
+                    val nextBookmarks = bundle.bookmarkedPostIds.toMutableSet()
+                    pendingBookmarks.forEach { (postId, pair) ->
+                        if (pair.first) nextBookmarks.add(postId) else nextBookmarks.remove(postId)
+                    }
+                    supaBookmarkedPostIds.value = nextBookmarks
+                    supaSeenStoryIds.value = bundle.seenStoryIds
+                    supaLikedCommentIds.value = bundle.likedCommentIds
                 }
-                if (bundle.reports.isNotEmpty() || isOwnerAccount) {
+
+                if ("notifications" !in failed) {
+                    supaNotifications.value = bundle.notifications
+                    cachedNotifications.value = bundle.notifications
+                }
+                if ("threads" !in failed) {
+                    supaThreads.value = bundle.threads
+                    cachedThreads.value = bundle.threads
+                }
+                if ("market_orders" !in failed) {
+                    supaOrders.value = bundle.orders
+                    cachedOrders.value = bundle.orders
+                }
+                if ("pages" !in failed) supaPages.value = bundle.pages
+                if ("page_follows" !in failed) supaPageFollowedIds.value = bundle.pageFollowedIds
+                if ("groups" !in failed) supaGroups.value = bundle.groups
+                if ("group_members" !in failed) supaGroupJoinedIds.value = bundle.groupJoinedIds
+                if ("showcase_accounts" !in failed) supaShowcaseAccounts.value = bundle.showcaseAccounts
+                if ("content_reports" !in failed && (bundle.reports.isNotEmpty() || isOwnerAccount)) {
                     supaContentReports.value = bundle.reports
                     cachedContentReports.value = bundle.reports
                 }
@@ -4069,6 +4499,10 @@ class MomiViewModel(
             }
         } finally {
             isSupabaseSyncInFlight = false
+            if (pendingResyncRequested) {
+                pendingResyncRequested = false
+                refreshFromSupabase(forceEnsureProfile = false)
+            }
         }
     }
 
@@ -4257,6 +4691,13 @@ class MomiViewModel(
         val liked: Set<String>,
         val bookmarked: Set<String>,
         val following: Set<String>
+    )
+
+    private data class OptimisticPostInputs(
+        val likeOverrides: Map<String, Boolean>,
+        val bookmarkOverrides: Map<String, Boolean>,
+        val pendingComments: Map<String, List<Comment>>,
+        val showcaseAccounts: List<ShowcaseAccount>
     )
 
     private companion object {

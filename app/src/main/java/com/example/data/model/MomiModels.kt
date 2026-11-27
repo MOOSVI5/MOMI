@@ -766,9 +766,11 @@ data class ShowcaseAccount(
     val username: String = "",
     val displayName: String = "",
     val avatarKey: String = "avatar_elena",
+    val avatarUrl: String? = null,
     val bio: String = "",
     val category: String = "Creator",
     val location: String = "",
+    val isVerified: Boolean = true,
     val isAuthorized: Boolean = false,
     val updatedByEmail: String = ""
 )

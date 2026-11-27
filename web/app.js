@@ -51,9 +51,13 @@ import {
   checkSupabaseHealth,
   clearSupabaseAuthSession,
   createSupabaseRealtimeClient,
+  deleteShowcaseAccountFromSupabase,
+  deleteStoryFromSupabase,
   deleteSupabaseRows,
+  ensureFreshWebAccessToken,
   fetchSupabaseFeed,
   fetchUserSupabaseWorkspace,
+  getLastStorageUploadError,
   isSupabaseClientReady,
   loadSupabaseAuthSession,
   mapMomiSnapshotToSupabaseBundle,
@@ -76,6 +80,7 @@ import {
   mergeSupabaseProfileIntoTarget,
   parseSupabaseOAuthCallback,
   patchSupabaseRows,
+  purgeNonWhitelistSupabaseAccounts,
   saveSupabaseAuthSession,
   selectSupabaseTable,
   SUPABASE_SCHEMA_TABLES,
@@ -89,6 +94,7 @@ import {
   supabaseVerifyEmailOtp,
   supabaseVerifyWhatsAppOtp,
   syncBundleToSupabase,
+  updatePostCaptionInSupabase,
   uploadWebFileToStorage,
   upsertSupabaseTable
 } from './supabase-client.js';
@@ -460,6 +466,65 @@ function makeClientId(prefix) {
   return `${prefix}_${Date.now()}_${rand}`;
 }
 
+const STORY_BG_OPTIONS = [
+  { key: 'sunset', label: 'Sunset', css: 'linear-gradient(155deg, #ff5e62, #ff9966)' },
+  { key: 'maroon', label: 'Momi Rose', css: 'linear-gradient(155deg, #8b1d3b, #2d0a18)' },
+  { key: 'midnight', label: 'Midnight', css: 'linear-gradient(155deg, #0f172a, #1e3a8a)' },
+  { key: 'ocean', label: 'Ocean', css: 'linear-gradient(155deg, #0284c7, #0d9488)' },
+  { key: 'emerald', label: 'Emerald', css: 'linear-gradient(155deg, #065f46, #10b981)' },
+  { key: 'violet', label: 'Violet', css: 'linear-gradient(155deg, #4c1d95, #ec4899)' },
+  { key: 'amber', label: 'Amber', css: 'linear-gradient(155deg, #b45309, #f59e0b)' },
+  { key: 'noir', label: 'Noir', css: 'linear-gradient(155deg, #111827, #374151)' }
+];
+
+function decodeStoryBgKey(rawImageKey = '') {
+  const clean = String(rawImageKey || '').trim();
+  return clean.startsWith('bg:') ? clean.slice(3).trim().toLowerCase() : '';
+}
+
+function encodeStoryBgKey(imageKey = 'img_post_coastal', bgKey = '') {
+  const cleanBg = String(bgKey || '').trim().toLowerCase();
+  return cleanBg ? `bg:${cleanBg}`.slice(0, 64) : String(imageKey || 'img_post_coastal').slice(0, 64);
+}
+
+function encodeStoryOverlayCaption(caption = '', textOverlay = '', styleCode = 'D', posY = 0.5) {
+  const cleanCaption = String(caption || '').trim();
+  const cleanOverlay = String(textOverlay || '').trim();
+  if (!cleanOverlay) return cleanCaption.slice(0, 300);
+  const yPct = Math.max(18, Math.min(82, Math.round(Number(posY || 0.5) * 100)));
+  const escaped = cleanOverlay.replace(/%/g, '%25').replace(/\]/g, '%5D').replace(/\r?\n/g, '%0A');
+  const header = `[[ov:${styleCode || 'D'}:${yPct}:`;
+  const maxBody = Math.max(0, 300 - header.length - 2);
+  const prefix = `${header}${escaped.slice(0, maxBody)}]]`;
+  const remain = Math.max(0, 300 - prefix.length);
+  return remain > 0 && cleanCaption ? `${prefix}${cleanCaption.slice(0, remain)}` : prefix;
+}
+
+function decodeStoryOverlayCaption(rawCaption = '') {
+  const raw = String(rawCaption || '');
+  if (!raw.startsWith('[[ov:')) return { textOverlay: '', styleCode: 'D', positionY: 0.5, caption: raw };
+  const endIdx = raw.indexOf(']]', 5);
+  if (endIdx < 0) return { textOverlay: '', styleCode: 'D', positionY: 0.5, caption: raw };
+  const parts = raw.slice(5, endIdx).split(':');
+  if (parts.length < 3) return { textOverlay: '', styleCode: 'D', positionY: 0.5, caption: raw };
+  const textOverlay = parts.slice(2).join(':')
+    .replace(/%0A/g, '\n')
+    .replace(/%5D/g, ']')
+    .replace(/%25/g, '%');
+  return {
+    textOverlay,
+    styleCode: parts[0] || 'D',
+    positionY: Math.max(18, Math.min(82, Number(parts[1]) || 50)) / 100,
+    caption: raw.slice(endIdx + 2)
+  };
+}
+
+function showcaseAccountForUsername(username = '') {
+  const clean = String(username || '').trim().toLowerCase();
+  if (!clean) return null;
+  return state.showcaseAccounts.find((a) => (a.username || '').toLowerCase() === clean) || null;
+}
+
 function creatorLookup(uid) {
   if (!uid) return null;
   if (state.profile?.userId === uid) return state.profile;
@@ -468,9 +533,12 @@ function creatorLookup(uid) {
 
 function avatarHtml(profileLike, size = 38) {
   const username = profileLike?.username || profileLike?.authorUsername || 'momi';
-  const matchedCreator = profileLike?.userId ? creatorLookup(profileLike.userId) : null;
-  const avatarUrl = profileLike?.avatarUrl || matchedCreator?.avatarUrl || null;
-  const avatarData = profileLike?.avatarData || matchedCreator?.avatarData || null;
+  const uidStr = String(profileLike?.userId || '');
+  const isShowcase = Boolean(profileLike?.isShowcase) || uidStr.startsWith('showcase_');
+  const starter = showcaseAccountForUsername(username);
+  const matchedCreator = !isShowcase && uidStr ? creatorLookup(uidStr) : null;
+  const avatarUrl = profileLike?.avatarUrl || (isShowcase ? starter?.avatarUrl : matchedCreator?.avatarUrl) || null;
+  const avatarData = profileLike?.avatarData || (!isShowcase ? matchedCreator?.avatarData : null) || null;
   if (avatarUrl || avatarData) {
     return `<img class="avatar" src="${resolveImageSrc({ avatarUrl, imageData: avatarData })}" alt="@${escapeHtml(username)}" style="width:${size}px;height:${size}px;" />`;
   }
@@ -1216,13 +1284,24 @@ function shouldDeferDomRefresh() {
   }
   const playingMedia = mainStage?.querySelectorAll('video, audio') || [];
   for (const el of playingMedia) {
-    if (!el.paused && !el.ended) return true;
+    if ((!el.paused || el.currentTime > 0) && !el.ended) return true;
   }
   return false;
 }
 
+let isWebSyncInFlight = false;
+let pendingWebSyncOptions = null;
+
 async function refreshAllFromSupabase({ showErrors = false, forceRender = false } = {}) {
   if (!state.user) return;
+  if (isWebSyncInFlight) {
+    pendingWebSyncOptions = {
+      showErrors: Boolean(pendingWebSyncOptions?.showErrors || showErrors),
+      forceRender: Boolean(pendingWebSyncOptions?.forceRender || forceRender)
+    };
+    return;
+  }
+  isWebSyncInFlight = true;
   try {
     pruneExpiredPendingMutations();
     const [feed, workspace] = await Promise.all([
@@ -1241,8 +1320,9 @@ async function refreshAllFromSupabase({ showErrors = false, forceRender = false 
 
     state.syncError = null;
     const pm = state.pendingMutations;
+    const feedFailed = new Set(Array.isArray(feed.failedTables) ? feed.failedTables : []);
 
-    if (Array.isArray(feed.profiles)) {
+    if (!feedFailed.has('profiles') && Array.isArray(feed.profiles)) {
       const mappedCreators = feed.profiles.map(mapSupabaseProfileToWeb);
       if (pm.profile?.data) {
         const overrideIdx = mappedCreators.findIndex((c) => c.userId === pm.profile.data.userId);
@@ -1261,7 +1341,7 @@ async function refreshAllFromSupabase({ showErrors = false, forceRender = false 
       }
     }
 
-    if (Array.isArray(feed.posts)) {
+    if (!feedFailed.has('posts') && Array.isArray(feed.posts)) {
       const serverPosts = feed.posts
         .map(mapSupabasePostToWeb)
         .filter((p) => !pm.deletedPostIds.has(p.id))
@@ -1283,10 +1363,10 @@ async function refreshAllFromSupabase({ showErrors = false, forceRender = false 
       }
       state.posts = sortFeedWithBoostPriority([...pendingCreated, ...serverPosts]);
     }
-    if (Array.isArray(feed.stories)) {
+    if (!feedFailed.has('stories') && Array.isArray(feed.stories)) {
       state.stories = filterActiveStories24h(feed.stories.map(mapSupabaseStoryToWeb));
     }
-    if (Array.isArray(feed.postInteractions)) {
+    if (!feedFailed.has('user_interactions') && Array.isArray(feed.postInteractions)) {
       const likersMap = new Map();
       const viewersMap = new Map();
       feed.postInteractions.forEach((row) => {
@@ -1309,104 +1389,146 @@ async function refreshAllFromSupabase({ showErrors = false, forceRender = false 
       state.postLikersByPostId = likersMap;
       state.postViewersByPostId = viewersMap;
     }
-    if (Array.isArray(feed.products)) {
+    if (!feedFailed.has('market_products') && Array.isArray(feed.products)) {
       state.products = feed.products.map(mapSupabaseProductToWeb);
     }
-    if (Array.isArray(feed.merchants)) {
+    if (!feedFailed.has('merchants') && Array.isArray(feed.merchants)) {
       state.merchants = feed.merchants.map(mapSupabaseMerchantToWeb);
     }
-    if (Array.isArray(feed.pages)) {
+    if (!feedFailed.has('pages') && Array.isArray(feed.pages)) {
       state.pages = feed.pages.map(mapSupabasePageToWeb);
     }
-    if (Array.isArray(feed.groups)) {
+    if (!feedFailed.has('groups') && Array.isArray(feed.groups)) {
       state.groups = feed.groups.map(mapSupabaseGroupToWeb);
     }
-    if (Array.isArray(feed.showcaseAccounts)) {
+    if (!feedFailed.has('showcase_accounts') && Array.isArray(feed.showcaseAccounts)) {
       const mappedAccounts = feed.showcaseAccounts.map(mapSupabaseShowcaseAccountToWeb);
-      const mapByName = new Map(mappedAccounts.map((a) => [a.username, a]));
-      state.showcaseAccounts = SHOWCASE_PERSONAS.map((p) => {
-        const stored = mapByName.get(p.username);
+      const mapByName = new Map(mappedAccounts.map((a) => [a.username.toLowerCase(), a]));
+      const personaSet = new Set(SHOWCASE_PERSONAS.map((p) => p.username.toLowerCase()));
+      const mergedDefaults = SHOWCASE_PERSONAS.map((p) => {
+        const stored = mapByName.get(p.username.toLowerCase());
         return stored || {
           username: p.username,
           displayName: p.displayName,
           avatarKey: p.avatarKey,
+          avatarUrl: null,
+          isVerified: true,
           bio: `${p.category} creator in ${p.location}`,
           category: p.category,
           location: p.location,
           isAuthorized: false
         };
       });
+      const customStarters = mappedAccounts.filter((a) => a.username && !personaSet.has(a.username.toLowerCase()));
+      state.showcaseAccounts = [...mergedDefaults, ...customStarters];
     }
-    if (Array.isArray(feed.liveStreams)) {
+    if (state.showcaseAccounts.length > 0) {
+      const starterMap = new Map(state.showcaseAccounts.map((a) => [a.username.toLowerCase(), a]));
+      state.posts = state.posts.map((p) => {
+        if (!String(p.id || '').startsWith('showcase_')) return p;
+        const st = starterMap.get((p.authorUsername || '').toLowerCase());
+        if (!st) return p;
+        return {
+          ...p,
+          authorDisplayName: st.displayName || p.authorDisplayName,
+          authorVerified: st.isVerified !== false,
+          authorAvatarUrl: st.avatarUrl || p.authorAvatarUrl || null
+        };
+      });
+      state.stories = state.stories.map((s) => {
+        if (!String(s.id || '').startsWith('showcase_')) return s;
+        const st = starterMap.get((s.username || '').toLowerCase());
+        if (!st) return s;
+        return { ...s, avatarUrl: st.avatarUrl || s.avatarUrl || null };
+      });
+    }
+    if (!feedFailed.has('live_streams') && Array.isArray(feed.liveStreams)) {
       const cutoff = Date.now() - 15 * 60 * 1000;
       state.liveStreams = feed.liveStreams
         .map(mapSupabaseLiveStreamToWeb)
         .filter((s) => s.isLive && s.updatedAtMs >= cutoff);
     }
-    if (feed.appConfig) {
+    if (!feedFailed.has('app_config') && feed.appConfig) {
       state.monetizationConfig = mapSupabaseConfigToWeb(feed.appConfig);
     }
 
     if (workspace) {
-      const nextFollows = new Set(workspace.follows.map((f) => f.target_uid));
-      for (const [uid, entry] of pm.follows.entries()) {
-        if (entry.value) nextFollows.add(uid);
-        else nextFollows.delete(uid);
-      }
-      state.followingUids = nextFollows;
-
-      const likes = new Set();
-      const saves = new Set();
-      const seen = new Set();
-      workspace.interactions.forEach((row) => {
-        if (row.target_type === 'LIKED_POST') likes.add(row.target_id);
-        else if (row.target_type === 'BOOKMARK') saves.add(row.target_id);
-        else if (row.target_type === 'SEEN_STORY') seen.add(row.target_id);
-      });
-      for (const [pid, entry] of pm.likes.entries()) {
-        if (entry.value) likes.add(pid);
-        else likes.delete(pid);
-      }
-      for (const [pid, entry] of pm.bookmarks.entries()) {
-        if (entry.value) saves.add(pid);
-        else saves.delete(pid);
-      }
-      state.likedIds = likes;
-      state.bookmarkIds = saves;
-      state.seenStoryIds = seen;
-      state.pageFollowedIds = new Set((workspace.pageFollows || []).map((pf) => pf.page_id));
-      state.groupJoinedIds = new Set((workspace.groupMembers || []).map((gm) => gm.group_id));
-
-      const notifs = workspace.notifications.map(mapSupabaseNotificationToWeb);
-      if (state.initialSnapshotsLoaded.notifs) {
-        const fresh = notifs.find((n) => n.isUnread && !state.seenNotifIds.has(n.id));
-        if (fresh) triggerAlert(`${fresh.actorUsername}: ${fresh.message}`);
-      }
-      notifs.forEach((n) => state.seenNotifIds.add(n.id));
-      state.initialSnapshotsLoaded.notifs = true;
-      state.notifications = notifs;
-
-      const threads = workspace.threads.map(mapSupabaseThreadToWeb);
-      if (state.initialSnapshotsLoaded.threads) {
-        const unread = threads.find((t) =>
-          t.unreadUid === state.user.uid &&
-          (t.unreadCount || 0) > 0 &&
-          !state.seenMsgKeys.has(`${t.id}:${t.lastMessage}:${t.timeLabel}`)
-        );
-        if (unread) {
-          const otherName = unread.userAId === state.user.uid ? unread.userBUsername : unread.userAUsername;
-          triggerAlert(`New message from @${otherName}: ${unread.lastMessage}`);
+      const wsFailed = new Set(Array.isArray(workspace.failedTables) ? workspace.failedTables : []);
+      if (!wsFailed.has('follows')) {
+        const nextFollows = new Set(workspace.follows.map((f) => f.target_uid));
+        for (const [uid, entry] of pm.follows.entries()) {
+          if (entry.value) nextFollows.add(uid);
+          else nextFollows.delete(uid);
         }
+        state.followingUids = nextFollows;
       }
-      threads.forEach((t) => state.seenMsgKeys.add(`${t.id}:${t.lastMessage}:${t.timeLabel}`));
-      state.initialSnapshotsLoaded.threads = true;
-      state.threads = threads;
 
-      if (workspace.wallet) {
+      if (!wsFailed.has('user_interactions')) {
+        const likes = new Set();
+        const saves = new Set();
+        const seen = new Set();
+        workspace.interactions.forEach((row) => {
+          if (row.target_type === 'LIKED_POST') likes.add(row.target_id);
+          else if (row.target_type === 'BOOKMARK') saves.add(row.target_id);
+          else if (row.target_type === 'SEEN_STORY') seen.add(row.target_id);
+        });
+        for (const [pid, entry] of pm.likes.entries()) {
+          if (entry.value) likes.add(pid);
+          else likes.delete(pid);
+        }
+        for (const [pid, entry] of pm.bookmarks.entries()) {
+          if (entry.value) saves.add(pid);
+          else saves.delete(pid);
+        }
+        state.likedIds = likes;
+        state.bookmarkIds = saves;
+        state.seenStoryIds = seen;
+      }
+      if (!wsFailed.has('page_follows')) {
+        state.pageFollowedIds = new Set((workspace.pageFollows || []).map((pf) => pf.page_id));
+      }
+      if (!wsFailed.has('group_members')) {
+        state.groupJoinedIds = new Set((workspace.groupMembers || []).map((gm) => gm.group_id));
+      }
+
+      if (!wsFailed.has('notifications')) {
+        const notifs = workspace.notifications.map(mapSupabaseNotificationToWeb);
+        if (state.initialSnapshotsLoaded.notifs) {
+          const fresh = notifs.find((n) => n.isUnread && !state.seenNotifIds.has(n.id));
+          if (fresh) triggerAlert(`${fresh.actorUsername}: ${fresh.message}`);
+        }
+        notifs.forEach((n) => state.seenNotifIds.add(n.id));
+        state.initialSnapshotsLoaded.notifs = true;
+        state.notifications = notifs;
+      }
+
+      if (!wsFailed.has('threads')) {
+        const threads = workspace.threads.map(mapSupabaseThreadToWeb);
+        if (state.initialSnapshotsLoaded.threads) {
+          const unread = threads.find((t) =>
+            t.unreadUid === state.user.uid &&
+            (t.unreadCount || 0) > 0 &&
+            !state.seenMsgKeys.has(`${t.id}:${t.lastMessage}:${t.timeLabel}`)
+          );
+          if (unread) {
+            const otherName = unread.userAId === state.user.uid ? unread.userBUsername : unread.userAUsername;
+            triggerAlert(`New message from @${otherName}: ${unread.lastMessage}`);
+          }
+        }
+        threads.forEach((t) => state.seenMsgKeys.add(`${t.id}:${t.lastMessage}:${t.timeLabel}`));
+        state.initialSnapshotsLoaded.threads = true;
+        state.threads = threads;
+      }
+
+      if (!wsFailed.has('wallets') && workspace.wallet) {
         state.wallet = mapSupabaseWalletToWeb(workspace.wallet);
       }
-      state.transactions = workspace.transactions.map(mapSupabaseTransactionToWeb);
-      state.orders = workspace.orders.map(mapSupabaseOrderToWeb);
+      if (!wsFailed.has('credit_transactions')) {
+        state.transactions = workspace.transactions.map(mapSupabaseTransactionToWeb);
+      }
+      if (!wsFailed.has('market_orders')) {
+        state.orders = workspace.orders.map(mapSupabaseOrderToWeb);
+      }
     }
 
     state.isLoadingFeed = false;
@@ -1416,11 +1538,19 @@ async function refreshAllFromSupabase({ showErrors = false, forceRender = false 
     updateAdminUiVisibility();
     updateBadges();
     renderRightRail();
-    if (forceRender || !shouldDeferDomRefresh()) {
+    const nextSig = computeWebRenderSignature();
+    if (forceRender || (!shouldDeferDomRefresh() && nextSig !== lastRenderedSignature)) {
       renderMainStage();
     }
   } catch (err) {
     if (showErrors) handleSyncError(err, 'Supabase feed refresh');
+  } finally {
+    isWebSyncInFlight = false;
+    const queued = pendingWebSyncOptions;
+    pendingWebSyncOptions = null;
+    if (queued && state.user) {
+      refreshAllFromSupabase(queued);
+    }
   }
 }
 
@@ -1433,7 +1563,7 @@ function scheduleRealtimeFeedRefresh() {
     if (state.user) {
       refreshAllFromSupabase({ showErrors: false });
     }
-  }, 350);
+  }, 1200);
 }
 
 function refreshUiImmediatelyFromRealtime() {
@@ -1471,6 +1601,52 @@ function applyRealtimePostEvent(evt) {
     ? state.posts.map((p, i) => (i === idx ? merged : p))
     : [merged, ...state.posts];
   state.posts = sortFeedWithBoostPriority(next);
+  if (state.user?.uid) saveCachedWebWorkspace(state.user.uid);
+  refreshUiImmediatelyFromRealtime();
+}
+
+function applyRealtimeStoryEvent(evt) {
+  const type = String(evt?.eventType || '').toUpperCase();
+  if (type === 'DELETE') {
+    const deletedId = String(evt?.oldRecord?.id || evt?.record?.id || '').trim();
+    if (!deletedId) return;
+    state.stories = state.stories.filter((s) => s.id !== deletedId);
+    if (state.user?.uid) saveCachedWebWorkspace(state.user.uid);
+    refreshUiImmediatelyFromRealtime();
+    return;
+  }
+  if (!evt?.record) return;
+  const mapped = mapSupabaseStoryToWeb(evt.record);
+  if (!mapped?.id) return;
+  const idx = state.stories.findIndex((s) => s.id === mapped.id);
+  const next = idx >= 0
+    ? state.stories.map((s, i) => (i === idx ? mapped : s))
+    : [mapped, ...state.stories];
+  state.stories = filterActiveStories24h(next);
+  if (state.user?.uid) saveCachedWebWorkspace(state.user.uid);
+  refreshUiImmediatelyFromRealtime();
+}
+
+function applyRealtimeProfileEvent(evt) {
+  const type = String(evt?.eventType || '').toUpperCase();
+  if (type === 'DELETE') {
+    const deletedUid = String(evt?.oldRecord?.user_id || evt?.record?.user_id || '').trim();
+    if (!deletedUid) return;
+    state.creators = state.creators.filter((c) => c.userId !== deletedUid);
+    if (state.user?.uid) saveCachedWebWorkspace(state.user.uid);
+    refreshUiImmediatelyFromRealtime();
+    return;
+  }
+  if (!evt?.record) return;
+  const mapped = mapSupabaseProfileToWeb(evt.record);
+  if (!mapped?.userId) return;
+  const idx = state.creators.findIndex((c) => c.userId === mapped.userId);
+  state.creators = idx >= 0
+    ? state.creators.map((c, i) => (i === idx ? mapped : c))
+    : [mapped, ...state.creators];
+  if (mapped.userId === state.user?.uid && !state.pendingMutations.profile?.data) {
+    state.profile = { ...state.profile, ...mapped };
+  }
   if (state.user?.uid) saveCachedWebWorkspace(state.user.uid);
   refreshUiImmediatelyFromRealtime();
 }
@@ -1553,10 +1729,12 @@ function registerDatabaseListenersOnLogin(user) {
   startSupabaseRealtime(user.uid);
 }
 
-function startSupabaseRealtime(uid) {
+async function startSupabaseRealtime(uid) {
   if (state.realtimeClient) {
     state.realtimeClient.stop();
   }
+  await ensureFreshWebAccessToken(SUPABASE_WEB_CONFIG).catch(() => undefined);
+  if (state.user?.uid !== uid) return;
   const client = createSupabaseRealtimeClient(SUPABASE_WEB_CONFIG, {
     onStatusChange(status, detail) {
       state.realtimeState = status;
@@ -1594,6 +1772,14 @@ function startSupabaseRealtime(uid) {
     posts: (evt) => {
       if (state.user?.uid !== uid) return;
       applyRealtimePostEvent(evt);
+    },
+    stories: (evt) => {
+      if (state.user?.uid !== uid) return;
+      applyRealtimeStoryEvent(evt);
+    },
+    profiles: (evt) => {
+      if (state.user?.uid !== uid) return;
+      applyRealtimeProfileEvent(evt);
     },
     comments: (evt) => {
       if (state.user?.uid !== uid) return;
@@ -1831,8 +2017,45 @@ function renderRightRail() {
   bindUserAndFollowButtons(rightCreatorsCard);
 }
 
+let lastRenderedSignature = '';
+
+function computeWebRenderSignature() {
+  const pSig = state.posts
+    .slice(0, 60)
+    .map((p) => `${p.id}:${p.likesCount}:${p.viewsCount}:${p.commentsCount}:${(p.caption || '').length}:${p.boostTier || ''}:${p.authorUsername}:${p.imageUrl || ''}:${p.videoUrl || ''}`)
+    .join('|');
+  const stSig = state.stories.map((s) => `${s.id}:${s.caption || ''}:${s.imageKey || ''}`).join('|');
+  const scSig = state.showcaseAccounts.map((a) => `${a.username}:${a.displayName}:${a.isAuthorized}:${a.isVerified}:${a.avatarUrl || ''}:${a.bio || ''}`).join('|');
+  const crSig = state.creators.map((c) => `${c.userId}:${c.username}:${c.displayName}:${c.avatarUrl || ''}:${c.isVerified}`).join('|');
+  return [
+    state.nav,
+    state.homeFilter,
+    state.ownerConsoleTab,
+    state.profileTab,
+    state.viewedProfileUid || '',
+    state.syncError || '',
+    state.isLoadingFeed ? 1 : 0,
+    state.monetizationConfig?.announcementId || '',
+    state.monetizationConfig?.latestVersionName || '',
+    state.liveStreams.length,
+    state.likedIds.size,
+    state.bookmarkIds.size,
+    state.followingUids.size,
+    state.notifications.filter((n) => n.isUnread).length,
+    state.threads.length,
+    state.pages.length,
+    state.groups.length,
+    state.products.length,
+    crSig,
+    scSig,
+    stSig,
+    pSig
+  ].join('::');
+}
+
 function renderMainStage() {
   if (!state.user) return;
+  lastRenderedSignature = computeWebRenderSignature();
   switch (state.nav) {
     case 'home': renderHome(); break;
     case 'explore': renderExplore(); break;
@@ -1897,7 +2120,11 @@ function renderPostCardHtml(post) {
   const currentFrame = frames[idx] || { imageKey: post.imageKey };
   const isLiked = state.likedIds.has(post.id);
   const isSaved = state.bookmarkIds.has(post.id);
-  const isMine = post.userId === state.user?.uid;
+  const isShowcasePost = String(post.id || '').startsWith('showcase_');
+  const starter = isShowcasePost ? showcaseAccountForUsername(post.authorUsername) : null;
+  const authorVerified = isShowcasePost && starter ? starter.isVerified !== false : Boolean(post.authorVerified);
+  const openUserId = isShowcasePost ? `showcase_${post.authorUsername}` : post.userId;
+  const isMine = post.userId === state.user?.uid && !isShowcasePost;
   const isFollowing = state.followingUids.has(post.userId);
   const isVideo = post.mediaType === 'VIDEO' || post.isReel || Boolean(post.videoUrl || post.videoData);
   const videoSrc = resolveVideoSrc(post) || state.videoCache[post.id] || '';
@@ -1912,12 +2139,12 @@ function renderPostCardHtml(post) {
   return `
     <article class="post-card" data-post-id="${escapeHtml(post.id)}">
       <header class="post-header">
-        <button type="button" class="post-author-btn" data-open-user="${escapeHtml(post.userId)}">
-          ${avatarHtml({ userId: post.userId, username: post.authorUsername }, 38)}
+        <button type="button" class="post-author-btn" data-open-user="${escapeHtml(openUserId)}">
+          ${avatarHtml({ userId: openUserId, username: post.authorUsername, isShowcase: isShowcasePost, avatarUrl: starter?.avatarUrl || post.authorAvatarUrl || null }, 38)}
           <div class="post-author-meta">
             <span class="post-author-name">
               @${escapeHtml(post.authorUsername)}
-              ${post.authorVerified ? '<span class="verified-dot">&#10003;</span>' : ''}
+              ${authorVerified ? '<span class="verified-dot">&#10003;</span>' : ''}
             </span>
             <span class="muted small">${escapeHtml(post.location || post.category || 'Momi Feed')}</span>
           </div>
@@ -1925,14 +2152,14 @@ function renderPostCardHtml(post) {
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
           ${post.communityName ? `<button type="button" class="community-pill" data-open-community="${escapeHtml(post.pageId || post.groupId || '')}" data-community-type="${post.pageId ? 'PAGE' : 'GROUP'}" data-community-name="${escapeHtml(post.communityName)}">&#9670; ${escapeHtml(post.communityName)}</button>` : ''}
           ${boostBadge ? `<span class="boost-pill ${isRecommended ? 'recommended' : ''}">&#9733; ${escapeHtml(boostBadge)}</span>` : ''}
-          ${isOwnerAdmin() && !post.id.startsWith('showcase_') ? `<button type="button" class="btn-outline btn-sm" data-admin-recommend="${escapeHtml(post.id)}">${isRecommended ? 'Unfeature' : 'Recommend'}</button>` : ''}
-          ${isMine && !post.id.startsWith('showcase_') ? `<button type="button" class="btn-outline btn-sm" data-boost-post="${escapeHtml(post.id)}">Boost</button>` : ''}
-          ${!isMine ? `<button type="button" class="btn-sm ${isFollowing ? 'btn-outline' : 'btn-primary'}" data-follow-uid="${escapeHtml(post.userId)}" data-follow-name="${escapeHtml(post.authorUsername)}">${isFollowing ? 'Following' : 'Follow'}</button>` : ''}
+          ${isOwnerAdmin() && !isShowcasePost ? `<button type="button" class="btn-outline btn-sm" data-admin-recommend="${escapeHtml(post.id)}">${isRecommended ? 'Unfeature' : 'Recommend'}</button>` : ''}
+          ${isMine && !isShowcasePost ? `<button type="button" class="btn-outline btn-sm" data-boost-post="${escapeHtml(post.id)}">Boost</button>` : ''}
+          ${!isMine && !isShowcasePost ? `<button type="button" class="btn-sm ${isFollowing ? 'btn-outline' : 'btn-primary'}" data-follow-uid="${escapeHtml(post.userId)}" data-follow-name="${escapeHtml(post.authorUsername)}">${isFollowing ? 'Following' : 'Follow'}</button>` : ''}
           ${isMine || isOwnerAdmin() ? `<button type="button" class="btn-ghost btn-sm" data-delete-post="${escapeHtml(post.id)}" title="Delete post">Delete</button>` : ''}
         </div>
       </header>
 
-      <div class="post-media-wrap" style="aspect-ratio:${ratio};" data-open-post="${escapeHtml(post.id)}">
+      <div class="post-media-wrap" style="aspect-ratio:${ratio};" data-open-post="${escapeHtml(post.id)}"${isVideo && !videoSrc && post.videoData ? ` data-resolve-video-post="${escapeHtml(post.id)}" data-poster="${escapeHtml(resolveImageSrc(currentFrame))}"` : ''}>
         ${
           isVideo && videoSrc
             ? `<video class="post-media-video" src="${escapeHtml(videoSrc)}" poster="${escapeHtml(resolveImageSrc(currentFrame))}" controls playsinline preload="metadata" data-stop-open="true"></video>`
@@ -2071,12 +2298,15 @@ function renderHome() {
             <span>@${escapeHtml(s.username)}</span>
           </button>
         `).join('')}
-        ${state.stories.map((st) => `
+        ${state.stories.map((st) => {
+          const isShowcaseStory = String(st.id || '').startsWith('showcase_');
+          return `
           <button type="button" class="story-tile" data-open-story="${escapeHtml(st.id)}">
-            <span class="avatar-ring ${state.seenStoryIds.has(st.id) ? 'seen' : ''}">${avatarHtml({ userId: st.userId, username: st.username }, 58)}</span>
+            <span class="avatar-ring ${state.seenStoryIds.has(st.id) ? 'seen' : ''}">${avatarHtml({ userId: isShowcaseStory ? `showcase_${st.username}` : st.userId, username: st.username, isShowcase: isShowcaseStory, avatarUrl: st.avatarUrl || null }, 58)}</span>
             <span>@${escapeHtml(st.username)}</span>
           </button>
-        `).join('')}
+        `;
+        }).join('')}
       </section>
 
       ${
@@ -2131,11 +2361,11 @@ function renderHome() {
   bindFeedInteractions(mainStage);
 }
 
-function renderExplore() {
+function getExploreFilteredPosts() {
   const q = state.exploreQuery.trim().toLowerCase();
   const cleanTag = q.startsWith('#') ? q.slice(1) : '';
   const cleanUser = q.startsWith('@') ? q.slice(1) : '';
-  const filteredPosts = state.posts.filter((p) => {
+  return state.posts.filter((p) => {
     if (state.exploreCategory !== 'For You' && p.category !== state.exploreCategory) return false;
     if (!q) return true;
     const tags = Array.isArray(p.hashtags) ? p.hashtags : [];
@@ -2150,6 +2380,46 @@ function renderExplore() {
       tagged.some((u) => u.toLowerCase().includes(q))
     );
   });
+}
+
+function buildExploreResultsHtml(filteredPosts) {
+  if (filteredPosts.length === 0) {
+    return `<div class="card-panel" style="text-align:center;padding:28px;"><p class="muted" style="margin:0;">No posts match your search yet.</p></div>`;
+  }
+  return state.exploreLayout === 'notes'
+    ? `<div class="discovery-grid">
+        ${filteredPosts.map((p) => {
+          const badge = boostBadgeLabelForPost(p);
+          const isVid = p.mediaType === 'VIDEO' || Boolean(p.videoUrl);
+          return `
+            <article class="discovery-card" data-open-post="${escapeHtml(p.id)}">
+              <div style="position:relative;">
+                <img class="discovery-thumb" src="${resolveImageSrc(p)}" alt="${escapeHtml(p.caption || '')}" style="filter:${filterCssForTag(p.filterTag)};" loading="lazy" />
+                ${isVid ? '<span class="media-badge">&#9654; Video</span>' : ''}
+              </div>
+              <div class="discovery-meta">
+                ${badge ? `<span class="boost-pill ${p.boostTier === 'OWNER_RECOMMENDED' ? 'recommended' : ''}">${escapeHtml(badge)}</span>` : ''}
+                <div class="discovery-title">${escapeHtml(p.caption || 'Visual Note')}</div>
+                <div class="discovery-footer">
+                  <span>@${escapeHtml(p.authorUsername)}</span>
+                  <span>&#9829; ${formatCount(p.likesCount)}</span>
+                </div>
+              </div>
+            </article>
+          `;
+        }).join('')}
+      </div>`
+    : `<div class="profile-grid-3">
+        ${filteredPosts.map((p) => `
+          <button type="button" class="profile-tile" data-open-post="${escapeHtml(p.id)}">
+            <img src="${resolveImageSrc(p)}" alt="${escapeHtml(p.caption || '')}" style="filter:${filterCssForTag(p.filterTag)};" loading="lazy" />
+          </button>
+        `).join('')}
+      </div>`;
+}
+
+function renderExplore() {
+  const filteredPosts = getExploreFilteredPosts();
 
   mainStage.innerHTML = `
     <div class="stage-wide">
@@ -2163,7 +2433,7 @@ function renderExplore() {
 
       <div style="display:flex;gap:10px;flex-wrap:wrap;">
         <input id="exploreSearchInput" type="search" class="input" style="flex:1;min-width:220px;" placeholder="Search #hashtags, @creators, locations, or captions..." value="${escapeHtml(state.exploreQuery)}" />
-        ${state.exploreQuery ? '<button type="button" class="btn-outline" id="clearExploreBtn">Clear</button>' : ''}
+        <button type="button" class="btn-outline ${state.exploreQuery ? '' : 'hidden'}" id="clearExploreBtn">Clear</button>
       </div>
 
       <div class="chip-row">
@@ -2178,45 +2448,30 @@ function renderExplore() {
         `).join('')}
       </div>
 
-      ${
-        state.exploreLayout === 'notes'
-          ? `<div class="discovery-grid">
-              ${filteredPosts.map((p) => {
-                const badge = boostBadgeLabelForPost(p);
-                const isVid = p.mediaType === 'VIDEO' || Boolean(p.videoUrl);
-                return `
-                  <article class="discovery-card" data-open-post="${escapeHtml(p.id)}">
-                    <div style="position:relative;">
-                      <img class="discovery-thumb" src="${resolveImageSrc(p)}" alt="${escapeHtml(p.caption || '')}" style="filter:${filterCssForTag(p.filterTag)};" loading="lazy" />
-                      ${isVid ? '<span class="media-badge">&#9654; Video</span>' : ''}
-                    </div>
-                    <div class="discovery-meta">
-                      ${badge ? `<span class="boost-pill ${p.boostTier === 'OWNER_RECOMMENDED' ? 'recommended' : ''}">${escapeHtml(badge)}</span>` : ''}
-                      <div class="discovery-title">${escapeHtml(p.caption || 'Visual Note')}</div>
-                      <div class="discovery-footer">
-                        <span>@${escapeHtml(p.authorUsername)}</span>
-                        <span>&#9829; ${formatCount(p.likesCount)}</span>
-                      </div>
-                    </div>
-                  </article>
-                `;
-              }).join('')}
-            </div>`
-          : `<div class="profile-grid-3">
-              ${filteredPosts.map((p) => `
-                <button type="button" class="profile-tile" data-open-post="${escapeHtml(p.id)}">
-                  <img src="${resolveImageSrc(p)}" alt="${escapeHtml(p.caption || '')}" style="filter:${filterCssForTag(p.filterTag)};" loading="lazy" />
-                </button>
-              `).join('')}
-            </div>`
-      }
+      <div id="exploreResultsWrap">${buildExploreResultsHtml(filteredPosts)}</div>
     </div>
   `;
+
+  const refreshExploreResultsOnly = () => {
+    const wrap = document.getElementById('exploreResultsWrap');
+    if (wrap) {
+      wrap.innerHTML = buildExploreResultsHtml(getExploreFilteredPosts());
+      bindFeedInteractions(wrap);
+    }
+    const clearBtnEl = document.getElementById('clearExploreBtn');
+    if (clearBtnEl) clearBtnEl.classList.toggle('hidden', !state.exploreQuery);
+    mainStage.querySelectorAll('[data-trend-tag]').forEach((b) => {
+      b.classList.toggle('active', state.exploreQuery.toLowerCase() === `#${b.dataset.trendTag}`);
+    });
+  };
 
   document.getElementById('layoutNotesBtn').onclick = () => { state.exploreLayout = 'notes'; renderExplore(); };
   document.getElementById('layoutGridBtn').onclick = () => { state.exploreLayout = 'grid'; renderExplore(); };
   const input = document.getElementById('exploreSearchInput');
-  input.oninput = (e) => { state.exploreQuery = e.target.value; renderExplore(); document.getElementById('exploreSearchInput')?.focus(); };
+  input.oninput = (e) => {
+    state.exploreQuery = e.target.value;
+    refreshExploreResultsOnly();
+  };
   const clearBtn = document.getElementById('clearExploreBtn');
   if (clearBtn) clearBtn.onclick = () => { state.exploreQuery = ''; renderExplore(); };
   mainStage.querySelectorAll('[data-trend-tag]').forEach((b) => {
@@ -2269,7 +2524,7 @@ function renderCreateStudio() {
 
   const activeThumbSrc = s.uploadedSrc || s.autoThumbUrl || resolveImageSrc({ imageKey: s.imageKey });
   const maxAllowedMs = isStoryMode ? MAX_STORY_VIDEO_DURATION_MS : MAX_VIDEO_DURATION_MS;
-  const videoTooLong = Boolean(s.uploadedVideoUrl) && s.videoDurationMs > MAX_VIDEO_DURATION_MS;
+  const videoTooLong = Boolean(s.uploadedVideoUrl) && s.videoDurationMs > maxAllowedMs;
 
   mainStage.innerHTML = `
     <div class="stage-wide">
@@ -2348,11 +2603,11 @@ function renderCreateStudio() {
           ` : `
             <div class="consent-row">
               <div>
-                <strong>Video Ready (${formatVideoDurationMs(s.videoDurationMs)} / ${isStoryMode ? '0:30' : '80:00'})</strong>
-                <div class="muted small">
+                <strong id="studioVideoDurationLabel">Video Ready (${formatVideoDurationMs(s.videoDurationMs)} / ${isStoryMode ? '0:30' : '80:00'})</strong>
+                <div class="muted small" id="studioVideoDurationNote">
                   ${
                     videoTooLong
-                      ? '<span style="color:#fca5a5;">Video exceeds the 80-minute limit. Please select a shorter video.</span>'
+                      ? `<span style="color:#fca5a5;">Video exceeds the ${isStoryMode ? '30-second story' : '80-minute'} limit. Please select a shorter video.</span>`
                       : 'Large videos stream reliably via chunked resumable upload to Supabase Storage.'
                   }
                 </div>
@@ -2528,6 +2783,20 @@ function renderCreateStudio() {
     renderCreateStudio();
   });
 
+  const updateStudioVideoDurationUi = () => {
+    const lbl = document.getElementById('studioVideoDurationLabel');
+    const note = document.getElementById('studioVideoDurationNote');
+    const tooLong = Boolean(s.uploadedVideoUrl) && s.videoDurationMs > maxAllowedMs;
+    if (lbl) {
+      lbl.textContent = `Video Ready (${formatVideoDurationMs(s.videoDurationMs)} / ${isStoryMode ? '0:30' : '80:00'})`;
+    }
+    if (note) {
+      note.innerHTML = tooLong
+        ? `<span style="color:#fca5a5;">Video exceeds the ${isStoryMode ? '30-second story' : '80-minute'} limit. Please select a shorter video.</span>`
+        : 'Large videos stream reliably via chunked resumable upload to Supabase Storage.';
+    }
+  };
+
   const attachStudioVideoMetadataListeners = (vidEl) => {
     if (!vidEl) return;
     const captureFrame = () => {
@@ -2552,11 +2821,12 @@ function renderCreateStudio() {
       }
     };
     vidEl.onloadedmetadata = () => {
-      s.videoDurationMs = Math.round((vidEl.duration || 0) * 1000);
-      if (s.videoDurationMs > MAX_VIDEO_DURATION_MS) {
-        showToast('Video exceeds the 80-minute limit. Please choose a video up to 80 minutes.');
+      const durSec = Number(vidEl.duration);
+      s.videoDurationMs = Number.isFinite(durSec) && durSec > 0 ? Math.round(durSec * 1000) : 0;
+      if (s.videoDurationMs > maxAllowedMs) {
+        showToast(isStoryMode ? 'Story video exceeds 30 seconds. Switch to Video Clip (up to 80m) or choose a shorter video.' : 'Video exceeds the 80-minute limit. Please choose a video up to 80 minutes.');
       }
-      renderCreateStudio();
+      updateStudioVideoDurationUi();
     };
     vidEl.onloadeddata = () => {
       if (!s.autoThumbBlob) captureFrame();
@@ -2568,29 +2838,7 @@ function renderCreateStudio() {
 
   const currentVidPreview = document.getElementById('studioVideoPreview');
   if (currentVidPreview && s.uploadedVideoUrl) {
-    currentVidPreview.onloadeddata = () => {
-      if (!s.autoThumbBlob) {
-        try {
-          if (currentVidPreview.videoWidth && currentVidPreview.videoHeight) {
-            const c = document.createElement('canvas');
-            const scale = Math.min(1, 720 / currentVidPreview.videoWidth);
-            c.width = Math.max(1, Math.round(currentVidPreview.videoWidth * scale));
-            c.height = Math.max(1, Math.round(currentVidPreview.videoHeight * scale));
-            c.getContext('2d').drawImage(currentVidPreview, 0, 0, c.width, c.height);
-            c.toBlob((blob) => {
-              if (!blob) return;
-              if (s.autoThumbUrl?.startsWith('blob:')) URL.revokeObjectURL(s.autoThumbUrl);
-              s.autoThumbBlob = blob;
-              s.autoThumbUrl = URL.createObjectURL(blob);
-              const previewImg = document.getElementById('studioThumbPreview');
-              if (previewImg && !s.uploadedFile) previewImg.src = s.autoThumbUrl;
-            }, 'image/jpeg', 0.85);
-          }
-        } catch {
-          // Ignore frame capture error
-        }
-      }
-    };
+    attachStudioVideoMetadataListeners(currentVidPreview);
   }
 
   document.getElementById('studioVideoInput').onchange = (e) => {
@@ -2606,7 +2854,6 @@ function renderCreateStudio() {
     s.mode = 'CLIP';
     s.isReel = true;
     renderCreateStudio();
-    attachStudioVideoMetadataListeners(document.getElementById('studioVideoPreview'));
   };
 
   document.getElementById('clearStudioVideoBtn')?.addEventListener('click', () => {
@@ -2705,8 +2952,8 @@ function renderCreateStudio() {
 
   document.getElementById('publishPostBtn').onclick = async () => {
     if (!state.profile || s.publishing) return;
-    if (s.uploadedVideoFile && s.videoDurationMs > MAX_VIDEO_DURATION_MS) {
-      showToast('Videos up to 80 minutes are supported. Please select a video within 80:00.');
+    if (s.uploadedVideoFile && s.videoDurationMs > maxAllowedMs) {
+      showToast(isStoryMode ? 'Story videos must be within 30 seconds.' : 'Videos up to 80 minutes are supported. Please select a video within 80:00.');
       return;
     }
     s.publishing = true;
@@ -2750,7 +2997,7 @@ function renderCreateStudio() {
           imageUrl = await uploadWebFileToStorage(
             SUPABASE_WEB_CONFIG,
             'momi-media',
-            `posts/${state.user.uid}/${itemId}_cover.${thumbExt}`,
+            `${state.user.uid}/posts/${itemId}_cover.${thumbExt}`,
             thumbSource,
             thumbSource.type || 'image/jpeg'
           );
@@ -2768,7 +3015,7 @@ function renderCreateStudio() {
             imageUrl = await uploadWebFileToStorage(
               SUPABASE_WEB_CONFIG,
               'momi-media',
-              `posts/${state.user.uid}/${itemId}.jpg`,
+              `${state.user.uid}/posts/${itemId}.jpg`,
               blob,
               'image/jpeg'
             );
@@ -2785,12 +3032,17 @@ function renderCreateStudio() {
         videoUrl = await uploadWebFileToStorage(
           SUPABASE_WEB_CONFIG,
           'momi-videos',
-          `videos/${state.user.uid}/${itemId}.${ext}`,
+          `${state.user.uid}/videos/${itemId}.${ext}`,
           s.uploadedVideoFile,
           s.uploadedVideoFile.type || 'video/mp4'
         );
         if (!videoUrl) {
-          throw new Error('Could not upload video file to Supabase Storage. Ensure supabase/enable_sync.sql has been run.');
+          const errDetail = getLastStorageUploadError();
+          throw new Error(
+            errDetail
+              ? `Video upload failed (${errDetail}). Ensure supabase/enable_sync.sql has been run.`
+              : 'Could not upload video file to Supabase Storage. Ensure supabase/enable_sync.sql has been run.'
+          );
         }
       }
 
@@ -3136,7 +3388,7 @@ function renderMessages() {
       const uploadedUrl = await uploadWebFileToStorage(
         SUPABASE_WEB_CONFIG,
         'momi-media',
-        `chat/${activeThread.id}/${msgId}.jpg`,
+        `${state.user.uid}/chat/${activeThread.id}/${msgId}.jpg`,
         file,
         file.type || 'image/jpeg'
       );
@@ -3447,10 +3699,35 @@ function renderWallet() {
 function renderProfile() {
   const targetUid = state.viewedProfileUid || state.user?.uid;
   const isOwn = Boolean(state.user?.uid) && targetUid === state.user?.uid;
+  const isShowcaseTarget = String(targetUid || '').startsWith('showcase_');
   if (isOwn && !state.profile && state.user) {
     state.profile = buildFallbackProfile(state.user);
   }
-  let profile = isOwn ? state.profile : state.creators.find((c) => c.userId === targetUid);
+  let profile = isOwn ? state.profile : null;
+  if (!profile && isShowcaseTarget) {
+    const starterName = String(targetUid).slice(9);
+    const starter = showcaseAccountForUsername(starterName);
+    if (starter) {
+      profile = {
+        userId: targetUid,
+        username: starter.username,
+        displayName: starter.displayName,
+        avatarKey: starter.avatarKey,
+        avatarUrl: starter.avatarUrl || null,
+        avatarData: null,
+        bio: starter.bio || `${starter.category} creator in ${starter.location}`,
+        website: '',
+        category: starter.category || 'Creator',
+        followersCount: 0,
+        followingCount: 0,
+        isVerified: starter.isVerified !== false,
+        isShowcase: true
+      };
+    }
+  }
+  if (!profile && !isShowcaseTarget) {
+    profile = state.creators.find((c) => c.userId === targetUid);
+  }
   if (!profile && targetUid) {
     const postWithAuthor = state.posts.find(
       (p) => p.userId === targetUid || (p.authorUsername && p.authorUsername.toLowerCase() === targetUid.toLowerCase())
@@ -3461,7 +3738,7 @@ function renderProfile() {
         username: postWithAuthor.authorUsername || 'creator',
         displayName: postWithAuthor.authorDisplayName || postWithAuthor.authorUsername || 'Creator',
         avatarKey: postWithAuthor.authorAvatarKey || 'avatar_aria',
-        avatarUrl: null,
+        avatarUrl: postWithAuthor.authorAvatarUrl || null,
         avatarData: null,
         bio: '',
         website: '',
@@ -3491,7 +3768,9 @@ function renderProfile() {
     return;
   }
 
-  const userPosts = state.posts.filter((p) => p.userId === profile.userId);
+  const userPosts = profile.isShowcase
+    ? state.posts.filter((p) => String(p.id || '').startsWith('showcase_') && (p.authorUsername || '').toLowerCase() === profile.username.toLowerCase())
+    : state.posts.filter((p) => p.userId === profile.userId && !String(p.id || '').startsWith('showcase_'));
   const savedPosts = isOwn ? state.posts.filter((p) => state.bookmarkIds.has(p.id)) : [];
   const displayed = state.profileTab === 'saved' && isOwn ? savedPosts : userPosts;
   const isFollowing = state.followingUids.has(profile.userId);
@@ -3515,7 +3794,7 @@ function renderProfile() {
                 ${profile.isVerified ? '<span class="verified-dot">&#10003;</span>' : ''}
               </div>
               <div style="font-weight:700;">${escapeHtml(profile.displayName)}</div>
-              <div class="muted small">${escapeHtml(profile.category || 'Creator')}</div>
+              <div class="muted small">${escapeHtml(profile.category || 'Creator')}${profile.isShowcase ? ' &middot; Starter Showcase' : ''}</div>
               <div style="display:flex;gap:16px;margin-top:8px;font-size:0.9rem;">
                 <span><strong>${userPosts.length}</strong> posts</span>
                 <span><strong>${profile.followersCount || 0}</strong> followers</span>
@@ -3529,8 +3808,10 @@ function renderProfile() {
             ${
               isOwn
                 ? '<button type="button" class="btn-outline" id="editProfileBtn">Edit Profile</button><button type="button" class="btn-primary" id="profileCreateBtn">New Post</button>'
-                : `<button type="button" class="${isFollowing ? 'btn-outline' : 'btn-primary'}" data-follow-uid="${escapeHtml(profile.userId)}" data-follow-name="${escapeHtml(profile.username)}">${isFollowing ? 'Following' : 'Follow'}</button>
-                   <button type="button" class="btn-outline" id="messageCreatorBtn">Message</button>`
+                : (profile.isShowcase
+                  ? (ownerAdmin ? `<button type="button" class="btn-primary" id="editViewedStarterBtn">Manage Starter in Console</button>` : '')
+                  : `<button type="button" class="${isFollowing ? 'btn-outline' : 'btn-primary'}" data-follow-uid="${escapeHtml(profile.userId)}" data-follow-name="${escapeHtml(profile.username)}">${isFollowing ? 'Following' : 'Follow'}</button>
+                     <button type="button" class="btn-outline" id="messageCreatorBtn">Message</button>`)
             }
           </div>
         </div>
@@ -3585,6 +3866,10 @@ function renderProfile() {
   document.getElementById('shareProfileBtn').onclick = () => shareProfileExternally(profile);
   document.getElementById('profileConsentToggle')?.addEventListener('change', (e) => updatePartnerConsent(e.target.checked));
   document.getElementById('openFullOwnerConsoleBtn')?.addEventListener('click', () => navigateTo('admin'));
+  document.getElementById('editViewedStarterBtn')?.addEventListener('click', () => {
+    state.ownerConsoleTab = 'starters';
+    navigateTo('admin');
+  });
   document.getElementById('editProfileBtn')?.addEventListener('click', () => openEditProfileModal());
   document.getElementById('profileCreateBtn')?.addEventListener('click', () => navigateTo('create'));
   document.getElementById('messageCreatorBtn')?.addEventListener('click', () => openOrCreateDirectThread(profile));
@@ -3686,16 +3971,18 @@ async function engagePostsWithShowcase(uid) {
       showToast('No posts available yet — publish starter posts first.');
       return;
     }
+    const authAccounts = state.showcaseAccounts.filter((a) => a.isAuthorized);
+    const pool = authAccounts.length > 0 ? authAccounts : SHOWCASE_PERSONAS;
     const stamp = Date.now();
     const commentRows = targets.map((p, idx) => {
-      const persona = SHOWCASE_PERSONAS[(idx + Math.floor(stamp / 1000)) % SHOWCASE_PERSONAS.length];
+      const persona = pool[(idx + Math.floor(stamp / 1000)) % pool.length];
       const commentText = SHOWCASE_COMMENTS[(idx + 1) % SHOWCASE_COMMENTS.length];
       return {
         id: `showcase_cmt_${stamp}_${idx}`,
         post_id: p.id,
         user_id: uid,
         author_username: persona.username,
-        author_avatar_key: persona.avatarKey,
+        author_avatar_key: persona.avatarKey || 'avatar_elena',
         text: commentText,
         likes_count: 1
       };
@@ -3713,7 +4000,7 @@ async function engagePostsWithShowcase(uid) {
         { likes_count: nextLikes, views_count: nextViews, comments_count: (p.commentsCount || 0) + 1 }
       );
     }));
-    await refreshAllFromSupabase({ showErrors: false });
+    await refreshAllFromSupabase({ showErrors: false, forceRender: true });
     showToast(`Added starter likes, views & comments to ${targets.length} posts!`);
   } catch (err) {
     showToast(err?.message || 'Could not add showcase engagement');
@@ -3729,10 +4016,11 @@ async function removeAllShowcaseContent() {
   state.showcaseBusy = true;
   if (state.nav === 'profile' || state.nav === 'admin') renderMainStage();
   try {
+    await deleteSupabaseRows(SUPABASE_WEB_CONFIG, 'comments', 'id=like.showcase_%25');
     await deleteSupabaseRows(SUPABASE_WEB_CONFIG, 'posts', 'id=like.showcase_%25');
     await deleteSupabaseRows(SUPABASE_WEB_CONFIG, 'stories', 'id=like.showcase_%25');
-    await refreshAllFromSupabase({ showErrors: false });
-    showToast('Removed all starter showcase posts and stories.');
+    await refreshAllFromSupabase({ showErrors: false, forceRender: true });
+    showToast('Removed all starter showcase posts, comments, and stories.');
   } catch (err) {
     showToast(err?.message || 'Failed removing starter showcase content');
   } finally {
@@ -3761,8 +4049,81 @@ function bindUserAndFollowButtons(container) {
   });
 }
 
+let activeFeedVideoEl = null;
+let feedVideoObserver = null;
+
 function bindFeedInteractions(container) {
   bindUserAndFollowButtons(container);
+
+  const bindFeedVideoElement = (vid, allVideos) => {
+    if (!vid || vid.dataset.boundVideo === '1') return;
+    vid.dataset.boundVideo = '1';
+    vid.addEventListener('play', () => {
+      if (activeFeedVideoEl && activeFeedVideoEl !== vid && !activeFeedVideoEl.paused) {
+        activeFeedVideoEl.pause();
+      }
+      activeFeedVideoEl = vid;
+      const list = Array.from(allVideos || []);
+      const idx = list.indexOf(vid);
+      const nextVid = idx >= 0 ? list[idx + 1] : null;
+      if (nextVid && nextVid.preload !== 'auto') {
+        nextVid.preload = 'auto';
+      }
+    });
+    vid.addEventListener('error', () => {
+      if (vid.dataset.retriedVideo === '1') return;
+      const rawSrc = vid.getAttribute('src') || '';
+      if (!rawSrc || rawSrc.startsWith('blob:') || rawSrc.startsWith('data:')) return;
+      vid.dataset.retriedVideo = '1';
+      const sep = rawSrc.includes('?') ? '&' : '?';
+      vid.src = `${rawSrc}${sep}_vretry=${Date.now()}`;
+      vid.load();
+    });
+  };
+
+  container.querySelectorAll('[data-resolve-video-post]').forEach((wrap) => {
+    const postId = wrap.dataset.resolveVideoPost;
+    const post = state.posts.find((p) => p.id === postId);
+    if (!post || !post.videoData) return;
+    resolveVideoForPost(post).then((resolvedUrl) => {
+      if (!resolvedUrl || !wrap.isConnected) return;
+      const poster = wrap.dataset.poster || resolveImageSrc(post);
+      const vid = document.createElement('video');
+      vid.className = 'post-media-video';
+      vid.src = resolvedUrl;
+      if (poster) vid.poster = poster;
+      vid.controls = true;
+      vid.playsInline = true;
+      vid.preload = 'metadata';
+      vid.dataset.stopOpen = 'true';
+      const img = wrap.querySelector('.post-media-img');
+      if (img) img.replaceWith(vid);
+      else wrap.prepend(vid);
+      wrap.querySelector('.media-badge')?.remove();
+      wrap.removeAttribute('data-resolve-video-post');
+      const allVideos = container.querySelectorAll('.post-media-video');
+      bindFeedVideoElement(vid, allVideos);
+      feedVideoObserver?.observe(vid);
+    }).catch(() => undefined);
+  });
+
+  const videos = container.querySelectorAll('.post-media-video');
+  if (feedVideoObserver) {
+    feedVideoObserver.disconnect();
+    feedVideoObserver = null;
+  }
+  if (typeof IntersectionObserver === 'function') {
+    feedVideoObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting && !entry.target.paused) {
+          entry.target.pause();
+          if (activeFeedVideoEl === entry.target) activeFeedVideoEl = null;
+        }
+      });
+    }, { threshold: 0.2 });
+    videos.forEach((v) => feedVideoObserver.observe(v));
+  }
+  videos.forEach((vid) => bindFeedVideoElement(vid, videos));
 
   container.querySelectorAll('[data-stop-open]').forEach((el) => {
     el.onclick = (e) => e.stopPropagation();
@@ -4305,19 +4666,37 @@ function openStoryModal(storyId) {
   ).catch(() => undefined);
 
   const videoSrc = resolveVideoSrc(story);
+  const bgKey = decodeStoryBgKey(story.imageKey);
+  const bgOpt = STORY_BG_OPTIONS.find((o) => o.key === bgKey);
+  const hasRealImage = Boolean(story.imageUrl || story.imageData);
+  const decodedOverlay = decodeStoryOverlayCaption(story.caption);
+  const posY = Math.round((decodedOverlay.positionY || 0.5) * 100);
+  const overlayCss = decodedOverlay.styleCode === 'L'
+    ? 'background:rgba(255,255,255,0.9);color:#111827;'
+    : decodedOverlay.styleCode === 'N'
+      ? 'background:rgba(15,23,42,0.82);color:#f9a8d4;border:1px solid #ec4899;'
+      : 'background:rgba(0,0,0,0.68);color:#fff;';
+
   openModal(`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <strong>@${escapeHtml(story.username)} &middot; Story</strong>
+      <strong>@${escapeHtml(story.username)} &middot; 24h Story</strong>
       <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
     </div>
-    <div style="text-align:center;background:#000;border-radius:16px;overflow:hidden;">
+    <div style="position:relative;text-align:center;background:${bgOpt && !hasRealImage && !videoSrc ? bgOpt.css : '#000'};border-radius:16px;overflow:hidden;min-height:${bgOpt && !hasRealImage && !videoSrc ? '380px' : '0'};display:grid;place-items:center;">
       ${
         videoSrc
           ? `<video src="${escapeHtml(videoSrc)}" poster="${escapeHtml(resolveImageSrc(story))}" controls autoplay playsinline style="max-height:72vh;width:100%;"></video>`
-          : `<img src="${resolveImageSrc(story)}" alt="${escapeHtml(story.caption || '')}" style="max-height:72vh;width:100%;object-fit:contain;" />`
+          : (bgOpt && !hasRealImage
+            ? '<div style="height:380px;width:100%;"></div>'
+            : `<img src="${resolveImageSrc(story)}" alt="${escapeHtml(decodedOverlay.caption || '')}" style="max-height:72vh;width:100%;object-fit:contain;" />`)
+      }
+      ${
+        decodedOverlay.textOverlay
+          ? `<div style="position:absolute;left:16px;right:16px;top:${posY}%;transform:translateY(-50%);padding:10px 16px;border-radius:14px;font-weight:700;font-size:1.05rem;white-space:pre-line;${overlayCss}">${escapeHtml(decodedOverlay.textOverlay)}</div>`
+          : ''
       }
     </div>
-    ${story.caption ? `<p style="margin:12px 0 0;">${escapeHtml(story.caption)}</p>` : ''}
+    ${decodedOverlay.caption ? `<p style="margin:12px 0 0;">${escapeHtml(decodedOverlay.caption)}</p>` : ''}
   `);
   document.getElementById('closeModalBtn').onclick = closeModal;
 }
@@ -4371,7 +4750,7 @@ function openEditProfileModal() {
       const uploaded = await uploadWebFileToStorage(
         SUPABASE_WEB_CONFIG,
         'momi-avatars',
-        `avatars/${state.user.uid}.jpg`,
+        `${state.user.uid}/avatars/${state.user.uid}.jpg`,
         newAvatarFile,
         newAvatarFile.type || 'image/jpeg'
       );
@@ -5049,7 +5428,7 @@ function openSellProductModal() {
       imageUrl = await uploadWebFileToStorage(
         SUPABASE_WEB_CONFIG,
         'momi-media',
-        `market/${state.user.uid}/${prodId}.jpg`,
+        `${state.user.uid}/market/${prodId}.jpg`,
         file,
         file.type || 'image/jpeg'
       );
@@ -5760,14 +6139,18 @@ function renderAdminConsole() {
   const cfg = state.monetizationConfig || DEFAULT_MONETIZATION_CONFIG;
   const consentingCreators = state.creators.filter((c) => Boolean(c.partnerConsent));
   const recommendCandidates = state.posts.filter((p) => !p.id.startsWith('showcase_')).slice(0, 15);
-  const showcasePostCount = state.posts.filter((p) => p.id.startsWith('showcase_')).length;
-  const showcaseStoryCount = state.stories.filter((s) => s.id.startsWith('showcase_')).length;
+  const starterPosts = state.posts.filter((p) => p.id.startsWith('showcase_'));
+  const starterStories = state.stories.filter((s) => s.id.startsWith('showcase_'));
+  const showcasePostCount = starterPosts.length;
+  const showcaseStoryCount = starterStories.length;
   const starters = state.showcaseAccounts.length > 0
     ? state.showcaseAccounts
     : SHOWCASE_PERSONAS.map((p) => ({
       username: p.username,
       displayName: p.displayName,
       avatarKey: p.avatarKey,
+      avatarUrl: null,
+      isVerified: true,
       bio: `${p.category} creator in ${p.location}`,
       category: p.category,
       location: p.location,
@@ -5780,7 +6163,7 @@ function renderAdminConsole() {
         <div class="section-header">
           <div>
             <h2 style="margin:0;">Owner Admin Console</h2>
-            <div class="muted small">Signed in as <strong>${escapeHtml(state.user?.email || ADMIN_OWNER_EMAIL)}</strong> &middot; Web &amp; Android live sync</div>
+            <div class="muted small">Signed in as <strong>${escapeHtml(state.user?.email || ADMIN_OWNER_EMAIL)}</strong> &middot; Full authority over Starter Showcase &amp; Momi Backend</div>
           </div>
           <div class="chip-row">
             <button type="button" class="chip ${state.ownerConsoleTab === 'starters' ? 'active' : ''}" data-admin-tab="starters">Showcase Starters (${starters.filter((s) => s.isAuthorized).length}/${starters.length})</button>
@@ -5796,11 +6179,12 @@ function renderAdminConsole() {
           <div style="display:grid;gap:14px;">
             <div class="consent-row" style="flex-wrap:wrap;gap:10px;">
               <div>
-                <strong>Authorized Showcase Starters (${showcasePostCount} posts &middot; ${showcaseStoryCount} stories)</strong>
-                <div class="muted small">Authorize starter accounts, edit their profile bio/name, publish custom photo/video posts as any authorized starter, or boost posts with starter likes, views &amp; comments.</div>
+                <strong>Showcase Starters Manager (${showcasePostCount} posts &middot; ${showcaseStoryCount} stories)</strong>
+                <div class="muted small">Create/edit/delete starters, upload custom starter avatars, toggle verified badges, publish photos, up to 80m videos + custom covers, or 24h stories as any starter.</div>
               </div>
               <div class="chip-row">
-                <button type="button" class="btn-primary btn-sm" id="adminBoostPostBtn">Add Likes / Views</button>
+                <button type="button" class="btn-primary btn-sm" id="createStarterBtn">+ New Starter</button>
+                <button type="button" class="btn-outline btn-sm" id="adminBoostPostBtn">Add Likes / Views</button>
                 <button type="button" class="btn-outline btn-sm" id="showcaseBurstBtn" ${state.showcaseBusy ? 'disabled' : ''}>Publish 4 Burst Posts</button>
                 <button type="button" class="btn-outline btn-sm" id="showcaseEngageBtn" ${state.showcaseBusy ? 'disabled' : ''}>Engage Recent</button>
                 <button type="button" class="btn-danger btn-sm" id="showcaseRemoveBtn" ${state.showcaseBusy ? 'disabled' : ''}>Clear Starter Posts</button>
@@ -5811,9 +6195,9 @@ function renderAdminConsole() {
               ${starters.map((st) => `
                 <article class="card-panel" style="gap:10px;${st.isAuthorized ? 'border-color:var(--primary);' : ''}">
                   <div style="display:flex;align-items:center;gap:10px;">
-                    ${avatarHtml({ userId: st.username, username: st.username }, 44)}
+                    ${avatarHtml({ userId: `showcase_${st.username}`, username: st.username, avatarUrl: st.avatarUrl, isShowcase: true }, 44)}
                     <div style="min-width:0;flex:1;">
-                      <div style="font-weight:700;">@${escapeHtml(st.username)}</div>
+                      <div style="font-weight:700;">@${escapeHtml(st.username)} ${st.isVerified !== false ? '<span class="verified-dot">&#10003;</span>' : ''}</div>
                       <div class="muted small">${escapeHtml(st.displayName)} &middot; ${escapeHtml(st.category)}</div>
                     </div>
                     <span class="pill" style="${st.isAuthorized ? 'background:color-mix(in srgb, var(--primary) 18%, transparent);color:var(--primary);' : ''}">
@@ -5826,10 +6210,41 @@ function renderAdminConsole() {
                       ${st.isAuthorized ? 'Pause' : 'Authorize'}
                     </button>
                     <button type="button" class="btn-outline btn-sm" data-edit-starter="${escapeHtml(st.username)}">Edit Profile</button>
-                    <button type="button" class="btn-primary btn-sm" data-post-starter="${escapeHtml(st.username)}" ${!st.isAuthorized ? 'disabled title="Authorize starter first"' : ''}>Post / Video</button>
+                    <button type="button" class="btn-primary btn-sm" data-post-starter="${escapeHtml(st.username)}" ${!st.isAuthorized ? 'disabled title="Authorize starter first"' : ''}>Post / Video / Story</button>
                   </div>
                 </article>
               `).join('')}
+            </div>
+
+            <div style="border-top:1px solid var(--border);padding-top:12px;display:grid;gap:10px;">
+              <strong>Manage Starter Posts (${starterPosts.length}) &amp; Stories (${starterStories.length})</strong>
+              ${
+                starterPosts.length === 0 && starterStories.length === 0
+                  ? '<p class="muted small" style="margin:0;">No active starter posts or stories yet.</p>'
+                  : `
+                    ${starterPosts.slice(0, 20).map((p) => `
+                      <div class="consent-row" style="gap:10px;">
+                        <div style="min-width:0;flex:1;">
+                          <strong>@${escapeHtml(p.authorUsername)}</strong> &middot; <span class="muted small">${escapeHtml(p.mediaType || 'IMAGE')}${p.videoDurationMs ? ` (${formatVideoDurationMs(p.videoDurationMs)})` : ''}</span>
+                          <div class="muted small" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(p.caption || '(No caption)')}</div>
+                        </div>
+                        <div class="chip-row">
+                          <button type="button" class="btn-outline btn-sm" data-edit-starter-post="${escapeHtml(p.id)}">Edit Caption</button>
+                          <button type="button" class="btn-danger btn-sm" data-delete-post="${escapeHtml(p.id)}">Delete</button>
+                        </div>
+                      </div>
+                    `).join('')}
+                    ${starterStories.slice(0, 12).map((s) => `
+                      <div class="consent-row" style="gap:10px;">
+                        <div style="min-width:0;flex:1;">
+                          <strong>Story &middot; @${escapeHtml(s.username)}</strong>
+                          <div class="muted small" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(decodeStoryOverlayCaption(s.caption).textOverlay || decodeStoryOverlayCaption(s.caption).caption || '24h Story')}</div>
+                        </div>
+                        <button type="button" class="btn-danger btn-sm" data-delete-starter-story="${escapeHtml(s.id)}">Delete Story</button>
+                      </div>
+                    `).join('')}
+                  `
+              }
             </div>
           </div>
         ` : ''}
@@ -5968,6 +6383,19 @@ function renderAdminConsole() {
                 SQL Editor &#8599;
               </a>
             </div>
+
+            <div style="border-top:1px solid var(--border);padding-top:12px;display:grid;gap:8px;">
+              <div>
+                <strong>Account Whitelist Cleanup</strong>
+                <div class="muted small">Keep ONLY <strong>${escapeHtml(ADMIN_OWNER_EMAIL)}</strong> and <strong>hassan.ali62313@gmail.com</strong> (plus all Starter Showcase accounts). Permanently removes all remaining profile rows and their posts/data.</div>
+              </div>
+              <div>
+                <button type="button" class="btn-danger btn-sm" id="purgeNonWhitelistBtn" ${state.supabaseBusy ? 'disabled' : ''}>
+                  ${state.supabaseBusy ? 'Cleaning up...' : 'Purge Non-Keep Profiles & Posts'}
+                </button>
+              </div>
+            </div>
+
             ${(() => {
               const mergeCandidates = state.creators.filter((c) => c.userId && c.userId !== state.user?.uid && !String(c.userId).startsWith('showcase_'));
               if (mergeCandidates.length === 0) return '';
@@ -6003,6 +6431,7 @@ function renderAdminConsole() {
   mainStage.querySelectorAll('[data-admin-tab]').forEach((b) => {
     b.onclick = () => { state.ownerConsoleTab = b.dataset.adminTab; renderAdminConsole(); };
   });
+  document.getElementById('createStarterBtn')?.addEventListener('click', () => openCreateStarterModal());
   mainStage.querySelectorAll('[data-toggle-starter]').forEach((b) => {
     b.onclick = () => toggleShowcaseAuthorize(b.dataset.toggleStarter);
   });
@@ -6011,6 +6440,19 @@ function renderAdminConsole() {
   });
   mainStage.querySelectorAll('[data-post-starter]').forEach((b) => {
     b.onclick = () => openPublishAsStarterModal(b.dataset.postStarter);
+  });
+  mainStage.querySelectorAll('[data-edit-starter-post]').forEach((b) => {
+    b.onclick = () => openEditStarterPostModal(b.dataset.editStarterPost);
+  });
+  mainStage.querySelectorAll('[data-delete-starter-story]').forEach((b) => {
+    b.onclick = async () => {
+      const sid = b.dataset.deleteStarterStory;
+      if (!sid || !window.confirm('Delete this starter story?')) return;
+      state.stories = state.stories.filter((s) => s.id !== sid);
+      renderAdminConsole();
+      await deleteStoryFromSupabase(SUPABASE_WEB_CONFIG, sid);
+      showToast('Starter story deleted');
+    };
   });
   document.getElementById('adminBoostPostBtn')?.addEventListener('click', () => openBoostWithStarterModal());
   document.getElementById('showcaseBurstBtn')?.addEventListener('click', () => publishShowcaseBurst(state.user.uid));
@@ -6039,6 +6481,22 @@ function renderAdminConsole() {
   document.getElementById('testSupabaseWebBtn')?.addEventListener('click', () => runSupabaseWebHealthCheck());
   document.getElementById('syncSupabaseWebBtn')?.addEventListener('click', () => syncSupabaseDataFromWeb());
   document.getElementById('downloadSupabaseJsonBtn')?.addEventListener('click', () => downloadSupabaseMigrationSnapshot());
+  document.getElementById('purgeNonWhitelistBtn')?.addEventListener('click', async () => {
+    if (!isOwnerAdmin() || state.supabaseBusy || !state.user?.uid) return;
+    if (!window.confirm('Remove ALL profiles and posts EXCEPT syali6511@gmail.com and hassan.ali62313@gmail.com (keeping Starter Showcase accounts intact)?')) return;
+    state.supabaseBusy = true;
+    renderAdminConsole();
+    try {
+      const res = await purgeNonWhitelistSupabaseAccounts(SUPABASE_WEB_CONFIG, state.user.uid);
+      await refreshAllFromSupabase({ showErrors: false, forceRender: true });
+      showToast(`Removed ${res.removedProfilesCount} non-keep profile(s); ${res.keptProfilesCount} whitelist account(s) retained.`);
+    } catch (err) {
+      showToast(err?.message || 'Cleanup failed');
+    } finally {
+      state.supabaseBusy = false;
+      renderAdminConsole();
+    }
+  });
   mainStage.querySelectorAll('[data-merge-legacy-uid]').forEach((b) => {
     b.onclick = async () => {
       const sourceUid = b.dataset.mergeLegacyUid;
@@ -6053,7 +6511,7 @@ function renderAdminConsole() {
           userId: state.user.uid,
           email: state.user.email || state.profile?.email || ''
         });
-        await syncFromSupabase();
+        await refreshAllFromSupabase({ showErrors: false, forceRender: true });
         showToast(`Merged @${cand?.username || sourceUid} (${res.movedPosts} posts) into @${state.profile?.username || 'owner'}!`);
       } catch (err) {
         showToast(err?.message || 'Could not merge profile posts');
@@ -6077,12 +6535,103 @@ async function toggleShowcaseAuthorize(username) {
     username: acct.username,
     display_name: acct.displayName,
     avatar_key: acct.avatarKey,
+    avatar_url: acct.avatarUrl || null,
+    is_verified: acct.isVerified !== false,
     bio: acct.bio,
     category: acct.category,
     location: acct.location,
     is_authorized: nextVal
   }], '', globalThis.fetch, 'username');
   showToast(nextVal ? `Authorized @${username}` : `Paused @${username}`);
+}
+
+function openCreateStarterModal() {
+  if (!isOwnerAdmin()) return;
+  openModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <h3 style="margin:0;">Create New Showcase Starter</h3>
+      <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+    </div>
+    <form id="createStarterForm" style="display:grid;gap:12px;">
+      <div class="field-grid-2">
+        <div>
+          <label class="small muted">Username *</label>
+          <input id="newStUsername" class="input" placeholder="e.g. zara.studio" required />
+        </div>
+        <div>
+          <label class="small muted">Display Name *</label>
+          <input id="newStDisplayName" class="input" placeholder="e.g. Zara Noor" required />
+        </div>
+      </div>
+      <div class="field-grid-2">
+        <div>
+          <label class="small muted">Category</label>
+          <input id="newStCategory" class="input" value="Creator" />
+        </div>
+        <div>
+          <label class="small muted">Location</label>
+          <input id="newStLocation" class="input" placeholder="e.g. Lahore, Pakistan" />
+        </div>
+      </div>
+      <div>
+        <label class="small muted">Avatar Photo (Optional)</label>
+        <input id="newStAvatar" type="file" accept="image/*" class="input" />
+      </div>
+      <div>
+        <label class="small muted">Bio</label>
+        <textarea id="newStBio" class="textarea" rows="3" placeholder="Tell creators about this starter account..."></textarea>
+      </div>
+      <label class="consent-row">
+        <span>Verified Starter Badge</span>
+        <input id="newStVerified" type="checkbox" checked />
+      </label>
+      <label class="consent-row">
+        <span>Authorize Immediately</span>
+        <input id="newStAuthorized" type="checkbox" checked />
+      </label>
+      <button type="submit" class="btn-primary" id="createStarterSubmitBtn">Create Starter Account</button>
+    </form>
+  `);
+  document.getElementById('closeModalBtn').onclick = closeModal;
+  document.getElementById('createStarterForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const rawUser = document.getElementById('newStUsername').value.trim().toLowerCase().replace(/^@/, '').replace(/[^a-z0-9._]/g, '').slice(0, 50);
+    const displayName = document.getElementById('newStDisplayName').value.trim().slice(0, 80);
+    if (!rawUser || !displayName) {
+      showToast('Enter a valid username and display name.');
+      return;
+    }
+    const btn = document.getElementById('createStarterSubmitBtn');
+    btn.disabled = true;
+    btn.textContent = 'Creating...';
+    try {
+      const avatarFile = document.getElementById('newStAvatar').files?.[0];
+      let avatarUrl = null;
+      if (avatarFile) {
+        const up = await uploadWebFileToStorage(SUPABASE_WEB_CONFIG, 'momi-avatars', `${state.user.uid}/starters/${rawUser}.jpg`, avatarFile, avatarFile.type || 'image/jpeg');
+        if (up) avatarUrl = `${up}?t=${Date.now()}`;
+      }
+      const row = {
+        username: rawUser,
+        display_name: displayName,
+        avatar_key: 'avatar_elena',
+        avatar_url: avatarUrl,
+        is_verified: Boolean(document.getElementById('newStVerified').checked),
+        category: document.getElementById('newStCategory').value.trim().slice(0, 60) || 'Creator',
+        location: document.getElementById('newStLocation').value.trim().slice(0, 120),
+        bio: document.getElementById('newStBio').value.trim().slice(0, 300),
+        is_authorized: Boolean(document.getElementById('newStAuthorized').checked)
+      };
+      await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'showcase_accounts', [row], '', globalThis.fetch, 'username');
+      closeModal();
+      await refreshAllFromSupabase({ showErrors: false, forceRender: true });
+      showToast(`Created starter @${rawUser}!`);
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = 'Create Starter Account';
+      showToast(err?.message || 'Could not create starter account');
+    }
+  };
 }
 
 function openEditStarterModal(username) {
@@ -6099,6 +6648,10 @@ function openEditStarterModal(username) {
         <label class="small muted">Display Name</label>
         <input id="stDisplayName" class="input" value="${escapeHtml(acct.displayName)}" required />
       </div>
+      <div>
+        <label class="small muted">Upload Custom Avatar Photo</label>
+        <input id="stAvatarInput" type="file" accept="image/*" class="input" />
+      </div>
       <div class="field-grid-2">
         <div>
           <label class="small muted">Category</label>
@@ -6114,19 +6667,42 @@ function openEditStarterModal(username) {
         <textarea id="stBio" class="textarea" rows="3">${escapeHtml(acct.bio)}</textarea>
       </div>
       <label class="consent-row">
+        <span>Verified Badge</span>
+        <input id="stVerified" type="checkbox" ${acct.isVerified !== false ? 'checked' : ''} />
+      </label>
+      <label class="consent-row">
         <span>Authorized to Publish &amp; Engage</span>
         <input id="stAuthorized" type="checkbox" ${acct.isAuthorized ? 'checked' : ''} />
       </label>
-      <button type="submit" class="btn-primary">Save Starter Profile</button>
+      <div class="chip-row">
+        <button type="submit" class="btn-primary" style="flex:1;">Save Starter Profile</button>
+        <button type="button" class="btn-danger btn-sm" id="deleteStarterAcctBtn">Delete Starter</button>
+      </div>
     </form>
   `);
   document.getElementById('closeModalBtn').onclick = closeModal;
+  document.getElementById('deleteStarterAcctBtn').onclick = async () => {
+    if (!window.confirm(`Delete starter account @${acct.username}?`)) return;
+    await deleteShowcaseAccountFromSupabase(SUPABASE_WEB_CONFIG, acct.username);
+    state.showcaseAccounts = state.showcaseAccounts.filter((a) => a.username !== acct.username);
+    closeModal();
+    renderAdminConsole();
+    showToast(`Deleted starter @${acct.username}`);
+  };
   document.getElementById('editStarterForm').onsubmit = async (e) => {
     e.preventDefault();
+    const avatarFile = document.getElementById('stAvatarInput').files?.[0];
+    let avatarUrl = acct.avatarUrl || null;
+    if (avatarFile) {
+      const up = await uploadWebFileToStorage(SUPABASE_WEB_CONFIG, 'momi-avatars', `${state.user.uid}/starters/${acct.username}.jpg`, avatarFile, avatarFile.type || 'image/jpeg');
+      if (up) avatarUrl = `${up}?t=${Date.now()}`;
+    }
     const row = {
       username: acct.username,
       display_name: document.getElementById('stDisplayName').value.trim().slice(0, 80) || acct.displayName,
       avatar_key: acct.avatarKey,
+      avatar_url: avatarUrl,
+      is_verified: Boolean(document.getElementById('stVerified').checked),
       category: document.getElementById('stCategory').value.trim().slice(0, 60) || acct.category,
       location: document.getElementById('stLocation').value.trim().slice(0, 120),
       bio: document.getElementById('stBio').value.trim().slice(0, 300),
@@ -6134,8 +6710,41 @@ function openEditStarterModal(username) {
     };
     await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'showcase_accounts', [row], '', globalThis.fetch, 'username');
     closeModal();
-    await refreshAllFromSupabase({ showErrors: false });
+    await refreshAllFromSupabase({ showErrors: false, forceRender: true });
     showToast(`Updated starter @${acct.username}`);
+  };
+}
+
+function openEditStarterPostModal(postId) {
+  if (!isOwnerAdmin()) return;
+  const post = state.posts.find((p) => p.id === postId);
+  if (!post) return;
+  openModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <h3 style="margin:0;">Edit Starter Post (@${escapeHtml(post.authorUsername)})</h3>
+      <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+    </div>
+    <form id="editStarterPostForm" style="display:grid;gap:12px;">
+      <div>
+        <label class="small muted">Caption</label>
+        <textarea id="editStarterPostCaption" class="textarea" rows="4">${escapeHtml(post.caption || '')}</textarea>
+      </div>
+      <button type="submit" class="btn-primary">Save Post Caption</button>
+    </form>
+  `);
+  document.getElementById('closeModalBtn').onclick = closeModal;
+  document.getElementById('editStarterPostForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const caption = document.getElementById('editStarterPostCaption').value.trim().slice(0, 1000);
+    const hashtags = extractHashtags(caption);
+    const taggedUsernames = extractMentions(caption);
+    post.caption = caption;
+    post.hashtags = hashtags;
+    post.taggedUsernames = taggedUsernames;
+    await updatePostCaptionInSupabase(SUPABASE_WEB_CONFIG, postId, caption, hashtags, taggedUsernames);
+    closeModal();
+    renderAdminConsole();
+    showToast('Updated starter post caption!');
   };
 }
 
@@ -6146,27 +6755,48 @@ function openPublishAsStarterModal(username) {
     showToast('Authorize this starter account first.');
     return;
   }
+  let starterPublishMode = 'POST'; // POST | VIDEO | STORY
+  let selectedBgKey = 'maroon';
   openModal(`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
-      <h3 style="margin:0;">Publish Post/Video as @${escapeHtml(acct.username)}</h3>
+      <h3 style="margin:0;">Publish as @${escapeHtml(acct.username)}</h3>
       <button type="button" class="btn-ghost btn-sm" id="closeModalBtn">Close</button>
+    </div>
+    <div class="chip-row" style="margin-bottom:12px;">
+      <button type="button" class="chip active" data-st-mode="POST">Photo Post</button>
+      <button type="button" class="chip" data-st-mode="VIDEO">Video (80m)</button>
+      <button type="button" class="chip" data-st-mode="STORY">24h Story</button>
     </div>
     <form id="publishStarterForm" style="display:grid;gap:12px;">
       <div>
-        <label class="small muted">Caption *</label>
-        <textarea id="stPostCaption" class="textarea" rows="3" placeholder="Write caption with #hashtags..." required></textarea>
+        <label class="small muted" id="stCaptionLbl">Caption *</label>
+        <textarea id="stPostCaption" class="textarea" rows="3" placeholder="Write caption with #hashtags..."></textarea>
+      </div>
+      <div id="stStoryControls" class="hidden" style="display:grid;gap:10px;">
+        <div>
+          <label class="small muted">Text Overlay (on Story Card)</label>
+          <input id="stStoryOverlay" class="input" placeholder="Optional bold overlay text..." />
+        </div>
+        <div>
+          <label class="small muted">Story Background Color</label>
+          <div class="chip-row" style="margin-top:6px;">
+            ${STORY_BG_OPTIONS.map((b) => `
+              <button type="button" class="chip ${b.key === selectedBgKey ? 'active' : ''}" data-st-bg="${b.key}">${escapeHtml(b.label)}</button>
+            `).join('')}
+          </div>
+        </div>
       </div>
       <div class="field-grid-2">
         <div>
-          <label class="small muted">Photo Upload (optional)</label>
+          <label class="small muted" id="stPhotoLbl">Photo / Video Cover (optional)</label>
           <input id="stPostPhoto" type="file" accept="image/*" class="input" />
         </div>
         <div>
-          <label class="small muted">Video Upload (.mp4, optional)</label>
+          <label class="small muted">Video (.mp4 up to 80m, optional)</label>
           <input id="stPostVideo" type="file" accept="video/*" class="input" />
         </div>
       </div>
-      <div class="field-grid-2">
+      <div id="stPostMetricsRow" class="field-grid-2">
         <div>
           <label class="small muted">Initial Likes</label>
           <input id="stInitLikes" type="number" min="0" max="5000" value="24" class="input" />
@@ -6180,52 +6810,125 @@ function openPublishAsStarterModal(username) {
     </form>
   `);
   document.getElementById('closeModalBtn').onclick = closeModal;
+  modalContent.querySelectorAll('[data-st-mode]').forEach((b) => {
+    b.onclick = () => {
+      starterPublishMode = b.dataset.stMode;
+      modalContent.querySelectorAll('[data-st-mode]').forEach((x) => x.classList.toggle('active', x.dataset.stMode === starterPublishMode));
+      const isStory = starterPublishMode === 'STORY';
+      document.getElementById('stStoryControls').classList.toggle('hidden', !isStory);
+      document.getElementById('stPostMetricsRow').classList.toggle('hidden', isStory);
+      document.getElementById('stCaptionLbl').textContent = isStory ? 'Story Caption' : 'Caption *';
+    };
+  });
+  modalContent.querySelectorAll('[data-st-bg]').forEach((b) => {
+    b.onclick = () => {
+      selectedBgKey = b.dataset.stBg;
+      modalContent.querySelectorAll('[data-st-bg]').forEach((x) => x.classList.toggle('active', x.dataset.stBg === selectedBgKey));
+    };
+  });
   document.getElementById('publishStarterForm').onsubmit = async (e) => {
     e.preventDefault();
     const btn = document.getElementById('stPostSubmitBtn');
     btn.disabled = true;
     btn.textContent = 'Publishing...';
     try {
-      const postId = `showcase_${acct.username.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}`;
+      const cleanUser = acct.username.replace(/[^a-z0-9]/gi, '_');
+      const isStory = starterPublishMode === 'STORY';
+      const itemId = `showcase_${isStory ? 'story_' : ''}${cleanUser}_${Date.now()}`;
       const caption = document.getElementById('stPostCaption').value.trim().slice(0, 1000);
       const photoFile = document.getElementById('stPostPhoto').files?.[0];
       const videoFile = document.getElementById('stPostVideo').files?.[0];
       let imageUrl = null;
       let videoUrl = null;
-      if (photoFile) {
-        imageUrl = await uploadWebFileToStorage(SUPABASE_WEB_CONFIG, 'momi-media', `posts/${state.user.uid}/${postId}.jpg`, photoFile, photoFile.type || 'image/jpeg');
-      }
+      let videoDurationMs = 0;
+
       if (videoFile) {
+        videoDurationMs = await new Promise((resolve) => {
+          const tempVid = document.createElement('video');
+          tempVid.preload = 'metadata';
+          const objUrl = URL.createObjectURL(videoFile);
+          tempVid.onloadedmetadata = () => {
+            const ms = Math.round((tempVid.duration || 0) * 1000);
+            URL.revokeObjectURL(objUrl);
+            resolve(ms);
+          };
+          tempVid.onerror = () => {
+            URL.revokeObjectURL(objUrl);
+            resolve(0);
+          };
+          tempVid.src = objUrl;
+        });
+        const maxDur = isStory ? MAX_STORY_VIDEO_DURATION_MS : MAX_VIDEO_DURATION_MS;
+        if (videoDurationMs > maxDur) {
+          throw new Error(isStory ? 'Story video must be within 30 seconds.' : 'Video must be within 80 minutes (80:00).');
+        }
         const ext = (videoFile.name.split('.').pop() || 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp4';
-        videoUrl = await uploadWebFileToStorage(SUPABASE_WEB_CONFIG, 'momi-videos', `videos/${state.user.uid}/${postId}.${ext}`, videoFile, videoFile.type || 'video/mp4');
+        videoUrl = await uploadWebFileToStorage(SUPABASE_WEB_CONFIG, 'momi-videos', `${state.user.uid}/videos/${itemId}.${ext}`, videoFile, videoFile.type || 'video/mp4');
+        if (!videoUrl) {
+          const errDetail = getLastStorageUploadError();
+          throw new Error(
+            errDetail
+              ? `Could not upload starter video (${errDetail}).`
+              : 'Could not upload starter video to Supabase Storage.'
+          );
+        }
       }
-      const postRow = {
-        id: postId,
-        user_id: state.user.uid,
-        author_username: acct.username,
-        author_display_name: acct.displayName,
-        author_avatar_key: acct.avatarKey || 'avatar_elena',
-        author_verified: true,
-        location: acct.location || '',
-        image_key: 'img_post_coastal',
-        image_url: imageUrl,
-        media_type: videoUrl ? 'VIDEO' : 'IMAGE',
-        video_url: videoUrl,
-        hashtags: extractHashtags(caption),
-        tagged_usernames: extractMentions(caption),
-        caption,
-        likes_count: Math.max(0, Number(document.getElementById('stInitLikes').value) || 0),
-        views_count: Math.max(0, Number(document.getElementById('stInitViews').value) || 0),
-        comments_count: 0,
-        category: acct.category || 'Travel',
-        is_reel: Boolean(videoUrl)
-      };
-      const mapped = mapSupabasePostToWeb(postRow);
-      state.pendingMutations.createdPosts.set(postId, { post: mapped, expiresAt: Date.now() + 12000 });
-      await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'posts', [postRow], '', globalThis.fetch, 'id');
-      closeModal();
-      await refreshAllFromSupabase({ showErrors: false });
-      showToast(`Published post as @${acct.username}!`);
+      if (photoFile) {
+        imageUrl = await uploadWebFileToStorage(SUPABASE_WEB_CONFIG, 'momi-media', `${state.user.uid}/posts/${itemId}_cover.jpg`, photoFile, photoFile.type || 'image/jpeg');
+      }
+
+      if (isStory) {
+        const overlayText = document.getElementById('stStoryOverlay')?.value.trim() || '';
+        const finalCaption = encodeStoryOverlayCaption(caption, overlayText, 'D', 0.5);
+        const storyRow = {
+          id: itemId,
+          user_id: state.user.uid,
+          username: acct.username,
+          avatar_key: acct.avatarKey || 'avatar_elena',
+          image_key: encodeStoryBgKey('img_post_coastal', photoFile || videoFile ? '' : selectedBgKey),
+          image_url: imageUrl,
+          media_type: videoUrl ? 'VIDEO' : 'IMAGE',
+          video_url: videoUrl,
+          video_duration_ms: videoDurationMs,
+          caption: finalCaption
+        };
+        await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'stories', [storyRow], '', globalThis.fetch, 'id');
+        closeModal();
+        await refreshAllFromSupabase({ showErrors: false, forceRender: true });
+        showToast(`Published 24h story as @${acct.username}!`);
+      } else {
+        if (!caption && !photoFile && !videoFile) {
+          throw new Error('Add a caption, photo, or video first.');
+        }
+        const postRow = {
+          id: itemId,
+          user_id: state.user.uid,
+          author_username: acct.username,
+          author_display_name: acct.displayName,
+          author_avatar_key: acct.avatarKey || 'avatar_elena',
+          author_verified: acct.isVerified !== false,
+          location: acct.location || '',
+          image_key: 'img_post_coastal',
+          image_url: imageUrl,
+          media_type: videoUrl ? 'VIDEO' : 'IMAGE',
+          video_url: videoUrl,
+          video_duration_ms: Math.max(0, Math.min(MAX_VIDEO_DURATION_MS, videoDurationMs)),
+          hashtags: extractHashtags(caption),
+          tagged_usernames: extractMentions(caption),
+          caption,
+          likes_count: Math.max(0, Number(document.getElementById('stInitLikes').value) || 0),
+          views_count: Math.max(0, Number(document.getElementById('stInitViews').value) || 0),
+          comments_count: 0,
+          category: acct.category || 'Travel',
+          is_reel: Boolean(videoUrl)
+        };
+        const mapped = mapSupabasePostToWeb(postRow);
+        state.pendingMutations.createdPosts.set(itemId, { post: mapped, expiresAt: Date.now() + 12000 });
+        await upsertSupabaseTable(SUPABASE_WEB_CONFIG, 'posts', [postRow], '', globalThis.fetch, 'id');
+        closeModal();
+        await refreshAllFromSupabase({ showErrors: false, forceRender: true });
+        showToast(`Published post as @${acct.username}!`);
+      }
     } catch (err) {
       btn.disabled = false;
       btn.textContent = `Publish as @${acct.username}`;

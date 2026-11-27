@@ -82,6 +82,8 @@ import com.example.data.model.Post
 import com.example.util.MediaAssets
 import kotlinx.coroutines.delay
 
+private val CAPTION_TOKEN_REGEX = Regex("(#\\w+|@[a-zA-Z0-9._]+)")
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun PostCard(
@@ -364,7 +366,8 @@ fun PostCard(
                             }
                         )
                     }
-                    if (isOwnPost && onDeletePost != null) {
+                    val canManagePost = isOwnPost || (isAdminViewActive && post.id.startsWith("showcase_"))
+                    if (canManagePost && onDeletePost != null) {
                         DropdownMenuItem(
                             text = { Text("Delete post", color = MaterialTheme.colorScheme.tertiary) },
                             onClick = {
@@ -771,9 +774,8 @@ fun PostCard(
                     }
                     append("  ")
 
-                    val tokenRegex = Regex("(#\\w+|@[a-zA-Z0-9._]+)")
                     var cursor = 0
-                    for (match in tokenRegex.findAll(post.caption)) {
+                    for (match in CAPTION_TOKEN_REGEX.findAll(post.caption)) {
                         if (match.range.first > cursor) {
                             withStyle(SpanStyle(color = onBgColor)) {
                                 append(post.caption.substring(cursor, match.range.first))

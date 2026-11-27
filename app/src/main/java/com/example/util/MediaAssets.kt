@@ -8,8 +8,13 @@ import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.media.ExifInterface
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Base64
 import androidx.annotation.DrawableRes
 import androidx.annotation.OptIn
@@ -19,17 +24,21 @@ import androidx.compose.ui.graphics.ColorMatrix
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.FrameDropEffect
 import androidx.media3.effect.Presentation
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import androidx.media3.transformer.VideoEncoderSettings
 import com.example.R
 import com.example.data.model.Timestamp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -41,6 +50,48 @@ import java.io.File
 import java.util.Locale
 import java.util.UUID
 import kotlin.coroutines.resume
+
+data class VideoSourceMetadata(
+    val widthPx: Int = 0,
+    val heightPx: Int = 0,
+    val rotationDegrees: Int = 0,
+    val frameRateFps: Float = 0f,
+    val bitrateBps: Long = 0L,
+    val durationMs: Long = 0L,
+    val mimeType: String = "",
+    val fileSizeBytes: Long = 0L,
+    val fileExtension: String = "mp4"
+) {
+    val orientedWidthPx: Int
+        get() = if (rotationDegrees % 180 != 0 && heightPx > 0) heightPx else widthPx
+    val orientedHeightPx: Int
+        get() = if (rotationDegrees % 180 != 0 && widthPx > 0) widthPx else heightPx
+    val shortEdgePx: Int
+        get() = minOf(orientedWidthPx, orientedHeightPx).coerceAtLeast(0)
+    val longEdgePx: Int
+        get() = maxOf(orientedWidthPx, orientedHeightPx).coerceAtLeast(0)
+}
+
+data class VideoNormalizationPlan(
+    val shouldTranscode: Boolean,
+    val needsResolutionScale: Boolean,
+    val needsFrameRateCap: Boolean,
+    val needsCodecOrBitrateNormalization: Boolean,
+    val targetShortEdgePx: Int,
+    val targetOutputHeightPx: Int,
+    val targetFps: Float,
+    val targetBitrateBps: Int
+)
+
+data class NormalizedVideoResult(
+    val uploadFilePath: String,
+    val isTemporaryTranscodeFile: Boolean,
+    val wasTranscoded: Boolean,
+    val widthPx: Int = 0,
+    val heightPx: Int = 0,
+    val frameRateFps: Float = 0f,
+    val durationMs: Long = 0L
+)
 
 data class ExtractedVideoMedia(
     val localVideoPath: String,
@@ -63,6 +114,12 @@ object MediaAssets {
     private const val TAG = "MediaAssets"
     const val MAX_POST_VIDEO_DURATION_MS = 4_800_000L // 80 minutes
     const val MAX_STORY_VIDEO_DURATION_MS = 30_000L
+    const val NORMALIZED_MAX_SHORT_EDGE_PX = 720
+    const val NORMALIZED_TARGET_FPS = 30f
+    const val NORMALIZED_DEFAULT_VIDEO_BITRATE = 2_200_000
+    const val NORMALIZED_LONG_VIDEO_BITRATE = 1_500_000
+    const val MAX_PASSTHROUGH_BITRATE = 3_500_000L
+    const val MAX_NORMALIZED_UPLOAD_BYTES = 1_900_000_000L
     private const val INLINE_MAX_RAW_BYTES = 340_000L
     private const val CHUNK_SLICE_RAW_BYTES = 340_000
     private const val MAX_VIDEO_CHUNKS = 24
@@ -559,11 +616,28 @@ object MediaAssets {
         }.getOrNull()
     }
 
+    private val decodedBase64Cache = android.util.LruCache<Int, ByteArray>(48)
+
     fun decodeBase64ToBytes(imageData: String?): ByteArray? {
         if (imageData.isNullOrBlank()) return null
+        val cacheKey = 31 * imageData.length + imageData.hashCode()
+        decodedBase64Cache.get(cacheKey)?.let { return it }
         return runCatching {
-            Base64.decode(imageData, Base64.DEFAULT)
+            Base64.decode(imageData, Base64.DEFAULT).also { decoded ->
+                if (decoded.isNotEmpty() && decoded.size <= 350_000) {
+                    decodedBase64Cache.put(cacheKey, decoded)
+                }
+            }
         }.getOrNull()
+    }
+
+    suspend fun decodeBase64ToBytesAsync(imageData: String?): ByteArray? {
+        if (imageData.isNullOrBlank()) return null
+        val cacheKey = 31 * imageData.length + imageData.hashCode()
+        decodedBase64Cache.get(cacheKey)?.let { return it }
+        return withContext(Dispatchers.IO) {
+            decodeBase64ToBytes(imageData)
+        }
     }
 
     fun decodeBase64ToBitmap(frameData: String?): Bitmap? {
@@ -623,10 +697,18 @@ object MediaAssets {
         return runCatching {
             val dir = File(context.filesDir, "luma_media")
             if (!dir.exists()) dir.mkdirs()
-            val outFile = File(dir, "clip_${UUID.randomUUID()}.mp4")
+            val mime = runCatching { context.contentResolver.getType(uri) }.getOrNull().orEmpty().lowercase(Locale.US)
+            val ext = when {
+                mime.contains("webm") -> "webm"
+                mime.contains("quicktime") || mime.contains("mov") -> "mov"
+                mime.contains("x-matroska") || mime.contains("mkv") -> "mkv"
+                mime.contains("3gpp") -> "3gp"
+                else -> "mp4"
+            }
+            val outFile = File(dir, "clip_${UUID.randomUUID()}.$ext")
             context.contentResolver.openInputStream(uri)?.use { input ->
                 outFile.outputStream().use { output ->
-                    input.copyTo(output)
+                    input.copyTo(output, bufferSize = 65_536)
                 }
             }
             if (!outFile.exists() || outFile.length() == 0L) return null
@@ -635,22 +717,26 @@ object MediaAssets {
             var thumbnailPath: String? = null
             val retriever = MediaMetadataRetriever()
             try {
-                retriever.setDataSource(outFile.absolutePath)
-                durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-                    ?.toLongOrNull()
-                    ?.coerceAtLeast(0L)
-                    ?: 0L
-                val frame = retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    ?: retriever.getFrameAtTime(500_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                if (frame != null) {
-                    val thumbFile = File(dir, "thumb_${UUID.randomUUID()}.jpg")
-                    thumbFile.outputStream().use { thumbOut ->
-                        frame.compress(Bitmap.CompressFormat.JPEG, 82, thumbOut)
+                runCatching {
+                    retriever.setDataSource(outFile.absolutePath)
+                    durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                        ?.toLongOrNull()
+                        ?.coerceAtLeast(0L)
+                        ?: 0L
+                    val frame = retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                        ?: retriever.getFrameAtTime(500_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    if (frame != null) {
+                        val thumbFile = File(dir, "thumb_${UUID.randomUUID()}.jpg")
+                        thumbFile.outputStream().use { thumbOut ->
+                            frame.compress(Bitmap.CompressFormat.JPEG, 82, thumbOut)
+                        }
+                        frame.recycle()
+                        if (thumbFile.exists() && thumbFile.length() > 0L) {
+                            thumbnailPath = thumbFile.absolutePath
+                        }
                     }
-                    frame.recycle()
-                    if (thumbFile.exists() && thumbFile.length() > 0L) {
-                        thumbnailPath = thumbFile.absolutePath
-                    }
+                }.onFailure { err ->
+                    Log.w(TAG, "Video metadata/thumbnail extraction failed (continuing with file): ${err.message}")
                 }
             } finally {
                 runCatching { retriever.release() }
@@ -662,6 +748,307 @@ object MediaAssets {
                 durationMs = durationMs
             )
         }.getOrNull()
+    }
+
+    internal fun computeVideoNormalizationPlan(meta: VideoSourceMetadata): VideoNormalizationPlan {
+        val orientedW = meta.orientedWidthPx
+        val orientedH = meta.orientedHeightPx
+        val shortEdge = meta.shortEdgePx
+        val targetShort = if (shortEdge > 0) {
+            ((minOf(shortEdge, NORMALIZED_MAX_SHORT_EDGE_PX) / 2) * 2).coerceAtLeast(240)
+        } else {
+            NORMALIZED_MAX_SHORT_EDGE_PX
+        }
+        val targetOutputHeight = when {
+            orientedW <= 0 || orientedH <= 0 -> NORMALIZED_MAX_SHORT_EDGE_PX
+            orientedW >= orientedH -> targetShort
+            else -> {
+                val scaledH = ((targetShort.toDouble() * orientedH.toDouble()) / orientedW.toDouble()).toInt()
+                ((scaledH / 2) * 2).coerceIn(240, 1280)
+            }
+        }
+
+        val needsResolutionScale = shortEdge > NORMALIZED_MAX_SHORT_EDGE_PX ||
+            (orientedW > 0 && orientedW % 2 != 0) ||
+            (orientedH > 0 && orientedH % 2 != 0)
+        val needsFrameRateCap = meta.frameRateFps > (NORMALIZED_TARGET_FPS + 0.5f) ||
+            meta.frameRateFps <= 0f
+        val cleanMime = meta.mimeType.trim().lowercase(Locale.US)
+        val cleanExt = meta.fileExtension.trim().lowercase(Locale.US)
+        val isCompliantCodec = (cleanMime.isBlank() || cleanMime == MimeTypes.VIDEO_H264 || cleanMime.contains("avc")) &&
+            (cleanExt.isBlank() || cleanExt == "mp4")
+        val needsCodecOrBitrateNormalization = !isCompliantCodec ||
+            meta.bitrateBps > MAX_PASSTHROUGH_BITRATE ||
+            meta.fileSizeBytes > MAX_NORMALIZED_UPLOAD_BYTES
+
+        val shouldTranscode = needsResolutionScale || needsFrameRateCap || needsCodecOrBitrateNormalization
+        val targetBitrate = when {
+            meta.durationMs > 1_800_000L -> NORMALIZED_LONG_VIDEO_BITRATE
+            targetShort <= 480 -> 1_400_000
+            else -> NORMALIZED_DEFAULT_VIDEO_BITRATE
+        }
+
+        return VideoNormalizationPlan(
+            shouldTranscode = shouldTranscode,
+            needsResolutionScale = needsResolutionScale,
+            needsFrameRateCap = needsFrameRateCap,
+            needsCodecOrBitrateNormalization = needsCodecOrBitrateNormalization,
+            targetShortEdgePx = targetShort,
+            targetOutputHeightPx = targetOutputHeight,
+            targetFps = NORMALIZED_TARGET_FPS,
+            targetBitrateBps = targetBitrate
+        )
+    }
+
+    fun extractVideoSourceMetadata(localVideoPath: String): VideoSourceMetadata {
+        val file = File(localVideoPath)
+        if (!file.exists() || file.length() <= 0L) return VideoSourceMetadata()
+
+        var width = 0
+        var height = 0
+        var rotation = 0
+        var durationMs = 0L
+        var bitrateBps = 0L
+        var fps = 0f
+        var mimeType = ""
+
+        val retriever = MediaMetadataRetriever()
+        try {
+            runCatching {
+                retriever.setDataSource(file.absolutePath)
+                width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+                height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+                rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+                durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                bitrateBps = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toLongOrNull() ?: 0L
+                fps = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)?.toFloatOrNull() ?: 0f
+                mimeType = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE).orEmpty()
+            }
+        } finally {
+            runCatching { retriever.release() }
+        }
+
+        val extractor = MediaExtractor()
+        try {
+            runCatching {
+                extractor.setDataSource(file.absolutePath)
+                for (i in 0 until extractor.trackCount) {
+                    val format = extractor.getTrackFormat(i)
+                    val trackMime = format.getString(MediaFormat.KEY_MIME).orEmpty()
+                    if (trackMime.startsWith("video/", ignoreCase = true)) {
+                        mimeType = trackMime
+                        if (width <= 0 && format.containsKey(MediaFormat.KEY_WIDTH)) {
+                            width = format.getInteger(MediaFormat.KEY_WIDTH)
+                        }
+                        if (height <= 0 && format.containsKey(MediaFormat.KEY_HEIGHT)) {
+                            height = format.getInteger(MediaFormat.KEY_HEIGHT)
+                        }
+                        if (format.containsKey(MediaFormat.KEY_FRAME_RATE)) {
+                            val trackFps = runCatching { format.getInteger(MediaFormat.KEY_FRAME_RATE).toFloat() }
+                                .getOrElse {
+                                    runCatching { format.getFloat(MediaFormat.KEY_FRAME_RATE) }.getOrDefault(0f)
+                                }
+                            if (trackFps > 0f) fps = trackFps
+                        }
+                        break
+                    }
+                }
+            }
+        } finally {
+            runCatching { extractor.release() }
+        }
+
+        if (bitrateBps <= 0L && durationMs > 0L) {
+            bitrateBps = (file.length() * 8_000L) / durationMs
+        }
+
+        return VideoSourceMetadata(
+            widthPx = width,
+            heightPx = height,
+            rotationDegrees = rotation,
+            frameRateFps = fps,
+            bitrateBps = bitrateBps,
+            durationMs = durationMs,
+            mimeType = mimeType,
+            fileSizeBytes = file.length(),
+            fileExtension = file.extension.lowercase(Locale.US)
+        )
+    }
+
+    /**
+     * Client-side Media3 Transformer normalization step executed before upload:
+     * - Normalizes high-resolution clips (e.g. 4K/1080p) down to <= 720p short edge using Presentation
+     * - Caps high/variable frame rates above 30 fps down to a smooth 30 fps via FrameDropEffect
+     * - Transcodes exotic containers/codecs (HEVC/AV1/WebM/MKV) into H.264 + AAC MP4 with predictable bitrate
+     * - Skips re-encoding automatically when source media already meets Momi playback specs
+     */
+    @OptIn(UnstableApi::class)
+    suspend fun normalizeVideoForUpload(
+        context: Context,
+        localVideoPath: String,
+        onProgress: ((Float) -> Unit)? = null
+    ): NormalizedVideoResult {
+        val sourceFile = File(localVideoPath)
+        if (!sourceFile.exists() || sourceFile.length() <= 0L) {
+            return NormalizedVideoResult(
+                uploadFilePath = localVideoPath,
+                isTemporaryTranscodeFile = false,
+                wasTranscoded = false
+            )
+        }
+
+        val sourceMeta = withContext(Dispatchers.IO) {
+            extractVideoSourceMetadata(localVideoPath)
+        }
+        val plan = computeVideoNormalizationPlan(sourceMeta)
+        if (!plan.shouldTranscode) {
+            Log.d(
+                TAG,
+                "Video already normalized (${sourceMeta.orientedWidthPx}x${sourceMeta.orientedHeightPx}, ${sourceMeta.frameRateFps}fps); skipping transcode."
+            )
+            onProgress?.invoke(1f)
+            return NormalizedVideoResult(
+                uploadFilePath = sourceFile.absolutePath,
+                isTemporaryTranscodeFile = false,
+                wasTranscoded = false,
+                widthPx = sourceMeta.orientedWidthPx,
+                heightPx = sourceMeta.orientedHeightPx,
+                frameRateFps = sourceMeta.frameRateFps,
+                durationMs = sourceMeta.durationMs
+            )
+        }
+
+        val normalizedFile = File(context.cacheDir, "momi_norm_${UUID.randomUUID()}.mp4")
+        val timeoutMs = ((sourceMeta.durationMs * 1.5).toLong()).coerceIn(60_000L, 1_200_000L)
+
+        val videoEffects = buildList {
+            if (plan.needsFrameRateCap) {
+                add(FrameDropEffect.createDefaultFrameDropEffect(plan.targetFps))
+            }
+            if (plan.needsResolutionScale || plan.targetOutputHeightPx > 0) {
+                add(Presentation.createForHeight(plan.targetOutputHeightPx))
+            }
+        }
+
+        val exportSucceeded = try {
+            withTimeoutOrNull(timeoutMs) {
+                withContext(Dispatchers.Main.immediate) {
+                    suspendCancellableCoroutine { cont ->
+                        val mainHandler = Handler(Looper.getMainLooper())
+                        var progressRunnable: Runnable? = null
+
+                        val encoderFactory = DefaultEncoderFactory.Builder(context)
+                            .setRequestedVideoEncoderSettings(
+                                VideoEncoderSettings.Builder()
+                                    .setBitrate(plan.targetBitrateBps)
+                                    .build()
+                            )
+                            .setEnableFallback(true)
+                            .build()
+
+                        val editedMediaItem = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(sourceFile)))
+                            .setEffects(Effects(emptyList(), videoEffects))
+                            .build()
+
+                        val sequence = EditedMediaItemSequence.Builder(editedMediaItem).build()
+                        val compositionBuilder = Composition.Builder(sequence)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            compositionBuilder.setHdrMode(Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL)
+                        }
+                        val composition = compositionBuilder.build()
+
+                        val transformer = Transformer.Builder(context)
+                            .setEncoderFactory(encoderFactory)
+                            .setVideoMimeType(MimeTypes.VIDEO_H264)
+                            .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                            .addListener(object : Transformer.Listener {
+                                override fun onCompleted(comp: Composition, exportResult: ExportResult) {
+                                    progressRunnable?.let { mainHandler.removeCallbacks(it) }
+                                    onProgress?.invoke(1f)
+                                    if (cont.isActive) cont.resume(true)
+                                }
+
+                                override fun onError(
+                                    comp: Composition,
+                                    exportResult: ExportResult,
+                                    exportException: ExportException
+                                ) {
+                                    progressRunnable?.let { mainHandler.removeCallbacks(it) }
+                                    Log.w(
+                                        TAG,
+                                        "Normalized transcode failed (${exportException.errorCodeName}); falling back to source file",
+                                        exportException
+                                    )
+                                    if (cont.isActive) cont.resume(false)
+                                }
+                            })
+                            .build()
+
+                        cont.invokeOnCancellation {
+                            progressRunnable?.let { mainHandler.removeCallbacks(it) }
+                            runCatching { transformer.cancel() }
+                        }
+
+                        runCatching {
+                            transformer.start(composition, normalizedFile.absolutePath)
+                            val holder = ProgressHolder()
+                            val poller = object : Runnable {
+                                override fun run() {
+                                    if (!cont.isActive) return
+                                    val state = runCatching { transformer.getProgress(holder) }
+                                        .getOrDefault(Transformer.PROGRESS_STATE_NOT_STARTED)
+                                    if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
+                                        onProgress?.invoke((holder.progress / 100f).coerceIn(0f, 0.99f))
+                                    }
+                                    if (state != Transformer.PROGRESS_STATE_NOT_STARTED) {
+                                        mainHandler.postDelayed(this, 350L)
+                                    }
+                                }
+                            }
+                            progressRunnable = poller
+                            mainHandler.postDelayed(poller, 300L)
+                        }.onFailure { err ->
+                            progressRunnable?.let { mainHandler.removeCallbacks(it) }
+                            Log.w(TAG, "Normalized Transformer start failed", err)
+                            if (cont.isActive) cont.resume(false)
+                        }
+                    }
+                }
+            } ?: false
+        } catch (ce: CancellationException) {
+            runCatching { normalizedFile.delete() }
+            throw ce
+        }
+
+        if (exportSucceeded && normalizedFile.exists() && normalizedFile.length() > 0L) {
+            val outMeta = withContext(Dispatchers.IO) {
+                extractVideoSourceMetadata(normalizedFile.absolutePath)
+            }
+            Log.d(
+                TAG,
+                "Normalized video ready: ${outMeta.orientedWidthPx}x${outMeta.orientedHeightPx} @ ${outMeta.frameRateFps}fps (${normalizedFile.length()} bytes)"
+            )
+            return NormalizedVideoResult(
+                uploadFilePath = normalizedFile.absolutePath,
+                isTemporaryTranscodeFile = true,
+                wasTranscoded = true,
+                widthPx = outMeta.orientedWidthPx,
+                heightPx = outMeta.orientedHeightPx,
+                frameRateFps = outMeta.frameRateFps.takeIf { it > 0f } ?: plan.targetFps,
+                durationMs = outMeta.durationMs.takeIf { it > 0L } ?: sourceMeta.durationMs
+            )
+        }
+
+        runCatching { normalizedFile.delete() }
+        return NormalizedVideoResult(
+            uploadFilePath = sourceFile.absolutePath,
+            isTemporaryTranscodeFile = false,
+            wasTranscoded = false,
+            widthPx = sourceMeta.orientedWidthPx,
+            heightPx = sourceMeta.orientedHeightPx,
+            frameRateFps = sourceMeta.frameRateFps,
+            durationMs = sourceMeta.durationMs
+        )
     }
 
     /**
@@ -1061,9 +1448,14 @@ object MediaAssets {
 
     fun formatDuration(durationMs: Long): String {
         val totalSeconds = (durationMs / 1000L).coerceAtLeast(0L)
-        val minutes = totalSeconds / 60L
+        val hours = totalSeconds / 3600L
+        val minutes = (totalSeconds % 3600L) / 60L
         val seconds = totalSeconds % 60L
-        return String.format(Locale.US, "%d:%02d", minutes, seconds)
+        return if (hours > 0L) {
+            String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds)
+        } else {
+            String.format(Locale.US, "%d:%02d", minutes, seconds)
+        }
     }
 
     fun formatRelativeTime(timestamp: Timestamp?): String {

@@ -41,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -85,10 +86,10 @@ val LocalRemoteVideoResolver = staticCompositionLocalOf<
 @OptIn(UnstableApi::class)
 private fun buildFeedVideoLoadControl(): DefaultLoadControl = DefaultLoadControl.Builder()
     .setBufferDurationsMs(
-        /* minBufferMs = */ 4_000,
-        /* maxBufferMs = */ 15_000,
+        /* minBufferMs = */ 6_000,
+        /* maxBufferMs = */ 25_000,
         /* bufferForPlaybackMs = */ 500,
-        /* bufferForPlaybackAfterRebufferMs = */ 1_000
+        /* bufferForPlaybackAfterRebufferMs = */ 1_500
     )
     .setPrioritizeTimeOverSizeThresholds(true)
     .build()
@@ -111,19 +112,29 @@ fun MomiMusicAudioPlayer(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    val playableMusicUri = remember(mediaId, localAudioPath, audioData, audioTitle, audioUrl) {
-        StudioMusicCatalog.resolvePlayableMusicUri(
-            context = context,
-            localAudioPath = localAudioPath,
-            audioTitle = audioTitle,
-            audioData = audioData,
-            cacheKey = mediaId,
-            audioUrl = audioUrl
-        )
+    val playableMusicUri by produceState<Uri?>(
+        initialValue = null,
+        mediaId,
+        localAudioPath,
+        audioData,
+        audioTitle,
+        audioUrl
+    ) {
+        value = withContext(Dispatchers.IO) {
+            StudioMusicCatalog.resolvePlayableMusicUri(
+                context = context,
+                localAudioPath = localAudioPath,
+                audioTitle = audioTitle,
+                audioData = audioData,
+                cacheKey = mediaId,
+                audioUrl = audioUrl
+            )
+        }
     }
 
-    if (playableMusicUri != null && isPlaying) {
-        val audioPlayer = remember(playableMusicUri) {
+    val currentPlayableMusicUri = playableMusicUri
+    if (currentPlayableMusicUri != null && isPlaying) {
+        val audioPlayer = remember(currentPlayableMusicUri) {
             ExoPlayer.Builder(context)
                 .setAudioAttributes(
                     AudioAttributes.Builder()
@@ -135,7 +146,7 @@ fun MomiMusicAudioPlayer(
                 .build()
                 .apply {
                     repeatMode = Player.REPEAT_MODE_ONE
-                    setMediaItem(MediaItem.fromUri(playableMusicUri))
+                    setMediaItem(MediaItem.fromUri(currentPlayableMusicUri))
                     prepare()
                     playWhenReady = true
                 }
@@ -203,16 +214,11 @@ fun MomiVideoPlayer(
     val remoteVideoResolver = LocalRemoteVideoResolver.current
 
     var retryNonce by remember(mediaId) { mutableIntStateOf(0) }
-    var playableUri by remember(overrideVideoUri, mediaId, localVideoPath, videoData, videoUrl) {
-        mutableStateOf(
-            overrideVideoUri ?: MediaAssets.resolvePlayableVideoUri(
-                context = context,
-                mediaId = mediaId,
-                localVideoPath = localVideoPath,
-                videoData = videoData,
-                videoUrl = videoUrl
-            )
-        )
+    var playableUri by remember(overrideVideoUri, mediaId, videoUrl) {
+        val fastRemote = overrideVideoUri ?: videoUrl?.trim()
+            ?.takeIf { it.startsWith("https://", true) || it.startsWith("http://", true) }
+            ?.let { Uri.parse(it) }
+        mutableStateOf(fastRemote)
     }
     var isLoadingRemoteVideo by remember(mediaId) { mutableStateOf(false) }
     var playbackFailed by remember(mediaId) { mutableStateOf(false) }
@@ -259,23 +265,30 @@ fun MomiVideoPlayer(
         }
     }
 
-    val playableMusicUri = remember(mediaId, localAudioPath, audioData, audioTitle, audioUrl) {
-        StudioMusicCatalog.resolvePlayableMusicUri(
-            context = context,
-            localAudioPath = localAudioPath,
-            audioTitle = audioTitle,
-            audioData = audioData,
-            cacheKey = mediaId,
-            audioUrl = audioUrl
-        )
+    val playableMusicUri by produceState<Uri?>(
+        initialValue = null,
+        mediaId,
+        localAudioPath,
+        audioData,
+        audioTitle,
+        audioUrl
+    ) {
+        value = withContext(Dispatchers.IO) {
+            StudioMusicCatalog.resolvePlayableMusicUri(
+                context = context,
+                localAudioPath = localAudioPath,
+                audioTitle = audioTitle,
+                audioData = audioData,
+                cacheKey = mediaId,
+                audioUrl = audioUrl
+            )
+        }
     }
 
     var internalMuted by remember(mediaId) { mutableStateOf(initialMuted) }
     val isMuted = externalMuted ?: internalMuted
     var userPaused by remember(mediaId) { mutableStateOf(false) }
     var showTapPlayIndicator by remember { mutableStateOf(false) }
-    var firstFrameRendered by remember(playableUri) { mutableStateOf(false) }
-    var playbackProgress by remember(playableUri) { mutableFloatStateOf(0f) }
 
     LaunchedEffect(isPlaying) {
         if (isPlaying) {
@@ -335,7 +348,17 @@ fun MomiVideoPlayer(
         )
 
         val activeUri = playableUri
-        val shouldHoldPlayer = activeUri != null && !playbackFailed && (isPlaying || isPrebuffering)
+        val debouncedPrebuffer by produceState(initialValue = false, isPrebuffering, isPlaying) {
+            if (isPlaying) {
+                value = true
+            } else if (isPrebuffering) {
+                delay(180L)
+                value = true
+            } else {
+                value = false
+            }
+        }
+        val shouldHoldPlayer = activeUri != null && !playbackFailed && (isPlaying || debouncedPrebuffer)
         if (shouldHoldPlayer) {
             val exoPlayer = remember(activeUri, retryNonce) {
                 ExoPlayer.Builder(context)
@@ -355,6 +378,7 @@ fun MomiVideoPlayer(
                         prepare()
                     }
             }
+            var firstFrameRendered by remember(exoPlayer) { mutableStateOf(false) }
 
             val musicPlayer = remember(playableMusicUri, retryNonce) {
                 playableMusicUri?.let { uri ->
@@ -408,18 +432,50 @@ fun MomiVideoPlayer(
             }
 
             LaunchedEffect(exoPlayer, isPlaying, isBuffering, userPaused) {
+                if (isPlaying && !firstFrameRendered) {
+                    delay(450L)
+                    if (isPlaying && !firstFrameRendered &&
+                        exoPlayer.playbackState == Player.STATE_READY &&
+                        exoPlayer.videoSize.width > 0
+                    ) {
+                        firstFrameRendered = true
+                    }
+                }
+            }
+
+            LaunchedEffect(exoPlayer, isPlaying, isBuffering, userPaused) {
                 if (isPlaying && isBuffering && !userPaused) {
-                    delay(6_500L)
-                    if (isPlaying && isBuffering && !userPaused) {
-                        val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
-                        exoPlayer.seekTo(pos)
-                        exoPlayer.prepare()
-                        exoPlayer.playWhenReady = true
-                        exoPlayer.play()
-                        delay(8_500L)
-                        if (isPlaying && isBuffering && !userPaused) {
+                    var lastBufferedPos = exoPlayer.bufferedPosition
+                    var stalledMs = 0L
+                    var retriedPrepare = false
+                    while (isPlaying && isBuffering && !userPaused) {
+                        delay(2_000L)
+                        if (!isPlaying || !isBuffering || userPaused) break
+                        if (exoPlayer.playbackState == Player.STATE_READY) {
                             isBuffering = false
-                            playbackFailed = true
+                            break
+                        }
+                        val currentBuffered = exoPlayer.bufferedPosition
+                        if (currentBuffered > lastBufferedPos + 128L) {
+                            lastBufferedPos = currentBuffered
+                            stalledMs = 0L
+                        } else {
+                            stalledMs += 2_000L
+                            if (!retriedPrepare && stalledMs >= 16_000L) {
+                                retriedPrepare = true
+                                val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
+                                if (exoPlayer.playbackState == Player.STATE_IDLE) {
+                                    exoPlayer.prepare()
+                                } else {
+                                    exoPlayer.seekTo(pos)
+                                }
+                                exoPlayer.playWhenReady = true
+                                exoPlayer.play()
+                            } else if (stalledMs >= 30_000L) {
+                                isBuffering = false
+                                playbackFailed = true
+                                break
+                            }
                         }
                     }
                 }
@@ -436,16 +492,6 @@ fun MomiVideoPlayer(
                 musicPlayer?.volume = if (isMuted) 0f else 1f
             }
 
-            LaunchedEffect(exoPlayer, isPlaying, userPaused, showProgressBar) {
-                while (isPlaying && showProgressBar && !userPaused) {
-                    val dur = exoPlayer.duration
-                    if (dur > 0L) {
-                        playbackProgress = (exoPlayer.currentPosition.toFloat() / dur.toFloat()).coerceIn(0f, 1f)
-                    }
-                    delay(120L)
-                }
-            }
-
             DisposableEffect(lifecycleOwner, exoPlayer, musicPlayer) {
                 val playerListener = object : Player.Listener {
                     override fun onRenderedFirstFrame() {
@@ -459,6 +505,9 @@ fun MomiVideoPlayer(
                             Player.STATE_READY -> {
                                 playbackFailed = false
                                 isBuffering = false
+                                if (currentIsPlaying && exoPlayer.videoSize.width > 0) {
+                                    firstFrameRendered = true
+                                }
                                 val shouldPlay = currentIsPlaying && !currentUserPaused
                                 exoPlayer.playWhenReady = shouldPlay
                                 if (shouldPlay && !exoPlayer.isPlaying) {
@@ -579,20 +628,12 @@ fun MomiVideoPlayer(
                 }
 
                 if (showProgressBar && firstFrameRendered) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .fillMaxWidth()
-                            .height(2.5.dp)
-                            .background(Color.White.copy(alpha = 0.22f))
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth(playbackProgress)
-                                .fillMaxHeight()
-                                .background(MaterialTheme.colorScheme.primary)
-                        )
-                    }
+                    VideoPlaybackProgressBar(
+                        exoPlayer = exoPlayer,
+                        isPlaying = isPlaying,
+                        userPaused = userPaused,
+                        modifier = Modifier.align(Alignment.BottomStart)
+                    )
                 }
             }
         }
@@ -724,5 +765,39 @@ fun MomiVideoPlayer(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun VideoPlaybackProgressBar(
+    exoPlayer: ExoPlayer,
+    isPlaying: Boolean,
+    userPaused: Boolean,
+    modifier: Modifier = Modifier
+) {
+    var playbackProgress by remember(exoPlayer) { mutableFloatStateOf(0f) }
+
+    LaunchedEffect(exoPlayer, isPlaying, userPaused) {
+        while (isPlaying && !userPaused) {
+            val dur = exoPlayer.duration
+            if (dur > 0L) {
+                playbackProgress = (exoPlayer.currentPosition.toFloat() / dur.toFloat()).coerceIn(0f, 1f)
+            }
+            delay(180L)
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(2.5.dp)
+            .background(Color.White.copy(alpha = 0.22f))
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(playbackProgress)
+                .fillMaxHeight()
+                .background(MaterialTheme.colorScheme.primary)
+        )
     }
 }

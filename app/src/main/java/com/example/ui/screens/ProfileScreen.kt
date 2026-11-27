@@ -32,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.filled.AccountBalanceWallet
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddBox
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.AutoAwesome
@@ -39,6 +40,7 @@ import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Collections
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
@@ -142,6 +144,7 @@ fun ProfileScreen(
     follows: List<FollowEdge> = emptyList(),
     followingUids: Set<String>,
     allPosts: List<Post>,
+    allStories: List<Story> = emptyList(),
     wallet: UserWallet? = null,
     themePreference: ThemePreference,
     appColorScheme: AppColorScheme,
@@ -189,8 +192,14 @@ fun ProfileScreen(
     onEngageWithShowcase: () -> Unit = {},
     onRemoveAllShowcase: () -> Unit = {},
     onAuthorizeShowcaseAccount: (ShowcaseAccount, Boolean) -> Unit = { _, _ -> },
-    onUpdateShowcasePersonaProfile: (ShowcaseAccount, String, String, String, String, (Boolean) -> Unit) -> Unit = { _, _, _, _, _, cb -> cb(false) },
-    onPublishCustomShowcasePost: (ShowcaseAccount, String, String, String, String?, String?, Boolean, (Boolean) -> Unit) -> Unit = { _, _, _, _, _, _, _, cb -> cb(false) },
+    onCreateShowcaseAccount: (username: String, displayName: String, bio: String, category: String, location: String, isVerified: Boolean, pickedAvatarPath: String?, (Boolean) -> Unit) -> Unit = { _, _, _, _, _, _, _, cb -> cb(false) },
+    onUpdateShowcasePersonaProfile: (ShowcaseAccount, String, String, String, String, Boolean, String?, (Boolean) -> Unit) -> Unit = { _, _, _, _, _, _, _, cb -> cb(false) },
+    onDeleteShowcaseAccount: (String, (Boolean) -> Unit) -> Unit = { _, cb -> cb(false) },
+    onPublishCustomShowcasePost: (ShowcaseAccount, String, String, String, String?, String?, Long, Boolean, (Boolean) -> Unit) -> Unit = { _, _, _, _, _, _, _, _, cb -> cb(false) },
+    onPublishCustomShowcaseStory: (ShowcaseAccount, String, String, String, String?, String?, Long, String, String, (Boolean) -> Unit) -> Unit = { _, _, _, _, _, _, _, _, _, cb -> cb(false) },
+    onUpdateShowcasePostCaption: (String, String, (Boolean) -> Unit) -> Unit = { _, _, cb -> cb(false) },
+    onDeleteShowcasePost: (String) -> Unit = {},
+    onDeleteShowcaseStory: (String, (Boolean) -> Unit) -> Unit = { _, cb -> cb(false) },
     onBoostPostWithShowcase: (Post, ShowcaseAccount, Long, Long, String, (Boolean) -> Unit) -> Unit = { _, _, _, _, _, cb -> cb(false) },
     onPublishInAppAnnouncement: (String, String, String, String, (Boolean) -> Unit) -> Unit = { _, _, _, _, cb -> cb(false) },
     onMergeLegacyProfile: (UserProfile, (Boolean, String) -> Unit) -> Unit = { _, cb -> cb(false, "Unavailable") },
@@ -206,6 +215,7 @@ fun ProfileScreen(
     onTestSupabaseConnection: () -> Unit = {},
     onSyncSupabaseSnapshot: () -> Unit = {},
     onBuildSupabaseExportJson: () -> String = { "{}" },
+    onPurgeNonWhitelistAccounts: () -> Unit = {},
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -960,6 +970,7 @@ fun ProfileScreen(
             onTestSupabaseConnection = onTestSupabaseConnection,
             onSyncSupabaseSnapshot = onSyncSupabaseSnapshot,
             onBuildSupabaseExportJson = onBuildSupabaseExportJson,
+            onPurgeNonWhitelistAccounts = onPurgeNonWhitelistAccounts,
             onDismiss = { showPlayReadinessSheet = false }
         )
     }
@@ -981,13 +992,20 @@ fun ProfileScreen(
             showcaseStoriesCount = showcaseStoriesCount,
             showcaseAccounts = showcaseAccounts,
             allPosts = allPosts,
+            allStories = allStories,
             isBusy = isShowcaseBusy,
             onPublishBurst = onPublishShowcaseBurst,
             onEngageRecent = onEngageWithShowcase,
             onRemoveAll = onRemoveAllShowcase,
             onAuthorizeAccount = onAuthorizeShowcaseAccount,
+            onCreateStarter = onCreateShowcaseAccount,
             onUpdatePersonaProfile = onUpdateShowcasePersonaProfile,
+            onDeleteStarter = onDeleteShowcaseAccount,
             onPublishCustomPost = onPublishCustomShowcasePost,
+            onPublishCustomStory = onPublishCustomShowcaseStory,
+            onUpdatePostCaption = onUpdateShowcasePostCaption,
+            onDeletePost = onDeleteShowcasePost,
+            onDeleteStory = onDeleteShowcaseStory,
             onBoostPostMetrics = onBoostPostWithShowcase,
             onDismiss = { showShowcaseManagerSheet = false }
         )
@@ -2078,22 +2096,31 @@ private fun ShowcaseAccountsManagerSheet(
     showcaseStoriesCount: Int,
     showcaseAccounts: List<ShowcaseAccount>,
     allPosts: List<Post>,
+    allStories: List<Story>,
     isBusy: Boolean,
     onPublishBurst: () -> Unit,
     onEngageRecent: () -> Unit,
     onRemoveAll: () -> Unit,
     onAuthorizeAccount: (ShowcaseAccount, Boolean) -> Unit,
-    onUpdatePersonaProfile: (ShowcaseAccount, String, String, String, String, (Boolean) -> Unit) -> Unit,
-    onPublishCustomPost: (ShowcaseAccount, String, String, String, String?, String?, Boolean, (Boolean) -> Unit) -> Unit,
+    onCreateStarter: (String, String, String, String, String, Boolean, String?, (Boolean) -> Unit) -> Unit,
+    onUpdatePersonaProfile: (ShowcaseAccount, String, String, String, String, Boolean, String?, (Boolean) -> Unit) -> Unit,
+    onDeleteStarter: (String, (Boolean) -> Unit) -> Unit,
+    onPublishCustomPost: (ShowcaseAccount, String, String, String, String?, String?, Long, Boolean, (Boolean) -> Unit) -> Unit,
+    onPublishCustomStory: (ShowcaseAccount, String, String, String, String?, String?, Long, String, String, (Boolean) -> Unit) -> Unit,
+    onUpdatePostCaption: (String, String, (Boolean) -> Unit) -> Unit,
+    onDeletePost: (String) -> Unit,
+    onDeleteStory: (String, (Boolean) -> Unit) -> Unit,
     onBoostPostMetrics: (Post, ShowcaseAccount, Long, Long, String, (Boolean) -> Unit) -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     var confirmRemove by remember { mutableStateOf(false) }
+    var showCreateStarterModal by remember { mutableStateOf(false) }
     var editingAccount by remember { mutableStateOf<ShowcaseAccount?>(null) }
     var postingAsAccount by remember { mutableStateOf<ShowcaseAccount?>(null) }
     var boostingAsAccount by remember { mutableStateOf<ShowcaseAccount?>(null) }
+    var editingShowcasePost by remember { mutableStateOf<Post?>(null) }
 
     val personas = remember(showcaseAccounts) {
         showcaseAccounts.ifEmpty {
@@ -2105,8 +2132,133 @@ private fun ShowcaseAccountsManagerSheet(
                     bio = "${p.category} creator in ${p.location}",
                     category = p.category,
                     location = p.location,
+                    isVerified = true,
                     isAuthorized = false
                 )
+            }
+        }
+    }
+
+    val showcasePosts = remember(allPosts) { allPosts.filter { it.id.startsWith("showcase_") } }
+    val showcaseStories = remember(allStories) { allStories.filter { it.id.startsWith("showcase_") } }
+
+    if (showCreateStarterModal) {
+        var newHandle by remember { mutableStateOf("") }
+        var newDisplayName by remember { mutableStateOf("") }
+        var newBio by remember { mutableStateOf("") }
+        var newCategory by remember { mutableStateOf("Creator") }
+        var newLocation by remember { mutableStateOf("Karachi, Pakistan") }
+        var newVerified by remember { mutableStateOf(true) }
+        var pickedAvatarPath by remember { mutableStateOf<String?>(null) }
+        var creatingStarter by remember { mutableStateOf(false) }
+
+        val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+            if (uri != null) {
+                scope.launch {
+                    pickedAvatarPath = withContext(Dispatchers.IO) { MediaAssets.copyPickedImageToInternalStorage(context, uri) }
+                }
+            }
+        }
+
+        ModalBottomSheet(
+            onDismissRequest = { showCreateStarterModal = false },
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "Create New Starter Account",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                OutlinedButton(
+                    onClick = {
+                        avatarPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                ) {
+                    Text(if (pickedAvatarPath != null) "Avatar Photo Selected ✓" else "Pick Avatar Photo (Optional)")
+                }
+                OutlinedTextField(
+                    value = newHandle,
+                    onValueChange = { newHandle = it },
+                    label = { Text("Username (e.g. zara.studio)") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth().testTag("new_starter_username_input")
+                )
+                OutlinedTextField(
+                    value = newDisplayName,
+                    onValueChange = { newDisplayName = it },
+                    label = { Text("Display Name") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth().testTag("new_starter_display_name_input")
+                )
+                OutlinedTextField(
+                    value = newBio,
+                    onValueChange = { newBio = it },
+                    label = { Text("Bio") },
+                    minLines = 2,
+                    maxLines = 3,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = newCategory,
+                        onValueChange = { newCategory = it },
+                        label = { Text("Category") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = newLocation,
+                        onValueChange = { newLocation = it },
+                        label = { Text("Location") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Verified Badge", style = MaterialTheme.typography.labelLarge)
+                    Switch(checked = newVerified, onCheckedChange = { newVerified = it })
+                }
+                Button(
+                    enabled = !creatingStarter && newHandle.trim().length >= 3,
+                    onClick = {
+                        creatingStarter = true
+                        onCreateStarter(
+                            newHandle,
+                            newDisplayName,
+                            newBio,
+                            newCategory,
+                            newLocation,
+                            newVerified,
+                            pickedAvatarPath
+                        ) { ok ->
+                            creatingStarter = false
+                            if (ok) showCreateStarterModal = false
+                        }
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                ) {
+                    Text(if (creatingStarter) "Creating..." else "Create & Authorize Starter", fontWeight = FontWeight.Bold)
+                }
+                Spacer(modifier = Modifier.height(14.dp))
             }
         }
     }
@@ -2116,7 +2268,19 @@ private fun ShowcaseAccountsManagerSheet(
         var draftBio by remember(target.username) { mutableStateOf(target.bio) }
         var draftCategory by remember(target.username) { mutableStateOf(target.category) }
         var draftLocation by remember(target.username) { mutableStateOf(target.location) }
+        var draftVerified by remember(target.username) { mutableStateOf(target.isVerified) }
+        var pickedAvatarPath by remember(target.username) { mutableStateOf<String?>(null) }
+        var confirmDeleteStarter by remember(target.username) { mutableStateOf(false) }
         var savingProfile by remember { mutableStateOf(false) }
+
+        val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+            if (uri != null) {
+                scope.launch {
+                    pickedAvatarPath = withContext(Dispatchers.IO) { MediaAssets.copyPickedImageToInternalStorage(context, uri) }
+                }
+            }
+        }
+
         ModalBottomSheet(
             onDismissRequest = { editingAccount = null },
             containerColor = MaterialTheme.colorScheme.surface
@@ -2124,14 +2288,38 @@ private fun ShowcaseAccountsManagerSheet(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
                     .padding(horizontal = 20.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text(
-                    text = "Edit @${target.username} Profile",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    LumaAvatar(
+                        username = target.username,
+                        avatarKey = target.avatarKey,
+                        avatarUrl = target.avatarUrl,
+                        size = 52.dp
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Edit @${target.username}",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        OutlinedButton(
+                            onClick = {
+                                avatarPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = if (pickedAvatarPath != null) "New Avatar Ready ✓" else "Change Avatar Photo",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
                 OutlinedTextField(
                     value = draftName,
                     onValueChange = { draftName = it },
@@ -2167,11 +2355,27 @@ private fun ShowcaseAccountsManagerSheet(
                         modifier = Modifier.weight(1f)
                     )
                 }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Verified Creator Badge", style = MaterialTheme.typography.labelLarge)
+                    Switch(checked = draftVerified, onCheckedChange = { draftVerified = it })
+                }
                 Button(
                     enabled = !savingProfile,
                     onClick = {
                         savingProfile = true
-                        onUpdatePersonaProfile(target, draftName, draftBio, draftCategory, draftLocation) { ok ->
+                        onUpdatePersonaProfile(
+                            target,
+                            draftName,
+                            draftBio,
+                            draftCategory,
+                            draftLocation,
+                            draftVerified,
+                            pickedAvatarPath
+                        ) { ok ->
                             savingProfile = false
                             if (ok) editingAccount = null
                         }
@@ -2181,16 +2385,97 @@ private fun ShowcaseAccountsManagerSheet(
                 ) {
                     Text(if (savingProfile) "Saving..." else "Save Starter Profile", fontWeight = FontWeight.Bold)
                 }
+                if (!confirmDeleteStarter) {
+                    OutlinedButton(
+                        enabled = !savingProfile,
+                        onClick = { confirmDeleteStarter = true },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
+                    ) {
+                        Text("Remove Starter Account", fontWeight = FontWeight.Bold)
+                    }
+                } else {
+                    Button(
+                        enabled = !savingProfile,
+                        onClick = {
+                            savingProfile = true
+                            onDeleteStarter(target.username) { ok ->
+                                savingProfile = false
+                                if (ok) editingAccount = null
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = MaterialTheme.colorScheme.onError
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
+                    ) {
+                        Text("Confirm Remove @${target.username}", fontWeight = FontWeight.Bold)
+                    }
+                }
+                Spacer(modifier = Modifier.height(14.dp))
+            }
+        }
+    }
+
+    editingShowcasePost?.let { targetPost ->
+        var draftCaption by remember(targetPost.id) { mutableStateOf(targetPost.caption) }
+        var savingCaption by remember { mutableStateOf(false) }
+
+        ModalBottomSheet(
+            onDismissRequest = { editingShowcasePost = null },
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "Edit @${targetPost.authorUsername}'s Post",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                OutlinedTextField(
+                    value = draftCaption,
+                    onValueChange = { draftCaption = it },
+                    label = { Text("Post Caption (#hashtags & @mentions supported)") },
+                    minLines = 3,
+                    maxLines = 6,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Button(
+                    enabled = !savingCaption,
+                    onClick = {
+                        savingCaption = true
+                        onUpdatePostCaption(targetPost.id, draftCaption) { ok ->
+                            savingCaption = false
+                            if (ok) editingShowcasePost = null
+                        }
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                ) {
+                    Text(if (savingCaption) "Updating..." else "Save Post Caption", fontWeight = FontWeight.Bold)
+                }
                 Spacer(modifier = Modifier.height(14.dp))
             }
         }
     }
 
     postingAsAccount?.let { author ->
+        var publishMode by remember(author.username) { mutableStateOf("POST") } // POST | VIDEO | STORY
         var caption by remember(author.username) { mutableStateOf("") }
         var mediaType by remember(author.username) { mutableStateOf("IMAGE") }
         var pickedImagePath by remember(author.username) { mutableStateOf<String?>(null) }
         var pickedVideoPath by remember(author.username) { mutableStateOf<String?>(null) }
+        var videoDurationMs by remember(author.username) { mutableStateOf(0L) }
+        var storyBgColorKey by remember(author.username) { mutableStateOf("peach") }
+        var storyTextOverlay by remember(author.username) { mutableStateOf("") }
         var imageKey by remember(author.username) { mutableStateOf("img_post_coastal") }
         var shareAsClip by remember(author.username) { mutableStateOf(false) }
         var publishing by remember { mutableStateOf(false) }
@@ -2201,8 +2486,11 @@ private fun ShowcaseAccountsManagerSheet(
                     val saved = withContext(Dispatchers.IO) { MediaAssets.copyPickedImageToInternalStorage(context, uri) }
                     if (saved != null) {
                         pickedImagePath = saved
-                        pickedVideoPath = null
-                        mediaType = "IMAGE"
+                        if (publishMode == "POST") {
+                            pickedVideoPath = null
+                            videoDurationMs = 0L
+                            mediaType = "IMAGE"
+                        }
                     }
                 }
             }
@@ -2213,9 +2501,10 @@ private fun ShowcaseAccountsManagerSheet(
                     val extracted = withContext(Dispatchers.IO) { MediaAssets.copyPickedVideoToInternalStorage(context, uri) }
                     if (extracted != null) {
                         pickedVideoPath = extracted.localVideoPath
-                        pickedImagePath = extracted.thumbnailPath
+                        if (pickedImagePath == null) pickedImagePath = extracted.thumbnailPath
+                        videoDurationMs = extracted.durationMs.coerceIn(0L, MediaAssets.MAX_POST_VIDEO_DURATION_MS)
                         mediaType = "VIDEO"
-                        shareAsClip = true
+                        if (publishMode == "POST") shareAsClip = true
                     }
                 }
             }
@@ -2228,14 +2517,47 @@ private fun ShowcaseAccountsManagerSheet(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
                     .padding(horizontal = 20.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    text = "Publish Post / Video as @${author.username}",
+                    text = "Publish as @${author.username}",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("POST" to "Photo Post", "VIDEO" to "Video (80m)", "STORY" to "24h Story").forEach { (key, label) ->
+                        val selected = publishMode == key
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 42.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable {
+                                    publishMode = key
+                                    if (key == "VIDEO") {
+                                        mediaType = "VIDEO"
+                                        shareAsClip = true
+                                    } else if (key == "POST" && pickedVideoPath == null) {
+                                        mediaType = "IMAGE"
+                                    }
+                                }
+                                .padding(horizontal = 8.dp, vertical = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
                         onClick = {
@@ -2244,56 +2566,128 @@ private fun ShowcaseAccountsManagerSheet(
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier.weight(1f).heightIn(min = 48.dp)
                     ) {
-                        Text(if (pickedImagePath != null && mediaType == "IMAGE") "Photo Ready" else "Pick Photo")
+                        Text(
+                            text = when {
+                                publishMode == "VIDEO" && pickedImagePath != null -> "Cover Thumbnail ✓"
+                                publishMode == "VIDEO" -> "Pick Cover Photo"
+                                pickedImagePath != null -> "Photo Ready ✓"
+                                else -> "Pick Photo"
+                            },
+                            maxLines = 1
+                        )
                     }
-                    OutlinedButton(
-                        onClick = {
-                            videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
-                        },
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp)
-                    ) {
-                        Text(if (pickedVideoPath != null) "Video Ready" else "Pick Video")
+                    if (publishMode != "POST" || pickedVideoPath != null) {
+                        OutlinedButton(
+                            onClick = {
+                                videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                        ) {
+                            Text(
+                                text = if (pickedVideoPath != null) "Video Ready (${MediaAssets.formatDuration(videoDurationMs)})" else "Pick Video",
+                                maxLines = 1
+                            )
+                        }
                     }
                 }
+
+                if (publishMode == "STORY") {
+                    OutlinedTextField(
+                        value = storyTextOverlay,
+                        onValueChange = { storyTextOverlay = it },
+                        label = { Text("Story Text Overlay (optional)") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(listOf("peach", "ocean", "berry", "emerald", "midnight"), key = { it }) { bg ->
+                            val selected = storyBgColorKey == bg
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                    .clickable { storyBgColorKey = bg }
+                                    .padding(horizontal = 12.dp, vertical = 7.dp)
+                            ) {
+                                Text(
+                                    text = bg.replaceFirstChar { it.uppercase() },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
                 OutlinedTextField(
                     value = caption,
                     onValueChange = { caption = it },
-                    label = { Text("Caption (#hashtags supported)") },
+                    label = { Text("Caption (#hashtags & @mentions supported)") },
                     minLines = 2,
                     maxLines = 4,
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth()
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Publish as Momi Clip", style = MaterialTheme.typography.labelLarge)
-                    Switch(checked = shareAsClip, onCheckedChange = { shareAsClip = it })
+                if (publishMode != "STORY") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Publish as Momi Clip", style = MaterialTheme.typography.labelLarge)
+                        Switch(checked = shareAsClip, onCheckedChange = { shareAsClip = it })
+                    }
                 }
                 Button(
-                    enabled = !publishing,
+                    enabled = !publishing && (publishMode != "VIDEO" || pickedVideoPath != null),
                     onClick = {
                         publishing = true
-                        onPublishCustomPost(
-                            author,
-                            caption,
-                            mediaType,
-                            imageKey,
-                            pickedImagePath,
-                            pickedVideoPath,
-                            shareAsClip
-                        ) { ok ->
-                            publishing = false
-                            if (ok) postingAsAccount = null
+                        if (publishMode == "STORY") {
+                            onPublishCustomStory(
+                                author,
+                                caption,
+                                if (pickedVideoPath != null) "VIDEO" else "IMAGE",
+                                imageKey,
+                                pickedImagePath,
+                                pickedVideoPath,
+                                videoDurationMs,
+                                if (pickedImagePath == null && pickedVideoPath == null) storyBgColorKey else "",
+                                storyTextOverlay
+                            ) { ok ->
+                                publishing = false
+                                if (ok) postingAsAccount = null
+                            }
+                        } else {
+                            val effectiveMediaType = if (pickedVideoPath != null) "VIDEO" else "IMAGE"
+                            onPublishCustomPost(
+                                author,
+                                caption,
+                                effectiveMediaType,
+                                imageKey,
+                                pickedImagePath,
+                                pickedVideoPath,
+                                videoDurationMs,
+                                shareAsClip || effectiveMediaType == "VIDEO"
+                            ) { ok ->
+                                publishing = false
+                                if (ok) postingAsAccount = null
+                            }
                         }
                     },
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
                 ) {
-                    Text(if (publishing) "Publishing..." else "Publish as @${author.username}", fontWeight = FontWeight.Bold)
+                    Text(
+                        text = if (publishing) "Publishing..." else when (publishMode) {
+                            "STORY" -> "Publish 24h Story as @${author.username}"
+                            "VIDEO" -> "Publish Video as @${author.username}"
+                            else -> "Publish Post as @${author.username}"
+                        },
+                        fontWeight = FontWeight.Bold
+                    )
                 }
                 Spacer(modifier = Modifier.height(14.dp))
             }
@@ -2408,23 +2802,39 @@ private fun ShowcaseAccountsManagerSheet(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Filled.AutoAwesome,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(22.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Starter Showcase Authorization",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Icon(
+                            imageVector = Icons.Filled.AutoAwesome,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Starter Showcase Control",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = { showCreateStarterModal = true },
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier.heightIn(min = 40.dp).testTag("create_starter_account_btn")
+                    ) {
+                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("New Starter", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Authorize starter personas below to post custom photos or videos, update their profiles, and add likes, views, & comments cleanly.",
+                    text = "Complete Admin authority: create or edit starter accounts & avatars, publish photos, 80-min videos + covers, 24h stories, or edit/delete any starter content.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -2571,6 +2981,7 @@ private fun ShowcaseAccountsManagerSheet(
                             LumaAvatar(
                                 username = persona.username,
                                 avatarKey = persona.avatarKey,
+                                avatarUrl = persona.avatarUrl,
                                 size = 42.dp,
                                 hasActiveStory = true
                             )
@@ -2582,13 +2993,15 @@ private fun ShowcaseAccountsManagerSheet(
                                         style = MaterialTheme.typography.labelLarge,
                                         fontWeight = FontWeight.Bold
                                     )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Icon(
-                                        imageVector = Icons.Filled.Verified,
-                                        contentDescription = "Verified persona",
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(14.dp)
-                                    )
+                                    if (persona.isVerified) {
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Icon(
+                                            imageVector = Icons.Filled.Verified,
+                                            contentDescription = "Verified persona",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
                                 }
                                 Text(
                                     text = "${persona.displayName} · ${persona.category} · ${persona.location}",
@@ -2623,7 +3036,7 @@ private fun ShowcaseAccountsManagerSheet(
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                 modifier = Modifier.weight(1f).heightIn(min = 40.dp)
                             ) {
-                                Text("Post / Video", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                Text("Post / Story", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                             }
                             OutlinedButton(
                                 enabled = persona.isAuthorized && !isBusy,
@@ -2633,6 +3046,91 @@ private fun ShowcaseAccountsManagerSheet(
                                 modifier = Modifier.weight(1f).heightIn(min = 40.dp)
                             ) {
                                 Text("Likes/Views", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (showcasePosts.isNotEmpty()) {
+                item {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Manage Starter Posts (${showcasePosts.size})",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                items(showcasePosts.take(20), key = { "manage_sc_post_${it.id}" }) { post ->
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "@${post.authorUsername} · ${if (post.isVideoPost) "Video" else "Photo"}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = post.caption.ifBlank { "(No caption)" },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            IconButton(onClick = { editingShowcasePost = post }) {
+                                Icon(Icons.Filled.Edit, contentDescription = "Edit starter post", tint = MaterialTheme.colorScheme.primary)
+                            }
+                            IconButton(onClick = { onDeletePost(post.id) }) {
+                                Icon(Icons.Filled.Delete, contentDescription = "Delete starter post", tint = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (showcaseStories.isNotEmpty()) {
+                item {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Manage Starter 24h Stories (${showcaseStories.size})",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                items(showcaseStories, key = { "manage_sc_story_${it.id}" }) { story ->
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "@${story.username} · 24h Story",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = story.textOverlay.ifBlank { story.caption }.ifBlank { "Visual story" },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            IconButton(onClick = { onDeleteStory(story.id) {} }) {
+                                Icon(Icons.Filled.Delete, contentDescription = "Delete starter story", tint = MaterialTheme.colorScheme.error)
                             }
                         }
                     }

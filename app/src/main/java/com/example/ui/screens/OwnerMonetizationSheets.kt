@@ -27,9 +27,11 @@ import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.WorkspacePremium
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -82,12 +84,14 @@ fun OwnerMonetizationAndPlaySheet(
     onTestSupabaseConnection: () -> Unit = {},
     onSyncSupabaseSnapshot: () -> Unit = {},
     onBuildSupabaseExportJson: () -> String = { "{}" },
+    onPurgeNonWhitelistAccounts: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     val uriHandler = LocalUriHandler.current
     @Suppress("DEPRECATION")
     val clipboardManager = LocalClipboardManager.current
     var copiedMigrationNotice by remember { mutableStateOf(false) }
+    var confirmPurgeNonWhitelist by remember { mutableStateOf(false) }
     val isDebugAds = BuildConfig.DEBUG
     val adDiagnostics by MomiStartIoSession.diagnostics.collectAsStateWithLifecycle()
 
@@ -444,6 +448,56 @@ fun OwnerMonetizationAndPlaySheet(
                                 },
                                 fontWeight = FontWeight.Bold
                             )
+                        }
+
+                        HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant)
+
+                        if (!confirmPurgeNonWhitelist) {
+                            OutlinedButton(
+                                enabled = isSupabaseConfigured && !isSupabaseBusy,
+                                onClick = { confirmPurgeNonWhitelist = true },
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .testTag("supabase_purge_non_whitelist_btn")
+                            ) {
+                                Icon(Icons.Filled.DeleteSweep, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Purge Non-Keep Profiles & Posts",
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        } else {
+                            Button(
+                                enabled = isSupabaseConfigured && !isSupabaseBusy,
+                                onClick = {
+                                    confirmPurgeNonWhitelist = false
+                                    onPurgeNonWhitelistAccounts()
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.error,
+                                    contentColor = MaterialTheme.colorScheme.onError
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .testTag("supabase_confirm_purge_btn")
+                            ) {
+                                Icon(Icons.Filled.DeleteSweep, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Confirm Keep Only syali6511 + hassan.ali62313",
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
                     }
                 }

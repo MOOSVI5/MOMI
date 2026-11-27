@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.sp
 import com.example.data.model.FollowEdge
 import com.example.data.model.LiveGiftItem
 import com.example.data.model.Post
+import com.example.data.model.ShowcaseAccount
 import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
 import com.example.ui.components.FollowListBottomSheet
@@ -70,6 +71,7 @@ fun UserProfileScreen(
     allProfiles: List<UserProfile>,
     allPosts: List<Post>,
     follows: List<FollowEdge>,
+    showcaseAccounts: List<ShowcaseAccount> = emptyList(),
     currentUserId: String,
     followingUids: Set<String>,
     wallet: UserWallet? = null,
@@ -92,14 +94,17 @@ fun UserProfileScreen(
 
     val userPosts = remember(allPosts, targetUserId, targetUsernameHint, isShowcaseCreator) {
         if (isShowcaseCreator) {
-            allPosts.filter { it.id.startsWith("showcase_") && it.authorUsername.equals(targetUsernameHint, ignoreCase = true) }
+            allPosts.filter {
+                (it.id.startsWith("showcase_") || it.userId.startsWith("showcase_")) &&
+                    it.authorUsername.equals(targetUsernameHint, ignoreCase = true)
+            }
         } else {
             allPosts.filter { it.userId == targetUserId && !it.id.startsWith("showcase_") }
         }
     }
     val userClips = remember(userPosts) { userPosts.filter { it.isReel || it.isVideoPost } }
 
-    val resolvedProfile = remember(allProfiles, userPosts, follows, targetUserId, targetUsernameHint, isShowcaseCreator) {
+    val resolvedProfile = remember(allProfiles, showcaseAccounts, userPosts, follows, targetUserId, targetUsernameHint, isShowcaseCreator) {
         if (!isShowcaseCreator) {
             allProfiles.firstOrNull { it.userId == targetUserId }
                 ?: run {
@@ -120,18 +125,21 @@ fun UserProfileScreen(
                     )
                 }
         } else {
+            val starter = showcaseAccounts.firstOrNull { it.username.equals(targetUsernameHint, ignoreCase = true) }
             val samplePost = userPosts.firstOrNull()
+            val uname = starter?.username ?: targetUsernameHint.ifBlank { "creator" }
             UserProfile(
-                id = "showcase_$targetUsernameHint",
-                userId = "showcase_$targetUsernameHint",
-                username = targetUsernameHint.ifBlank { "creator" },
-                displayName = samplePost?.authorDisplayName ?: targetUsernameHint,
-                category = samplePost?.category ?: "Featured Creator",
-                bio = "Featured Momi creator",
-                avatarKey = samplePost?.authorAvatarKey ?: "avatar_elena",
+                id = "showcase_$uname",
+                userId = "showcase_$uname",
+                username = uname,
+                displayName = starter?.displayName ?: samplePost?.authorDisplayName ?: uname,
+                category = starter?.category ?: samplePost?.category ?: "Featured Creator",
+                bio = starter?.bio?.takeIf { it.isNotBlank() } ?: "Featured Momi creator",
+                avatarKey = starter?.avatarKey ?: samplePost?.authorAvatarKey ?: "avatar_elena",
+                avatarUrl = starter?.avatarUrl ?: samplePost?.authorAvatarUrl,
                 followersCount = 0L,
                 followingCount = 0L,
-                isVerified = samplePost?.authorVerified ?: true
+                isVerified = starter?.isVerified ?: samplePost?.authorVerified ?: true
             )
         }
     }

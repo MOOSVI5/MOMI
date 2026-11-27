@@ -47,6 +47,7 @@ data class UploadedMediaUrls(
     val videoChunksFallback: List<String> = emptyList(),
     val audioUrl: String? = null,
     val audioDataFallback: String? = null,
+    val normalizedDurationMs: Long? = null,
     val failureReason: String? = null
 )
 
@@ -77,9 +78,12 @@ class SupabasePrimaryBackend(
         localExtraImagePaths: List<String>,
         mediaType: String,
         localVideoPath: String?,
-        localAudioPath: String?
+        localAudioPath: String?,
+        ownerUid: String = MomiSupabaseClient.activeSession?.userId.orEmpty(),
+        onProgressStatus: ((String) -> Unit)? = null
     ): UploadedMediaUrls {
-        val coverUrl = uploadImageToStorage("momi-media", "posts/${mediaId}_cover.jpg", localImagePath)
+        val uidPrefix = ownerUid.trim().takeIf { it.isNotEmpty() }?.let { "$it/" } ?: ""
+        val coverUrl = uploadImageToStorage("momi-media", "${uidPrefix}posts/${mediaId}_cover.jpg", localImagePath)
         val coverFallback = if (coverUrl == null && !localImagePath.isNullOrBlank()) {
             withContext(Dispatchers.IO) {
                 MediaAssets.encodePrimaryPostImage(localImagePath, hasExtraSlides = localExtraImagePaths.isNotEmpty())
@@ -92,7 +96,7 @@ class SupabasePrimaryBackend(
         val extraDatas = mutableListOf<String>()
         if (mediaType == "IMAGE") {
             localExtraImagePaths.forEachIndexed { idx, path ->
-                val url = uploadImageToStorage("momi-media", "posts/${mediaId}_slide_$idx.jpg", path)
+                val url = uploadImageToStorage("momi-media", "${uidPrefix}posts/${mediaId}_slide_$idx.jpg", path)
                 if (url != null) {
                     extraUrls.add(url)
                 } else {
@@ -109,7 +113,7 @@ class SupabasePrimaryBackend(
             if (rawAudio != null) {
                 audioUrl = client.uploadStorageBytes(
                     bucket = "momi-media",
-                    objectPath = "audio/${mediaId}_audio.m4a",
+                    objectPath = "${uidPrefix}audio/${mediaId}_audio.m4a",
                     bytes = rawAudio,
                     contentType = "audio/mp4"
                 ).getOrNull()
@@ -122,30 +126,70 @@ class SupabasePrimaryBackend(
         var videoUrl: String? = null
         var videoFallback: String? = null
         var videoChunksFallback: List<String> = emptyList()
+        var normalizedDurationMs: Long? = null
         if (mediaType == "VIDEO" && !localVideoPath.isNullOrBlank()) {
-            val videoFile = File(localVideoPath)
-            var storageErr: String? = null
-            if (videoFile.exists() && videoFile.length() > 0L) {
-                val uploadRes = client.uploadStorageFile(
-                    bucket = "momi-videos",
-                    objectPath = "videos/$mediaId.mp4",
-                    file = videoFile,
-                    contentType = "video/mp4"
+            onProgressStatus?.invoke("Normalizing video...")
+            val normalized = MediaAssets.normalizeVideoForUpload(
+                context = context.applicationContext,
+                localVideoPath = localVideoPath
+            ) { progress ->
+                val pct = (progress * 100f).toInt().coerceIn(0, 100)
+                onProgressStatus?.invoke(
+                    if (pct < 100) "Normalizing video $pct%..." else "Uploading video..."
                 )
-                videoUrl = uploadRes.getOrNull()
-                storageErr = uploadRes.exceptionOrNull()?.message
             }
-            if (videoUrl == null) {
-                val payload = MediaAssets.prepareVideoPayloadForFirestore(context.applicationContext, localVideoPath)
-                if (!payload.isReady) {
-                    return UploadedMediaUrls(
-                        failureReason = storageErr?.takeIf { it.isNotBlank() }
-                            ?: payload.failureReason
-                            ?: "Could not upload or prepare video clip."
-                    )
+            normalizedDurationMs = normalized.durationMs.takeIf { it > 0L }
+            try {
+                val videoFile = File(normalized.uploadFilePath)
+                var storageErr: String? = null
+                val videoSizeBytes = if (videoFile.exists()) videoFile.length() else 0L
+                val ext = if (normalized.wasTranscoded) {
+                    "mp4"
+                } else {
+                    videoFile.extension.trim().lowercase().takeIf { it in setOf("mp4", "mov", "webm", "mkv", "3gp") } ?: "mp4"
                 }
-                videoFallback = payload.inlineVideoData
-                videoChunksFallback = payload.videoChunks
+                val contentType = when (ext) {
+                    "webm" -> "video/webm"
+                    "mov" -> "video/quicktime"
+                    else -> "video/mp4"
+                }
+                if (videoSizeBytes > 0L) {
+                    onProgressStatus?.invoke("Uploading video...")
+                    val uploadRes = client.uploadStorageFile(
+                        bucket = "momi-videos",
+                        objectPath = "${uidPrefix}videos/$mediaId.$ext",
+                        file = videoFile,
+                        contentType = contentType
+                    )
+                    videoUrl = uploadRes.getOrNull()
+                    storageErr = uploadRes.exceptionOrNull()?.message
+                }
+                if (videoUrl == null) {
+                    val isStorageAuthOrSizeError = storageErr?.let { msg ->
+                        msg.contains("HTTP 401") || msg.contains("HTTP 403") || msg.contains("HTTP 413")
+                    } == true
+                    if (videoSizeBytes > 25_000_000L || isStorageAuthOrSizeError) {
+                        return UploadedMediaUrls(
+                            failureReason = storageErr?.takeIf { it.isNotBlank() }
+                                ?: "Could not upload long video to Supabase Storage. Please check your connection and Storage policies."
+                        )
+                    }
+                    onProgressStatus?.invoke("Preparing clip...")
+                    val payload = MediaAssets.prepareVideoPayloadForFirestore(context.applicationContext, normalized.uploadFilePath)
+                    if (!payload.isReady) {
+                        return UploadedMediaUrls(
+                            failureReason = storageErr?.takeIf { it.isNotBlank() }
+                                ?: payload.failureReason
+                                ?: "Could not upload or prepare video clip."
+                        )
+                    }
+                    videoFallback = payload.inlineVideoData
+                    videoChunksFallback = payload.videoChunks
+                }
+            } finally {
+                if (normalized.isTemporaryTranscodeFile) {
+                    runCatching { File(normalized.uploadFilePath).delete() }
+                }
             }
         }
 
@@ -158,7 +202,8 @@ class SupabasePrimaryBackend(
             videoDataFallback = videoFallback,
             videoChunksFallback = videoChunksFallback,
             audioUrl = audioUrl,
-            audioDataFallback = audioFallback
+            audioDataFallback = audioFallback,
+            normalizedDurationMs = normalizedDurationMs
         )
     }
 
@@ -178,10 +223,24 @@ class SupabasePrimaryBackend(
     suspend fun deletePost(postId: String): Result<Unit> =
         client.deleteRows("posts", "id=eq.${urlEncode(postId)}")
 
+    suspend fun updatePostCaption(postId: String, caption: String, hashtags: List<String>, taggedUsernames: List<String>): Result<Unit> =
+        client.patchRows(
+            "posts",
+            "id=eq.${urlEncode(postId)}",
+            linkedMapOf(
+                "caption" to caption.take(1000),
+                "hashtags" to hashtags,
+                "tagged_usernames" to taggedUsernames
+            )
+        )
+
     suspend fun createStory(profile: UserProfile, story: Story): Result<Unit> {
         client.ensureProfileExists(profile.userId, profile.username, profile.displayName, profile.avatarKey, profile.avatarUrl, profile.email, profile.phone)
         return client.upsertRows("stories", listOf(MomiSupabaseSchema.toStoryRow(story)), onConflict = "id").map { Unit }
     }
+
+    suspend fun deleteStory(storyId: String): Result<Unit> =
+        client.deleteRows("stories", "id=eq.${urlEncode(storyId)}")
 
     suspend fun setInteraction(
         userId: String,
@@ -330,38 +389,60 @@ class SupabasePrimaryBackend(
     suspend fun saveAppConfig(config: AdMonetizationConfig): Result<Unit> =
         client.upsertRows("app_config", listOf(MomiSupabaseSchema.toAppConfigRow(config)), onConflict = "id").map { Unit }
 
-    suspend fun publishShowcaseBurst(): Result<Int> {
+    suspend fun publishShowcaseBurst(
+        adminUid: String = "",
+        accounts: List<ShowcaseAccount> = emptyList()
+    ): Result<Int> {
         val now = Timestamp.now()
         val stamp = System.currentTimeMillis()
-        val selected = ShowcaseCatalog.PERSONAS.shuffled().take(4)
+        val sourceList = accounts.ifEmpty {
+            ShowcaseCatalog.PERSONAS.map { p ->
+                ShowcaseAccount(
+                    username = p.username,
+                    displayName = p.displayName,
+                    avatarKey = p.avatarKey,
+                    bio = "Featured Momi creator in ${p.location}",
+                    category = p.category,
+                    location = p.location,
+                    isVerified = true,
+                    isAuthorized = true
+                )
+            }
+        }
+        val selected = sourceList.shuffled().take(4)
 
-        val personaProfiles = ShowcaseCatalog.PERSONAS.map { persona ->
-            val uid = "showcase_${persona.username}"
-            UserProfile(
-                id = uid,
-                userId = uid,
-                username = persona.username,
-                displayName = persona.displayName,
-                category = persona.category,
-                bio = "Featured Momi creator in ${persona.location}",
-                avatarKey = persona.avatarKey,
-                isVerified = true,
-                createdAt = now
+        if (adminUid.isBlank()) {
+            val personaProfiles = selected.map { persona ->
+                val uid = "showcase_${persona.username}"
+                UserProfile(
+                    id = uid,
+                    userId = uid,
+                    username = persona.username,
+                    displayName = persona.displayName,
+                    category = persona.category,
+                    bio = persona.bio.ifBlank { "Featured Momi creator in ${persona.location}" },
+                    avatarKey = persona.avatarKey,
+                    avatarUrl = persona.avatarUrl,
+                    isVerified = persona.isVerified,
+                    createdAt = now
+                )
+            }
+            client.upsertRows(
+                "profiles",
+                personaProfiles.map(MomiSupabaseSchema::toProfileRow),
+                onConflict = "user_id",
+                ignoreDuplicates = true
             )
         }
-        client.upsertRows(
-            "profiles",
-            personaProfiles.map(MomiSupabaseSchema::toProfileRow),
-            onConflict = "user_id",
-            ignoreDuplicates = true
-        )
 
         val posts = mutableListOf<Post>()
         val commentRows = mutableListOf<Map<String, Any?>>()
         val stories = mutableListOf<Story>()
 
-        selected.forEachIndexed { idx, persona ->
-            val uid = "showcase_${persona.username}"
+        selected.forEachIndexed { idx, acct ->
+            val preset = ShowcaseCatalog.PERSONAS.firstOrNull { it.username.equals(acct.username, ignoreCase = true) }
+                ?: ShowcaseCatalog.PERSONAS[idx % ShowcaseCatalog.PERSONAS.size]
+            val uid = adminUid.ifBlank { "showcase_${acct.username}" }
             val postId = "showcase_post_${stamp}_$idx"
             val commenter = ShowcaseCatalog.PERSONAS[(idx + 2) % ShowcaseCatalog.PERSONAS.size]
             val commentText = ShowcaseCatalog.COMMENTS[(idx + stamp.toInt()) % ShowcaseCatalog.COMMENTS.size]
@@ -369,21 +450,22 @@ class SupabasePrimaryBackend(
                 Post(
                     id = postId,
                     userId = uid,
-                    authorUsername = persona.username,
-                    authorDisplayName = persona.displayName,
-                    authorAvatarKey = persona.avatarKey,
-                    authorVerified = true,
-                    location = persona.location,
-                    imageKey = persona.imageKey,
+                    authorUsername = acct.username,
+                    authorDisplayName = acct.displayName,
+                    authorAvatarKey = acct.avatarKey,
+                    authorAvatarUrl = acct.avatarUrl,
+                    authorVerified = acct.isVerified,
+                    location = acct.location.ifBlank { preset.location },
+                    imageKey = preset.imageKey,
                     mediaType = "IMAGE",
-                    filterTag = persona.filterTag,
-                    aspectRatio = persona.aspectRatio,
-                    hashtags = persona.hashtags,
-                    caption = persona.caption,
+                    filterTag = preset.filterTag,
+                    aspectRatio = preset.aspectRatio,
+                    hashtags = preset.hashtags,
+                    caption = preset.caption,
                     likesCount = (18 + idx * 7).toLong(),
                     viewsCount = (120 + idx * 45).toLong(),
                     commentsCount = 1L,
-                    category = persona.category,
+                    category = acct.category.ifBlank { preset.category },
                     createdAt = now
                 )
             )
@@ -392,7 +474,7 @@ class SupabasePrimaryBackend(
                     postId = postId,
                     comment = Comment(
                         id = "showcase_cmt_${stamp}_$idx",
-                        userId = "showcase_${commenter.username}",
+                        userId = uid,
                         authorUsername = commenter.username,
                         authorAvatarKey = commenter.avatarKey,
                         text = commentText,
@@ -406,11 +488,12 @@ class SupabasePrimaryBackend(
                     Story(
                         id = "showcase_story_${stamp}_$idx",
                         userId = uid,
-                        username = persona.username,
-                        avatarKey = persona.avatarKey,
-                        imageKey = persona.imageKey,
+                        username = acct.username,
+                        avatarKey = acct.avatarKey,
+                        avatarUrl = acct.avatarUrl,
+                        imageKey = preset.imageKey,
                         mediaType = "IMAGE",
-                        caption = persona.location,
+                        caption = acct.location.ifBlank { preset.location },
                         createdAt = now
                     )
                 )
@@ -429,6 +512,7 @@ class SupabasePrimaryBackend(
     }
 
     suspend fun removeAllShowcase(): Result<Unit> {
+        client.deleteRows("comments", "id=like.showcase_*")
         client.deleteRows("posts", "id=like.showcase_*")
         client.deleteRows("stories", "id=like.showcase_*")
         return Result.success(Unit)
@@ -519,8 +603,6 @@ class SupabasePrimaryBackend(
     }
 
     suspend fun upsertShowcaseAccount(account: ShowcaseAccount): Result<Unit> {
-        val uid = "showcase_${account.username}"
-        client.ensureProfileExists(uid, account.username, account.displayName, account.avatarKey)
         return client.upsertRows(
             "showcase_accounts",
             listOf(MomiSupabaseSchema.toShowcaseAccountRow(account)),
@@ -528,18 +610,71 @@ class SupabasePrimaryBackend(
         ).map { Unit }
     }
 
+    suspend fun deleteShowcaseAccount(username: String): Result<Unit> =
+        client.deleteRows("showcase_accounts", "username=eq.${urlEncode(username)}")
+
     suspend fun publishCustomShowcasePost(account: ShowcaseAccount, post: Post): Result<Unit> {
-        val showcaseProfile = UserProfile(
-            id = "showcase_${account.username}",
-            userId = "showcase_${account.username}",
-            username = account.username,
-            displayName = account.displayName,
-            category = account.category,
-            bio = account.bio,
-            avatarKey = account.avatarKey,
-            isVerified = true
-        )
-        upsertProfile(showcaseProfile)
-        return createPost(showcaseProfile, post)
+        val ownerUid = post.userId.ifBlank { "showcase_${account.username}" }
+        if (ownerUid.startsWith("showcase_")) {
+            client.ensureProfileExists(
+                userId = ownerUid,
+                username = account.username,
+                displayName = account.displayName,
+                avatarKey = account.avatarKey,
+                avatarUrl = account.avatarUrl
+            )
+        }
+        return client.upsertRows("posts", listOf(MomiSupabaseSchema.toPostRow(post)), onConflict = "id").map { Unit }
+    }
+
+    suspend fun publishCustomShowcaseStory(account: ShowcaseAccount, story: Story): Result<Unit> {
+        val ownerUid = story.userId.ifBlank { "showcase_${account.username}" }
+        if (ownerUid.startsWith("showcase_")) {
+            client.ensureProfileExists(
+                userId = ownerUid,
+                username = account.username,
+                displayName = account.displayName,
+                avatarKey = account.avatarKey,
+                avatarUrl = account.avatarUrl
+            )
+        }
+        return client.upsertRows("stories", listOf(MomiSupabaseSchema.toStoryRow(story)), onConflict = "id").map { Unit }
+    }
+
+    suspend fun purgeNonWhitelistAccountsAndData(adminUid: String): Result<PurgeAccountsSummary> {
+        return runCatching {
+            val allProfiles = client.fetchAllProfilesRaw()
+            val toRemove = allProfiles.filterNot { MomiSupabaseClient.isWhitelistedAccountEmail(it.email) }
+            val keptCount = allProfiles.size - toRemove.size
+
+            if (adminUid.isNotBlank()) {
+                client.patchRows("posts", "id=like.showcase_*&user_id=neq.${urlEncode(adminUid)}", mapOf("user_id" to adminUid))
+                client.patchRows("stories", "id=like.showcase_*&user_id=neq.${urlEncode(adminUid)}", mapOf("user_id" to adminUid))
+                client.patchRows("comments", "id=like.showcase_*&user_id=neq.${urlEncode(adminUid)}", mapOf("user_id" to adminUid))
+            }
+
+            client.deleteRows("posts", "id=like.seed_post_*")
+            client.deleteRows("stories", "id=like.seed_story_*")
+            client.deleteRows("market_products", "id=like.seed_prod_*")
+
+            toRemove.forEach { target ->
+                val encUid = urlEncode(target.userId)
+                client.deleteRows("chat_messages", "sender_uid=eq.$encUid")
+                client.deleteRows("threads", "or=(user_a_id.eq.$encUid,user_b_id.eq.$encUid)")
+                client.deleteRows("pages", "owner_uid=eq.$encUid")
+                client.deleteRows("groups", "owner_uid=eq.$encUid")
+                client.deleteRows("market_orders", "or=(buyer_uid.eq.$encUid,seller_uid.eq.$encUid)")
+                client.deleteRows("credit_transactions", "or=(sender_uid.eq.$encUid,recipient_uid.eq.$encUid)")
+                client.deleteRows("content_reports", "or=(reporter_uid.eq.$encUid,target_uid.eq.$encUid)")
+                client.deleteRows("profiles", "user_id=eq.$encUid").getOrThrow()
+            }
+
+            PurgeAccountsSummary(removedProfilesCount = toRemove.size, keptProfilesCount = keptCount)
+        }
     }
 }
+
+data class PurgeAccountsSummary(
+    val removedProfilesCount: Int,
+    val keptProfilesCount: Int
+)

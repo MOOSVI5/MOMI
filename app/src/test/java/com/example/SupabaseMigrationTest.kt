@@ -515,4 +515,186 @@ class SupabaseMigrationTest {
         val overLimitRow = MomiSupabaseSchema.toPostRow(eightyMinPost.copy(videoDurationMs = 9_999_999L))
         assertEquals(4_800_000L, overLimitRow["video_duration_ms"])
     }
+
+    @Test
+    fun whitelistEmailGuardShowcaseSchemaAndCleanupSqlAreConfigured() {
+        assertTrue(MomiSupabaseClient.isWhitelistedAccountEmail("syali6511@gmail.com"))
+        assertTrue(MomiSupabaseClient.isWhitelistedAccountEmail("  SYALI6511@GMAIL.COM  "))
+        assertTrue(MomiSupabaseClient.isWhitelistedAccountEmail("hassan.ali62313@gmail.com"))
+        assertTrue(MomiSupabaseClient.isWhitelistedAccountEmail("Hassan.Ali62313@Gmail.com"))
+        assertFalse(MomiSupabaseClient.isWhitelistedAccountEmail("creator_other@gmail.com"))
+        assertFalse(MomiSupabaseClient.isWhitelistedAccountEmail(""))
+
+        val starter = com.example.data.model.ShowcaseAccount(
+            username = "zara.studio",
+            displayName = "Zara Noor",
+            avatarKey = "avatar_elena",
+            avatarUrl = "https://example.supabase.co/storage/v1/object/public/momi-avatars/starters/zara.jpg",
+            bio = "Editorial showcase",
+            category = "Style",
+            location = "Lahore",
+            isAuthorized = true,
+            isVerified = true
+        )
+        val starterRow = MomiSupabaseSchema.toShowcaseAccountRow(starter)
+        assertEquals("zara.studio", starterRow["username"])
+        assertEquals(
+            "https://example.supabase.co/storage/v1/object/public/momi-avatars/starters/zara.jpg",
+            starterRow["avatar_url"]
+        )
+        assertEquals(true, starterRow["is_verified"])
+        assertEquals(true, starterRow["is_authorized"])
+
+        val cleanupFile = listOf(
+            java.io.File("supabase/cleanup_non_whitelist.sql"),
+            java.io.File("../supabase/cleanup_non_whitelist.sql")
+        ).firstOrNull { it.exists() }
+        assertNotNull("Expected supabase/cleanup_non_whitelist.sql to exist", cleanupFile)
+        val cleanupSql = cleanupFile!!.readText()
+        assertTrue(cleanupSql.contains("syali6511@gmail.com"))
+        assertTrue(cleanupSql.contains("hassan.ali62313@gmail.com"))
+        assertTrue(cleanupSql.contains("showcase_"))
+
+        val schemaFile = listOf(
+            java.io.File("supabase/schema.sql"),
+            java.io.File("../supabase/schema.sql")
+        ).firstOrNull { it.exists() }
+        assertNotNull("Expected supabase/schema.sql to exist", schemaFile)
+        val schemaSql = schemaFile!!.readText()
+        assertTrue(schemaSql.contains("avatar_url"))
+        assertTrue(schemaSql.contains("is_verified"))
+
+        val seedFile = listOf(
+            java.io.File("supabase/seed.sql"),
+            java.io.File("../supabase/seed.sql")
+        ).firstOrNull { it.exists() }
+        assertNotNull("Expected supabase/seed.sql to exist", seedFile)
+        val seedSql = seedFile!!.readText()
+        assertFalse(seedSql.contains("creator_aria"))
+        assertFalse(seedSql.contains("seed_post_"))
+    }
+
+    @Test
+    fun twoGbVideoBucketStorageUpdatePolicyAndSyncSafetyParsersWork() {
+        val schemaFile = listOf(
+            java.io.File("supabase/schema.sql"),
+            java.io.File("../supabase/schema.sql")
+        ).firstOrNull { it.exists() }
+        val enableSyncFile = listOf(
+            java.io.File("supabase/enable_sync.sql"),
+            java.io.File("../supabase/enable_sync.sql")
+        ).firstOrNull { it.exists() }
+        assertNotNull(schemaFile)
+        assertNotNull(enableSyncFile)
+
+        val schemaSql = schemaFile!!.readText()
+        val enableSyncSql = enableSyncFile!!.readText()
+        assertTrue(schemaSql.contains("2147483648"))
+        assertTrue(enableSyncSql.contains("2147483648"))
+        assertTrue(schemaSql.contains("momi_storage_auth_update"))
+        assertTrue(schemaSql.contains("momi_storage_auth_upload"))
+
+        val emptyBundle = com.example.data.supabase.SupabaseFeedBundle()
+        assertTrue(emptyBundle.failedTables.isEmpty())
+
+        val bundle = com.example.data.supabase.SupabaseFeedBundle(
+            failedTables = setOf("posts", "notifications")
+        )
+        assertTrue("posts" in bundle.failedTables)
+        assertTrue("notifications" in bundle.failedTables)
+        assertFalse("stories" in bundle.failedTables)
+
+        val clientSource = listOf(
+            java.io.File("app/src/main/java/com/example/data/supabase/MomiSupabaseClient.kt"),
+            java.io.File("src/main/java/com/example/data/supabase/MomiSupabaseClient.kt")
+        ).firstOrNull { it.exists() }?.readText().orEmpty()
+        assertTrue(clientSource.contains("file.length() > 6_000_000L"))
+        assertTrue(clientSource.contains("internal fun parseProfileRecord("))
+        assertTrue(clientSource.contains("internal fun parseStoryRecord("))
+
+        val vmSource = listOf(
+            java.io.File("app/src/main/java/com/example/ui/viewmodel/MomiViewModel.kt"),
+            java.io.File("src/main/java/com/example/ui/viewmodel/MomiViewModel.kt")
+        ).firstOrNull { it.exists() }?.readText().orEmpty()
+        assertTrue(vmSource.contains("pendingResyncRequested"))
+        assertTrue(vmSource.contains("ensureFreshAccessToken()"))
+        assertTrue(vmSource.contains("applyRealtimeStoryEvent"))
+        assertTrue(vmSource.contains("applyRealtimeProfileEvent"))
+    }
+
+    @Test
+    fun videoNormalizationPlanNormalizesResolutionFpsCodecAndLongDuration() {
+        val landscape4k60 = com.example.util.VideoSourceMetadata(
+            widthPx = 3840,
+            heightPx = 2160,
+            rotationDegrees = 0,
+            frameRateFps = 60f,
+            bitrateBps = 18_000_000L,
+            durationMs = 45_000L,
+            mimeType = "video/avc",
+            fileSizeBytes = 100_000_000L,
+            fileExtension = "mp4"
+        )
+        val plan4k = com.example.util.MediaAssets.computeVideoNormalizationPlan(landscape4k60)
+        assertTrue(plan4k.shouldTranscode)
+        assertTrue(plan4k.needsResolutionScale)
+        assertTrue(plan4k.needsFrameRateCap)
+        assertEquals(720, plan4k.targetShortEdgePx)
+        assertEquals(720, plan4k.targetOutputHeightPx)
+        assertEquals(30f, plan4k.targetFps)
+        assertEquals(com.example.util.MediaAssets.NORMALIZED_DEFAULT_VIDEO_BITRATE, plan4k.targetBitrateBps)
+
+        val portraitHevc60 = com.example.util.VideoSourceMetadata(
+            widthPx = 1920,
+            heightPx = 1080,
+            rotationDegrees = 90,
+            frameRateFps = 60f,
+            bitrateBps = 10_000_000L,
+            durationMs = 20_000L,
+            mimeType = "video/hevc",
+            fileSizeBytes = 25_000_000L,
+            fileExtension = "mov"
+        )
+        val planPortrait = com.example.util.MediaAssets.computeVideoNormalizationPlan(portraitHevc60)
+        assertTrue(planPortrait.shouldTranscode)
+        assertTrue(planPortrait.needsResolutionScale)
+        assertTrue(planPortrait.needsFrameRateCap)
+        assertTrue(planPortrait.needsCodecOrBitrateNormalization)
+        assertEquals(720, planPortrait.targetShortEdgePx)
+        assertEquals(1280, planPortrait.targetOutputHeightPx)
+
+        val alreadyCompliant = com.example.util.VideoSourceMetadata(
+            widthPx = 720,
+            heightPx = 1280,
+            rotationDegrees = 0,
+            frameRateFps = 30f,
+            bitrateBps = 2_000_000L,
+            durationMs = 30_000L,
+            mimeType = "video/avc",
+            fileSizeBytes = 7_500_000L,
+            fileExtension = "mp4"
+        )
+        val planCompliant = com.example.util.MediaAssets.computeVideoNormalizationPlan(alreadyCompliant)
+        assertFalse(planCompliant.shouldTranscode)
+        assertFalse(planCompliant.needsResolutionScale)
+        assertFalse(planCompliant.needsFrameRateCap)
+        assertFalse(planCompliant.needsCodecOrBitrateNormalization)
+
+        val eightyMinuteVideo = com.example.util.VideoSourceMetadata(
+            widthPx = 1920,
+            heightPx = 1080,
+            rotationDegrees = 0,
+            frameRateFps = 30f,
+            bitrateBps = 8_000_000L,
+            durationMs = 4_800_000L,
+            mimeType = "video/avc",
+            fileSizeBytes = 1_500_000_000L,
+            fileExtension = "mp4"
+        )
+        val planLong = com.example.util.MediaAssets.computeVideoNormalizationPlan(eightyMinuteVideo)
+        assertTrue(planLong.shouldTranscode)
+        assertEquals(com.example.util.MediaAssets.NORMALIZED_LONG_VIDEO_BITRATE, planLong.targetBitrateBps)
+    }
 }
+
+

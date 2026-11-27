@@ -25,6 +25,9 @@ import com.example.data.model.UserProfile
 import com.example.data.model.UserWallet
 import com.example.util.StoryOverlayCodec
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -38,6 +41,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 import java.io.RandomAccessFile
 import java.net.URI
 import java.net.URLEncoder
@@ -98,7 +102,8 @@ data class SupabaseFeedBundle(
     val pageFollowedIds: Set<String> = emptySet(),
     val groups: List<MomiGroup> = emptyList(),
     val groupJoinedIds: Set<String> = emptySet(),
-    val showcaseAccounts: List<ShowcaseAccount> = emptyList()
+    val showcaseAccounts: List<ShowcaseAccount> = emptyList(),
+    val failedTables: Set<String> = emptySet()
 )
 
 object MomiSupabaseSchema {
@@ -664,9 +669,11 @@ object MomiSupabaseSchema {
         "username" to account.username.take(50),
         "display_name" to account.displayName.take(80),
         "avatar_key" to account.avatarKey.ifBlank { "avatar_elena" }.take(64),
+        "avatar_url" to account.avatarUrl,
         "bio" to account.bio.take(240),
         "category" to account.category.ifBlank { "Creator" }.take(40),
         "location" to account.location.take(120),
+        "is_verified" to account.isVerified,
         "is_authorized" to account.isAuthorized,
         "updated_by_email" to account.updatedByEmail.take(120)
     )
@@ -1686,8 +1693,8 @@ class MomiSupabaseClient(
         if (!file.exists() || file.length() <= 0L) {
             return@withContext Result.failure(IllegalArgumentException("Media file could not be read"))
         }
-        // Use chunked TUS resumable upload directly for large videos (> 45 MB) to avoid timeouts / 413s
-        if (file.length() > 45_000_000L) {
+        // Use chunked TUS resumable upload directly for medium/long videos (> 6 MB) to avoid timeouts / 413s
+        if (file.length() > 6_000_000L) {
             return@withContext uploadStorageFileResumableTus(bucket, safePath, file, contentType, accessToken)
         }
 
@@ -1724,12 +1731,14 @@ class MomiSupabaseClient(
             }
             if (!ok) {
                 android.util.Log.e("MomiSupabase", "Streaming upload $bucket/$safePath failed HTTP $code: $errBody")
-                error("Storage upload failed (HTTP $code)")
+                val detail = errBody.trim().take(160)
+                error(if (detail.isNotEmpty()) "Storage upload failed (HTTP $code): $detail" else "Storage upload failed (HTTP $code)")
             }
             "$baseUrl/storage/v1/object/public/$bucket/$safePath"
         }
         if (directResult.isSuccess) return@withContext directResult
-        if (code == 413 || code == 504 || code == 408) {
+        val directEx = directResult.exceptionOrNull()
+        if (code in setOf(408, 413, 429, 500, 502, 503, 504) || directEx is IOException) {
             return@withContext uploadStorageFileResumableTus(bucket, safePath, file, contentType, accessToken)
         }
         directResult
@@ -1777,30 +1786,45 @@ class MomiSupabaseClient(
             return builder.build()
         }
 
+        fun buildHeadReq(uploadUrl: String, bearerToken: String?): Request {
+            val builder = Request.Builder()
+                .url(uploadUrl)
+                .header("Tus-Resumable", "1.0.0")
+                .head()
+            MomiSupabaseSchema.buildAuthHeaders(anonKey, bearerToken).forEach { (k, v) ->
+                builder.header(k, v)
+            }
+            return builder.build()
+        }
+
         runCatching {
             var locationHeader: String? = null
             var createCode = 0
             var createBody = ""
-            uploadHttpClient.newCall(buildCreateReq(token)).execute().use { response ->
-                createCode = response.code
-                createBody = response.body?.string().orEmpty()
-                if (response.isSuccessful) {
-                    locationHeader = response.header("Location")
-                }
-            }
-            if (locationHeader.isNullOrBlank() && accessToken.isNullOrBlank() && createCode == 401) {
-                token = ensureFreshAccessToken(forceRefresh = true)
-                uploadHttpClient.newCall(buildCreateReq(token)).execute().use { retry ->
-                    createCode = retry.code
-                    createBody = retry.body?.string().orEmpty()
-                    if (retry.isSuccessful) {
-                        locationHeader = retry.header("Location")
+            for (attempt in 1..3) {
+                try {
+                    uploadHttpClient.newCall(buildCreateReq(token)).execute().use { response ->
+                        createCode = response.code
+                        createBody = response.body?.string().orEmpty()
+                        if (response.isSuccessful) {
+                            locationHeader = response.header("Location")
+                        }
                     }
+                    if (!locationHeader.isNullOrBlank()) break
+                    if (accessToken.isNullOrBlank() && createCode == 401) {
+                        token = ensureFreshAccessToken(forceRefresh = true)
+                    } else if (createCode !in setOf(408, 429, 500, 502, 503, 504)) {
+                        break
+                    }
+                } catch (io: IOException) {
+                    createBody = io.localizedMessage ?: "network error"
+                    if (attempt == 3) throw io
                 }
+                delay(500L * attempt)
             }
             val rawLoc = locationHeader?.trim().orEmpty()
             if (rawLoc.isEmpty()) {
-                error("Resumable video upload initialization failed (HTTP $createCode: ${createBody.take(120)})")
+                error("Resumable video upload initialization failed (HTTP $createCode: ${createBody.take(140)})")
             }
             val uploadUrl = when {
                 rawLoc.startsWith("https://", ignoreCase = true) || rawLoc.startsWith("http://", ignoreCase = true) -> rawLoc
@@ -1818,11 +1842,11 @@ class MomiSupabaseClient(
                     if (read <= 0) break
                     val chunkBytes = if (read == buffer.size) buffer else buffer.copyOf(read)
 
-                    fun buildPatchReq(bearerToken: String?): Request {
+                    fun buildPatchReq(bearerToken: String?, chunkOffset: Long): Request {
                         val builder = Request.Builder()
                             .url(uploadUrl)
                             .header("Tus-Resumable", "1.0.0")
-                            .header("Upload-Offset", offset.toString())
+                            .header("Upload-Offset", chunkOffset.toString())
                             .header("Content-Type", "application/offset+octet-stream")
                             .patch(chunkBytes.toRequestBody(TUS_OFFSET_MEDIA_TYPE))
                         MomiSupabaseSchema.buildAuthHeaders(anonKey, bearerToken).forEach { (k, v) ->
@@ -1835,23 +1859,42 @@ class MomiSupabaseClient(
                     var patchCode = 0
                     var patchErr = ""
                     var nextOffsetHeader: String? = null
-                    uploadHttpClient.newCall(buildPatchReq(token)).execute().use { response ->
-                        patchCode = response.code
-                        patchOk = response.isSuccessful
-                        nextOffsetHeader = response.header("Upload-Offset")
-                        if (!patchOk) patchErr = response.body?.string().orEmpty()
-                    }
-                    if (!patchOk && accessToken.isNullOrBlank() && patchCode == 401) {
-                        token = ensureFreshAccessToken(forceRefresh = true)
-                        uploadHttpClient.newCall(buildPatchReq(token)).execute().use { retry ->
-                            patchCode = retry.code
-                            patchOk = retry.isSuccessful
-                            nextOffsetHeader = retry.header("Upload-Offset")
-                            if (!patchOk) patchErr = retry.body?.string().orEmpty()
+                    for (attempt in 1..3) {
+                        token = ensureFreshAccessToken(explicit = accessToken, forceRefresh = (patchCode == 401))
+                        try {
+                            uploadHttpClient.newCall(buildPatchReq(token, offset)).execute().use { response ->
+                                patchCode = response.code
+                                patchOk = response.isSuccessful
+                                nextOffsetHeader = response.header("Upload-Offset")
+                                if (!patchOk) patchErr = response.body?.string().orEmpty()
+                            }
+                            if (patchOk) break
+                            if (patchCode == 409) {
+                                // Query server offset in case previous chunk partially succeeded
+                                runCatching {
+                                    uploadHttpClient.newCall(buildHeadReq(uploadUrl, token)).execute().use { headRes ->
+                                        val serverOff = headRes.header("Upload-Offset")?.toLongOrNull()
+                                        if (headRes.isSuccessful && serverOff != null && serverOff > offset) {
+                                            nextOffsetHeader = serverOff.toString()
+                                            patchOk = true
+                                        }
+                                    }
+                                }
+                                if (patchOk) break
+                            }
+                            if (accessToken.isNullOrBlank() && patchCode == 401) {
+                                token = ensureFreshAccessToken(forceRefresh = true)
+                            } else if (patchCode !in setOf(408, 429, 500, 502, 503, 504)) {
+                                break
+                            }
+                        } catch (io: IOException) {
+                            patchErr = io.localizedMessage ?: "network interruption"
+                            if (attempt == 3) throw io
                         }
+                        delay(700L * attempt)
                     }
                     if (!patchOk) {
-                        error("Resumable video upload chunk failed at offset $offset (HTTP $patchCode: ${patchErr.take(120)})")
+                        error("Resumable video upload chunk failed at offset $offset (HTTP $patchCode: ${patchErr.take(140)})")
                     }
                     offset = nextOffsetHeader?.toLongOrNull() ?: (offset + read)
                 }
@@ -2241,24 +2284,91 @@ class MomiSupabaseClient(
                 Timestamp(Date(System.currentTimeMillis() - MomiSupabaseSchema.STORY_TTL_MS))
             )
             val encStoryCutoff = URLEncoder.encode(storyCutoffIso, "UTF-8")
-            val profilesJson = fetchJsonArray("$baseUrl/rest/v1/profiles?select=*&limit=100", strict = true)
-            val postsJson = fetchJsonArray("$baseUrl/rest/v1/posts?select=*&order=created_at.desc&limit=120", strict = true)
-            val storiesJson = fetchJsonArray("$baseUrl/rest/v1/stories?select=*&created_at=gte.$encStoryCutoff&order=created_at.desc&limit=50")
-            val productsJson = fetchJsonArray("$baseUrl/rest/v1/market_products?select=*&order=created_at.desc&limit=80")
-            val merchantsJson = fetchJsonArray("$baseUrl/rest/v1/merchants?select=*&limit=80")
-            val liveStreamsJson = fetchJsonArray("$baseUrl/rest/v1/live_streams?select=*&is_live=eq.true&order=updated_at.desc&limit=30")
-            val followsJson = fetchJsonArray("$baseUrl/rest/v1/follows?select=*&limit=200")
-            val configJson = fetchJsonArray("$baseUrl/rest/v1/app_config?select=*&id=eq.monetization&limit=1")
-            val pagesJson = fetchJsonArray("$baseUrl/rest/v1/pages?select=*&order=created_at.desc&limit=60")
-            val groupsJson = fetchJsonArray("$baseUrl/rest/v1/groups?select=*&order=created_at.desc&limit=60")
-            val showcaseJson = fetchJsonArray("$baseUrl/rest/v1/showcase_accounts?select=*&limit=30")
-            val publicEngagementsJson = fetchJsonArray(
-                "$baseUrl/rest/v1/user_interactions?select=user_id,target_type,target_id&target_type=in.(LIKED_POST,VIEWED_POST)&limit=1000"
-            )
+            val uid = currentUserId.trim()
+            val encUid = if (uid.isNotEmpty()) URLEncoder.encode(uid, "UTF-8") else ""
+
+            val failedTables = mutableSetOf<String>()
+            val (
+                profilesJson,
+                postsJson,
+                storiesJson,
+                productsJson,
+                merchantsJson,
+                liveStreamsJson,
+                followsJson,
+                configJson,
+                pagesJson,
+                groupsJson,
+                showcaseJson,
+                publicEngagementsJson,
+                interJson,
+                notifJson,
+                threadsJson,
+                ordersJson,
+                walletJson,
+                txJson,
+                reportsJson,
+                pageFollowsJson,
+                groupMembersJson
+            ) = coroutineScope {
+                suspend fun fetchTracked(tableName: String, url: String, strict: Boolean = false): JSONArray {
+                    val res = fetchJsonArrayWithStatus(url, strict = strict)
+                    if (!res.succeeded) failedTables.add(tableName)
+                    return res.array
+                }
+
+                val profilesDef = async { fetchTracked("profiles", "$baseUrl/rest/v1/profiles?select=*&limit=100", strict = true) }
+                val postsDef = async { fetchTracked("posts", "$baseUrl/rest/v1/posts?select=*&order=created_at.desc&limit=120", strict = true) }
+                val storiesDef = async { fetchTracked("stories", "$baseUrl/rest/v1/stories?select=*&created_at=gte.$encStoryCutoff&order=created_at.desc&limit=50") }
+                val productsDef = async { fetchTracked("market_products", "$baseUrl/rest/v1/market_products?select=*&order=created_at.desc&limit=80") }
+                val merchantsDef = async { fetchTracked("merchants", "$baseUrl/rest/v1/merchants?select=*&limit=80") }
+                val liveStreamsDef = async { fetchTracked("live_streams", "$baseUrl/rest/v1/live_streams?select=*&is_live=eq.true&order=updated_at.desc&limit=30") }
+                val followsDef = async { fetchTracked("follows", "$baseUrl/rest/v1/follows?select=*&limit=200") }
+                val configDef = async { fetchTracked("app_config", "$baseUrl/rest/v1/app_config?select=*&id=eq.monetization&limit=1") }
+                val pagesDef = async { fetchTracked("pages", "$baseUrl/rest/v1/pages?select=*&order=created_at.desc&limit=60") }
+                val groupsDef = async { fetchTracked("groups", "$baseUrl/rest/v1/groups?select=*&order=created_at.desc&limit=60") }
+                val showcaseDef = async { fetchTracked("showcase_accounts", "$baseUrl/rest/v1/showcase_accounts?select=*&limit=50") }
+                val pubEngDef = async {
+                    fetchTracked("public_engagements", "$baseUrl/rest/v1/user_interactions?select=user_id,target_type,target_id&target_type=in.(LIKED_POST,VIEWED_POST)&limit=1000")
+                }
+
+                val interDef = if (uid.isNotEmpty()) async { fetchTracked("user_interactions", "$baseUrl/rest/v1/user_interactions?select=*&user_id=eq.$encUid&limit=400") } else null
+                val notifDef = if (uid.isNotEmpty()) async { fetchTracked("notifications", "$baseUrl/rest/v1/notifications?select=*&user_id=eq.$encUid&order=created_at.desc&limit=50") } else null
+                val threadsDef = if (uid.isNotEmpty()) async { fetchTracked("threads", "$baseUrl/rest/v1/threads?select=*&or=(user_a_id.eq.$encUid,user_b_id.eq.$encUid)&order=updated_at.desc&limit=40") } else null
+                val ordersDef = if (uid.isNotEmpty()) async { fetchTracked("market_orders", "$baseUrl/rest/v1/market_orders?select=*&or=(buyer_uid.eq.$encUid,seller_uid.eq.$encUid)&order=created_at.desc&limit=50") } else null
+                val walletDef = if (uid.isNotEmpty()) async { fetchTracked("wallets", "$baseUrl/rest/v1/wallets?select=*&user_id=eq.$encUid&limit=1") } else null
+                val txDef = if (uid.isNotEmpty()) async { fetchTracked("credit_transactions", "$baseUrl/rest/v1/credit_transactions?select=*&or=(sender_uid.eq.$encUid,recipient_uid.eq.$encUid)&order=created_at.desc&limit=40") } else null
+                val reportsDef = if (uid.isNotEmpty()) async { fetchTracked("content_reports", "$baseUrl/rest/v1/content_reports?select=*&order=created_at.desc&limit=60") } else null
+                val pageFollowsDef = if (uid.isNotEmpty()) async { fetchTracked("page_follows", "$baseUrl/rest/v1/page_follows?select=page_id&user_id=eq.$encUid&limit=120") } else null
+                val groupMembersDef = if (uid.isNotEmpty()) async { fetchTracked("group_members", "$baseUrl/rest/v1/group_members?select=group_id&user_id=eq.$encUid&limit=120") } else null
+
+                FetchBundleArrays(
+                    profiles = profilesDef.await(),
+                    posts = postsDef.await(),
+                    stories = storiesDef.await(),
+                    products = productsDef.await(),
+                    merchants = merchantsDef.await(),
+                    liveStreams = liveStreamsDef.await(),
+                    follows = followsDef.await(),
+                    config = configDef.await(),
+                    pages = pagesDef.await(),
+                    groups = groupsDef.await(),
+                    showcase = showcaseDef.await(),
+                    publicEngagements = pubEngDef.await(),
+                    interactions = interDef?.await() ?: JSONArray(),
+                    notifications = notifDef?.await() ?: JSONArray(),
+                    threads = threadsDef?.await() ?: JSONArray(),
+                    orders = ordersDef?.await() ?: JSONArray(),
+                    wallet = walletDef?.await() ?: JSONArray(),
+                    tx = txDef?.await() ?: JSONArray(),
+                    reports = reportsDef?.await() ?: JSONArray(),
+                    pageFollows = pageFollowsDef?.await() ?: JSONArray(),
+                    groupMembers = groupMembersDef?.await() ?: JSONArray()
+                )
+            }
 
             val likersMap = linkedMapOf<String, LinkedHashSet<String>>()
             val viewersMap = linkedMapOf<String, LinkedHashSet<String>>()
-            val uid = currentUserId.trim()
             val likedP = mutableSetOf<String>()
             val viewedP = mutableSetOf<String>()
             for (i in 0 until publicEngagementsJson.length()) {
@@ -2294,8 +2404,6 @@ class MomiSupabaseClient(
             var groupJoinedIds = emptySet<String>()
 
             if (uid.isNotEmpty()) {
-                val encUid = URLEncoder.encode(uid, "UTF-8")
-                val interJson = fetchJsonArray("$baseUrl/rest/v1/user_interactions?select=*&user_id=eq.$encUid&limit=400")
                 val bookmarkedP = mutableSetOf<String>()
                 val seenS = mutableSetOf<String>()
                 val likedC = mutableSetOf<String>()
@@ -2324,38 +2432,17 @@ class MomiSupabaseClient(
                 seenStories = seenS
                 likedComments = likedC
 
-                val notifJson = fetchJsonArray("$baseUrl/rest/v1/notifications?select=*&user_id=eq.$encUid&order=created_at.desc&limit=50")
                 notifications = parseNotifications(notifJson)
-
-                val threadsJson = fetchJsonArray(
-                    "$baseUrl/rest/v1/threads?select=*&or=(user_a_id.eq.$encUid,user_b_id.eq.$encUid)&order=updated_at.desc&limit=40"
-                )
                 threads = parseThreads(threadsJson)
-
-                val ordersJson = fetchJsonArray(
-                    "$baseUrl/rest/v1/market_orders?select=*&or=(buyer_uid.eq.$encUid,seller_uid.eq.$encUid)&order=created_at.desc&limit=50"
-                )
                 orders = parseMarketOrders(ordersJson)
-
-                val walletJson = fetchJsonArray("$baseUrl/rest/v1/wallets?select=*&user_id=eq.$encUid&limit=1")
                 wallet = parseWallet(walletJson)
-
-                val txJson = fetchJsonArray(
-                    "$baseUrl/rest/v1/credit_transactions?select=*&or=(sender_uid.eq.$encUid,recipient_uid.eq.$encUid)&order=created_at.desc&limit=40"
-                )
                 transactions = parseCreditTransactions(txJson)
-
-                val reportsJson = fetchJsonArray("$baseUrl/rest/v1/content_reports?select=*&order=created_at.desc&limit=60")
                 reports = parseContentReports(reportsJson)
-
-                val pageFollowsJson = fetchJsonArray("$baseUrl/rest/v1/page_follows?select=page_id&user_id=eq.$encUid&limit=120")
                 pageFollowedIds = buildSet {
                     for (i in 0 until pageFollowsJson.length()) {
                         pageFollowsJson.optJSONObject(i)?.optString("page_id")?.takeIf { it.isNotBlank() }?.let(::add)
                     }
                 }
-
-                val groupMembersJson = fetchJsonArray("$baseUrl/rest/v1/group_members?select=group_id&user_id=eq.$encUid&limit=120")
                 groupJoinedIds = buildSet {
                     for (i in 0 until groupMembersJson.length()) {
                         groupMembersJson.optJSONObject(i)?.optString("group_id")?.takeIf { it.isNotBlank() }?.let(::add)
@@ -2394,7 +2481,8 @@ class MomiSupabaseClient(
                 pageFollowedIds = pageFollowedIds,
                 groups = parseGroups(groupsJson),
                 groupJoinedIds = groupJoinedIds,
-                showcaseAccounts = parseShowcaseAccounts(showcaseJson)
+                showcaseAccounts = parseShowcaseAccounts(showcaseJson),
+                failedTables = failedTables.toSet()
             )
         }
     }
@@ -2436,7 +2524,9 @@ class MomiSupabaseClient(
         }
     }
 
-    private suspend fun fetchJsonArray(url: String, strict: Boolean = false): JSONArray {
+    private data class FetchJsonResult(val array: JSONArray, val succeeded: Boolean)
+
+    private suspend fun fetchJsonArrayWithStatus(url: String, strict: Boolean = false): FetchJsonResult {
         var token = ensureFreshAccessToken()
 
         fun buildGet(bearerToken: String?): Request {
@@ -2450,30 +2540,40 @@ class MomiSupabaseClient(
             return requestBuilder.build()
         }
 
-        var code = 0
-        var text = ""
-        var ok = false
-        httpClient.newCall(buildGet(token)).execute().use { response ->
-            code = response.code
-            text = response.body?.string().orEmpty()
-            ok = response.isSuccessful
-        }
-        if (!ok && code == 401) {
-            token = ensureFreshAccessToken(forceRefresh = true)
-            httpClient.newCall(buildGet(token)).execute().use { retry ->
-                code = retry.code
-                text = retry.body?.string().orEmpty()
-                ok = retry.isSuccessful
+        return try {
+            var code = 0
+            var text = ""
+            var ok = false
+            httpClient.newCall(buildGet(token)).execute().use { response ->
+                code = response.code
+                text = response.body?.string().orEmpty()
+                ok = response.isSuccessful
             }
-        }
-        if (!ok) {
-            if (strict) {
-                error("Supabase read failed HTTP $code: ${text.take(120)}")
+            if (!ok && code == 401) {
+                token = ensureFreshAccessToken(forceRefresh = true)
+                httpClient.newCall(buildGet(token)).execute().use { retry ->
+                    code = retry.code
+                    text = retry.body?.string().orEmpty()
+                    ok = retry.isSuccessful
+                }
             }
-            return JSONArray()
+            if (!ok) {
+                if (strict) {
+                    error("Supabase read failed HTTP $code: ${text.take(120)}")
+                }
+                FetchJsonResult(JSONArray(), succeeded = false)
+            } else {
+                val arr = if (text.trimStart().startsWith("[")) JSONArray(text) else JSONArray()
+                FetchJsonResult(arr, succeeded = true)
+            }
+        } catch (err: Exception) {
+            if (strict) throw err
+            FetchJsonResult(JSONArray(), succeeded = false)
         }
-        return if (text.trimStart().startsWith("[")) JSONArray(text) else JSONArray()
     }
+
+    private suspend fun fetchJsonArray(url: String, strict: Boolean = false): JSONArray =
+        fetchJsonArrayWithStatus(url, strict = strict).array
 
     private fun parseIsoTimestamp(raw: String?): Timestamp? {
         if (raw.isNullOrBlank() || raw == "null") return null
@@ -2509,35 +2609,37 @@ class MomiSupabaseClient(
         }
     }
 
+    internal fun parseProfileRecord(o: JSONObject): UserProfile? {
+        val uid = o.optString("user_id")
+        if (uid.isBlank()) return null
+        return UserProfile(
+            id = uid,
+            userId = uid,
+            username = o.optString("username", "momi.creator"),
+            email = o.optString("email"),
+            phone = o.optString("phone"),
+            displayName = o.optString("display_name", "Momi Creator"),
+            category = o.optString("category"),
+            bio = o.optString("bio"),
+            website = o.optString("website"),
+            avatarKey = o.optString("avatar_key", "avatar_aria"),
+            avatarUrl = o.optCleanString("avatar_url"),
+            avatarData = o.optCleanString("avatar_data"),
+            followersCount = o.optLong("followers_count", 0L),
+            followingCount = o.optLong("following_count", 0L),
+            isVerified = o.optBoolean("is_verified", false),
+            role = o.optString("role", "USER"),
+            moderationScopes = o.optStringList("moderation_scopes"),
+            assignedByEmail = o.optCleanString("assigned_by_email"),
+            partnerConsent = o.optBoolean("partner_consent", false),
+            createdAt = parseIsoTimestamp(o.optString("created_at"))
+        )
+    }
+
     private fun parseProfiles(arr: JSONArray): List<UserProfile> = buildList {
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
-            val uid = o.optString("user_id")
-            if (uid.isBlank()) continue
-            add(
-                UserProfile(
-                    id = uid,
-                    userId = uid,
-                    username = o.optString("username", "momi.creator"),
-                    email = o.optString("email"),
-                    phone = o.optString("phone"),
-                    displayName = o.optString("display_name", "Momi Creator"),
-                    category = o.optString("category"),
-                    bio = o.optString("bio"),
-                    website = o.optString("website"),
-                    avatarKey = o.optString("avatar_key", "avatar_aria"),
-                    avatarUrl = o.optCleanString("avatar_url"),
-                    avatarData = o.optCleanString("avatar_data"),
-                    followersCount = o.optLong("followers_count", 0L),
-                    followingCount = o.optLong("following_count", 0L),
-                    isVerified = o.optBoolean("is_verified", false),
-                    role = o.optString("role", "USER"),
-                    moderationScopes = o.optStringList("moderation_scopes"),
-                    assignedByEmail = o.optCleanString("assigned_by_email"),
-                    partnerConsent = o.optBoolean("partner_consent", false),
-                    createdAt = parseIsoTimestamp(o.optString("created_at"))
-                )
-            )
+            parseProfileRecord(o)?.let(::add)
         }
     }
 
@@ -2612,41 +2714,46 @@ class MomiSupabaseClient(
         }
     }
 
+    internal fun parseStoryRecord(
+        o: JSONObject,
+        cutoffMs: Long = System.currentTimeMillis() - MomiSupabaseSchema.STORY_TTL_MS
+    ): Story? {
+        val id = o.optString("id")
+        if (id.isBlank()) return null
+        val createdAt = parseIsoTimestamp(o.optString("created_at"))
+        if (createdAt != null && createdAt.toDate().time < cutoffMs) return null
+        val rawImageKey = o.optString("image_key", "img_post_coastal")
+        val bgColorKey = StoryOverlayCodec.decodeBackgroundColorKey(rawImageKey)
+        val decodedOverlay = StoryOverlayCodec.decodeCaptionWithOverlay(o.optString("caption"))
+        return Story(
+            id = id,
+            userId = o.optString("user_id"),
+            username = o.optString("username", "momi.creator"),
+            avatarKey = o.optString("avatar_key", "avatar_aria"),
+            imageKey = rawImageKey,
+            imageUrl = o.optCleanString("image_url"),
+            imageData = o.optCleanString("image_data"),
+            mediaType = o.optString("media_type", "IMAGE"),
+            videoUrl = o.optCleanString("video_url"),
+            videoData = o.optCleanString("video_data"),
+            videoDurationMs = o.optLong("video_duration_ms", 0L),
+            audioTitle = o.optString("audio_title"),
+            audioUrl = o.optCleanString("audio_url"),
+            audioData = o.optCleanString("audio_data"),
+            caption = decodedOverlay.caption,
+            backgroundColorKey = bgColorKey,
+            textOverlay = decodedOverlay.textOverlay,
+            textOverlayStyle = decodedOverlay.styleCode,
+            textOverlayPositionY = decodedOverlay.positionY,
+            createdAt = createdAt
+        )
+    }
+
     private fun parseStories(arr: JSONArray): List<Story> = buildList {
         val cutoffMs = System.currentTimeMillis() - MomiSupabaseSchema.STORY_TTL_MS
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
-            val id = o.optString("id")
-            if (id.isBlank()) continue
-            val createdAt = parseIsoTimestamp(o.optString("created_at"))
-            if (createdAt != null && createdAt.toDate().time < cutoffMs) continue
-            val rawImageKey = o.optString("image_key", "img_post_coastal")
-            val bgColorKey = StoryOverlayCodec.decodeBackgroundColorKey(rawImageKey)
-            val decodedOverlay = StoryOverlayCodec.decodeCaptionWithOverlay(o.optString("caption"))
-            add(
-                Story(
-                    id = id,
-                    userId = o.optString("user_id"),
-                    username = o.optString("username", "momi.creator"),
-                    avatarKey = o.optString("avatar_key", "avatar_aria"),
-                    imageKey = rawImageKey,
-                    imageUrl = o.optCleanString("image_url"),
-                    imageData = o.optCleanString("image_data"),
-                    mediaType = o.optString("media_type", "IMAGE"),
-                    videoUrl = o.optCleanString("video_url"),
-                    videoData = o.optCleanString("video_data"),
-                    videoDurationMs = o.optLong("video_duration_ms", 0L),
-                    audioTitle = o.optString("audio_title"),
-                    audioUrl = o.optCleanString("audio_url"),
-                    audioData = o.optCleanString("audio_data"),
-                    caption = decodedOverlay.caption,
-                    backgroundColorKey = bgColorKey,
-                    textOverlay = decodedOverlay.textOverlay,
-                    textOverlayStyle = decodedOverlay.styleCode,
-                    textOverlayPositionY = decodedOverlay.positionY,
-                    createdAt = createdAt
-                )
-            )
+            parseStoryRecord(o, cutoffMs)?.let(::add)
         }
     }
 
@@ -3052,9 +3159,11 @@ class MomiSupabaseClient(
                     username = username,
                     displayName = o.optString("display_name", username),
                     avatarKey = o.optString("avatar_key", "avatar_elena"),
+                    avatarUrl = o.optCleanString("avatar_url"),
                     bio = o.optString("bio"),
                     category = o.optString("category", "Creator"),
                     location = o.optString("location"),
+                    isVerified = o.optBoolean("is_verified", true),
                     isAuthorized = o.optBoolean("is_authorized", false),
                     updatedByEmail = o.optString("updated_by_email")
                 )
@@ -3062,7 +3171,49 @@ class MomiSupabaseClient(
         }
     }
 
+    suspend fun fetchAllProfilesRaw(): List<UserProfile> = withContext(Dispatchers.IO) {
+        if (!isConfigured()) return@withContext emptyList()
+        runCatching {
+            val arr = fetchJsonArray("$baseUrl/rest/v1/profiles?select=*&limit=250", strict = true)
+            parseProfiles(arr)
+        }.getOrDefault(emptyList())
+    }
+
+    private data class FetchBundleArrays(
+        val profiles: JSONArray,
+        val posts: JSONArray,
+        val stories: JSONArray,
+        val products: JSONArray,
+        val merchants: JSONArray,
+        val liveStreams: JSONArray,
+        val follows: JSONArray,
+        val config: JSONArray,
+        val pages: JSONArray,
+        val groups: JSONArray,
+        val showcase: JSONArray,
+        val publicEngagements: JSONArray,
+        val interactions: JSONArray,
+        val notifications: JSONArray,
+        val threads: JSONArray,
+        val orders: JSONArray,
+        val wallet: JSONArray,
+        val tx: JSONArray,
+        val reports: JSONArray,
+        val pageFollows: JSONArray,
+        val groupMembers: JSONArray
+    )
+
     companion object {
+        val KEEP_WHITELIST_EMAILS = setOf(
+            "syali6511@gmail.com",
+            "hassan.ali62313@gmail.com"
+        )
+
+        fun isWhitelistedAccountEmail(email: String?): Boolean {
+            val clean = email?.trim()?.lowercase().orEmpty()
+            return clean.isNotEmpty() && clean in KEEP_WHITELIST_EMAILS
+        }
+
         private val refreshMutex = Mutex()
         private val _sessionFlow = MutableStateFlow<SupabaseAuthSession?>(null)
         val sessionFlow: StateFlow<SupabaseAuthSession?> = _sessionFlow.asStateFlow()

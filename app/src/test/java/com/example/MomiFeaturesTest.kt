@@ -125,4 +125,18 @@ class MomiFeaturesTest {
             assertTrue(persona.caption.isNotBlank())
         }
     }
+
+    @Test
+    fun eightyMinuteDurationFormatting_and_showcaseAccountDefaults_work() {
+        assertEquals("1:20:00", MediaAssets.formatDuration(4_800_000L))
+        assertEquals("1:05", MediaAssets.formatDuration(65_000L))
+
+        val starter = com.example.data.model.ShowcaseAccount(
+            username = "elena.maris",
+            displayName = "Elena Maris"
+        )
+        assertTrue(starter.isVerified)
+        assertNull(starter.avatarUrl)
+    }
 }
+
